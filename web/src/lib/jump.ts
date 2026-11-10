@@ -42,3 +42,14 @@ export function citeJump(current: string | null, at: number, exact: boolean): { 
     moved: parseJump(current)?.sec !== focus.sec,
   };
 }
+
+/**
+ * 点了纪要里没标时间的出处、打开纪要时，网址里不该再留着 ?t=，免得刷新页面又跳回转写里原来那句。
+ * 返回去掉 t 以后的参数（其他参数不动）；本来就没有 t 时返回 undefined，不用改网址。
+ */
+export function withoutJump(params: URLSearchParams): URLSearchParams | undefined {
+  if (!params.has("t")) return undefined;
+  const next = new URLSearchParams(params);
+  next.delete("t");
+  return next;
+}

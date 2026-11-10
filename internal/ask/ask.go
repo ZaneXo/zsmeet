@@ -302,6 +302,8 @@ func lineSize(l Line) int {
 
 // Build 把几场会议排成材料，总共不超过大约 budget 个字。排在前面的会议先放；
 // 每场分到剩下的字数除以剩下的场数，用不完的留给后面的会议。
+// 一场会议里先放纪要再放转写片段；有转写片段时纪要最多用掉这场的一半（转写用不完一半时纪要可以多用），
+// 免得纪要太长把搜到的转写片段全挤掉。
 // 每一行都编一个号，比如 [M1-3]（第 1 场会议的第 3 行），回答时用它标出处。
 func Build(sources []Source, budget int) Material {
 	out := Material{Snippets: map[string]Snippet{}}
@@ -313,7 +315,9 @@ func Build(sources []Source, budget int) Material {
 		k := out.Meetings + 1
 		n := 0
 		used := 0
-		add := func(l Line) bool {
+		// 下一行前面要不要先放「……」隔开转写片段：等下一行放得下才放，免得材料末尾多一个
+		sep := false
+		add := func(l Line, limit int) bool {
 			text := truncate(l.Text, maxLineChars)
 			id := fmt.Sprintf("M%d-%d", k, n+1)
 			var line string
@@ -331,8 +335,15 @@ func Build(sources []Source, budget int) Material {
 				line = fmt.Sprintf("[%s] %s %s：%s", id, transcript.Clock(l.Start), l.Speaker, text)
 			}
 			size := utf8.RuneCountInString(line) + 1
-			if used+size > share {
+			if sep {
+				size += utf8.RuneCountInString(segmentGap)
+			}
+			if used+size > limit {
 				return false
+			}
+			if sep {
+				part.WriteString(segmentGap)
+				sep = false
 			}
 			used += size
 			n++
@@ -342,23 +353,30 @@ func Build(sources []Source, budget int) Material {
 		}
 		header := fmt.Sprintf("## 会议 M%d：%s（%s）\n", k, src.Title, src.Date.Format("2006-01-02 15:04"))
 		used += utf8.RuneCountInString(header)
-		full := false
+		minutesLimit := share
+		if len(src.Transcript) > 0 {
+			need := 0
+			for _, seg := range src.Transcript {
+				for _, l := range seg {
+					need += lineSize(l)
+				}
+				need += 3
+			}
+			minutesLimit = max(share/2, share-need)
+		}
 		for _, l := range src.Minutes {
-			if !add(l) {
-				full = true
+			if !add(l, minutesLimit) {
 				break
 			}
 		}
-		for j, seg := range src.Transcript {
+		full := false
+		for _, seg := range src.Transcript {
 			if full {
 				break
 			}
-			if j > 0 || len(src.Minutes) > 0 {
-				part.WriteString("……\n")
-				used += 3
-			}
+			sep = n > 0
 			for _, l := range seg {
-				if !add(l) {
+				if !add(l, share) {
 					full = true
 					break
 				}
@@ -370,13 +388,16 @@ func Build(sources []Source, budget int) Material {
 		}
 		out.Meetings++
 		b.WriteString(header)
-		b.WriteString(strings.TrimSuffix(part.String(), "……\n"))
+		b.WriteString(part.String())
 		b.WriteString("\n")
 		left -= used
 	}
 	out.Text = strings.TrimSpace(b.String())
 	return out
 }
+
+// 材料里隔开同一场会议的两段转写片段
+const segmentGap = "……\n"
 
 func truncate(s string, n int) string {
 	s = strings.TrimSpace(s)

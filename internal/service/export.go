@@ -30,7 +30,7 @@ func (s *Service) Export(ctx context.Context, id uuid.UUID, what, format string)
 		return ExportFile{}, err
 	}
 	names := transcript.ParseNames(m.Speakers)
-	info := exportInfo(m, names)
+	info := export.Info(m.CreatedAt, int(m.DurationSec), m.OwnerName, names)
 
 	var markdown, suffix string
 	switch what {
@@ -79,36 +79,6 @@ func (s *Service) Export(ctx context.Context, id uuid.UUID, what, format string)
 		return ExportFile{Name: fileName(m.Title, suffix, "docx"), ContentType: docxType, Data: data}, nil
 	}
 	return ExportFile{}, invalid("不认识的导出格式：%s", format)
-}
-
-// exportInfo 是导出文件开头的几行会议信息。
-func exportInfo(m Meeting, names transcript.Names) []string {
-	info := []string{"时间：" + m.CreatedAt.Local().Format("2006年1月2日 15:04")}
-	if m.DurationSec > 0 {
-		info = append(info, "时长："+humanDuration(int(m.DurationSec)))
-	}
-	info = append(info, "创建者："+m.OwnerName)
-	if len(names) > 0 {
-		var list []string
-		for idx := range 100 {
-			if name := names[idx]; name != "" {
-				list = append(list, name)
-			}
-		}
-		info = append(info, "说话人："+strings.Join(list, "、"))
-	}
-	return info
-}
-
-func humanDuration(sec int) string {
-	switch {
-	case sec >= 3600:
-		return fmt.Sprintf("%d 小时 %d 分钟", sec/3600, sec%3600/60)
-	case sec >= 60:
-		return fmt.Sprintf("%d 分钟", sec/60)
-	default:
-		return fmt.Sprintf("%d 秒", sec)
-	}
 }
 
 // fileName 用会议标题起文件名：去掉文件名里不能用的字符，太长的截短。

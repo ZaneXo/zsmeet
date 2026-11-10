@@ -19,6 +19,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/minutes"
 	"github.com/ZaneXo/zsmeet/internal/queue"
 	"github.com/ZaneXo/zsmeet/internal/search"
+	"github.com/ZaneXo/zsmeet/internal/storage"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
@@ -28,7 +29,7 @@ const (
 	// 一场录音最多标记多少个重点
 	MaxMarks = 500
 	// 单场会议上传的总大小上限
-	maxUploadBytes = 4 << 30
+	maxUploadBytes = storage.MaxRecordingBytes
 	maxTitleChars  = 200
 )
 

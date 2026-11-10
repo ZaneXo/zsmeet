@@ -64,7 +64,7 @@ func Open(t *testing.T, name string) *pgxpool.Pool {
 			t.Fatal(err)
 		}
 	}
-	if _, err := pool.Exec(ctx, "TRUNCATE users, sessions, settings, meetings, river_job, login_failures CASCADE"); err != nil {
+	if _, err := pool.Exec(ctx, "TRUNCATE users, sessions, settings, meetings, river_job, login_failures, feishu_link CASCADE"); err != nil {
 		t.Fatal(err)
 	}
 	return pool

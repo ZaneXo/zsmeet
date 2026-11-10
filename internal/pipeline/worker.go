@@ -20,6 +20,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/audio"
 	"github.com/ZaneXo/zsmeet/internal/config"
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/feishu"
 	"github.com/ZaneXo/zsmeet/internal/models"
 	"github.com/ZaneXo/zsmeet/internal/queue"
 	"github.com/ZaneXo/zsmeet/internal/settings"
@@ -65,14 +66,22 @@ type Worker struct {
 	// 识别很吃 CPU，同一时间只让一场会议做；写纪要主要在等大模型，不受这个限制
 	cpu    sync.Mutex
 	engine recognizer
+
+	// 往队列里加任务（纪要生成后自动发飞书）。Start 里设成正在跑的 River 客户端
+	queue *queue.Client
+	// 飞书开放平台的地址（为空时按设置里选的飞书 / Lark），和按凭证复用的客户端
+	feishuBase string
+	feishu     *feishu.Pool
 }
 
 func newWorker(pool *pgxpool.Pool, cfg config.Config, store *storage.Local, st *settings.Store) *Worker {
 	return &Worker{
-		pool:     pool,
-		q:        sqlc.New(pool),
-		store:    store,
-		settings: st,
+		pool:       pool,
+		q:          sqlc.New(pool),
+		store:      store,
+		settings:   st,
+		feishuBase: cfg.FeishuBaseURL,
+		feishu:     &feishu.Pool{},
 		ensureModels: func(ctx context.Context, progress func(done, total int64)) error {
 			return models.Ensure(ctx, cfg.ModelsDir, cfg.ModelMirror, progress)
 		},
@@ -95,11 +104,15 @@ func Start(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, store *st
 	workers := river.NewWorkers()
 	river.AddWorker(workers, w)
 	river.AddWorker(workers, &reaper{pool: pool, store: w.store})
+	river.AddWorker(workers, &shareWorker{w: w})
+	river.AddWorker(workers, &importWorker{w: w})
 
 	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
-			queue.QueueProcess:     {MaxWorkers: cfg.Concurrency},
-			queue.QueueMaintenance: {MaxWorkers: 1},
+			queue.QueueProcess:      {MaxWorkers: cfg.Concurrency},
+			queue.QueueMaintenance:  {MaxWorkers: 1},
+			queue.QueueFeishu:       {MaxWorkers: 1},
+			queue.QueueFeishuImport: {MaxWorkers: 1},
 		},
 		Workers: workers,
 		// River 认为超过这个时间还在跑的任务是卡死的，会重新执行，所以必须比最长的会议处理时间长
@@ -119,6 +132,10 @@ func Start(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, store *st
 	if err := client.Start(ctx); err != nil {
 		return nil, err
 	}
+	w.queue = client
+
+	// 打开了「自动导入飞书会议的录制」时，在后台和飞书保持长连接，接收会议结束的事件
+	go (&listener{w: w}).run(ctx)
 
 	// 提前把模型备好，第一场会议就不用等下载
 	go func() {
@@ -158,6 +175,12 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.ProcessArgs]) er
 		return nil
 	case errors.Is(err, errSuperseded), errors.Is(context.Cause(ctx), errSuperseded):
 		log.Info("会议已被新的任务接手，当前任务退出")
+		// 处理期间会议被彻底删除了：这一轮刚存下的录音没有记录指着它，不删就一直留着
+		bg := context.WithoutCancel(ctx)
+		if _, err := w.q.GetMeeting(bg, id); errors.Is(err, pgx.ErrNoRows) {
+			w.store.Remove(storage.AudioKey(id))
+			w.store.RemoveChunks(id)
+		}
 		return nil
 	case errors.Is(ctx.Err(), context.Canceled):
 		// worker 被要求退出。把错误交还给 River，它会在 worker 重新起来后再执行这个任务

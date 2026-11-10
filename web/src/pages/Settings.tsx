@@ -6,17 +6,19 @@ import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { User } from "../api/client";
 import { Button, Card, Field, Input, Notice, Select, Spinner } from "../components/ui";
+import { FeishuSettingsSection } from "./FeishuSettings";
 import { MembersSection } from "./Members";
 
 const SECTIONS = [
   { key: "account", label: "账号", adminOnly: false },
   { key: "members", label: "成员", adminOnly: true },
   { key: "llm", label: "大模型", adminOnly: true },
+  { key: "feishu", label: "飞书", adminOnly: true },
 ] as const;
 
 type SectionKey = (typeof SECTIONS)[number]["key"];
 
-/** 设置页。左边是分区：自己的账号人人都有，成员和大模型只有管理员能看到。 */
+/** 设置页。左边是分区：自己的账号人人都有，成员、大模型和飞书只有管理员能看到。 */
 export function SettingsPage({ user }: { user: User }) {
   const params = useParams();
   const isAdmin = user.role === "admin";
@@ -51,6 +53,7 @@ export function SettingsPage({ user }: { user: User }) {
           {current === "account" && <AccountSection user={user} />}
           {current === "members" && <MembersSection me={user} />}
           {current === "llm" && <LLMSettingsCard />}
+          {current === "feishu" && <FeishuSettingsSection />}
         </div>
       </div>
     </div>
@@ -71,7 +74,7 @@ function AccountSection({ user }: { user: User }) {
           <dd>{user.role === "admin" ? "管理员" : "成员"}</dd>
         </dl>
         {user.role !== "admin" && (
-          <p className="mt-3 text-[13px] leading-relaxed text-muted">成员、大模型这些团队配置由管理员统一管理。</p>
+          <p className="mt-3 text-[13px] leading-relaxed text-muted">成员、大模型、飞书这些团队配置由管理员统一管理。</p>
         )}
       </Card>
       <ChangePasswordCard email={user.email} />

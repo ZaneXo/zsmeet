@@ -48,7 +48,10 @@ export function App() {
     <Shell user={data.user}>
       <Routes>
         <Route path="/" element={<MeetingsPage />} />
-        <Route path="/meetings/:id" element={<MeetingDetailPage user={data.user} llmReady={data.llm_ready} isAdmin={data.user.role === "admin"} />} />
+        <Route
+          path="/meetings/:id"
+          element={<MeetingDetailPage user={data.user} llmReady={data.llm_ready} feishuReady={data.feishu_ready} isAdmin={data.user.role === "admin"} />}
+        />
         <Route path="/record" element={<RecordPage user={data.user} />} />
         <Route path="/settings/:section?" element={<SettingsPage user={data.user} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

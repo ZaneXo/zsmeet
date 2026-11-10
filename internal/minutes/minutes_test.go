@@ -255,21 +255,51 @@ func TestUnwrapFenceWithoutClosingLine(t *testing.T) {
 }
 
 func TestRenameSpeakers(t *testing.T) {
+	none := transcript.Names{}
 	content := "- 说话人 1 提出一期只做网页端；说话人 2（王悦）同意。说话人 12 没来。说话人1也提到预算。"
-	got := RenameSpeakers(content, map[int][2]string{0: {"", "张敏"}, 1: {"", "王悦"}})
+	got := RenameSpeakers(content, none, map[int][2]string{0: {"", "张敏"}, 1: {"", "王悦"}})
 	want := "- 张敏 提出一期只做网页端；王悦同意。说话人 12 没来。张敏也提到预算。"
 	if got != want {
 		t.Errorf("第一次起名字：\n得到 %s\n想要 %s", got, want)
 	}
 	// 再改一次名字：纪要里的旧名字也换掉；只有一个字的旧名字不换
-	if got := RenameSpeakers("张敏说好。", map[int][2]string{0: {"张敏", "张敏敏"}}); got != "张敏敏说好。" {
+	if got := RenameSpeakers("张敏说好。", transcript.Names{0: "张敏"}, map[int][2]string{0: {"张敏", "张敏敏"}}); got != "张敏敏说好。" {
 		t.Errorf("旧名字要换成新名字：%s", got)
 	}
-	if got := RenameSpeakers("王悦说好。", map[int][2]string{1: {"王", "王悦悦"}}); got != "王悦说好。" {
+	if got := RenameSpeakers("王悦说好。", transcript.Names{1: "王"}, map[int][2]string{1: {"王", "王悦悦"}}); got != "王悦说好。" {
 		t.Errorf("一个字的旧名字不换，免得误伤正文：%s", got)
 	}
 	// 去掉名字：纪要不动
-	if got := RenameSpeakers("张敏说好。", map[int][2]string{0: {"张敏", ""}}); got != "张敏说好。" {
+	if got := RenameSpeakers("张敏说好。", transcript.Names{0: "张敏"}, map[int][2]string{0: {"张敏", ""}}); got != "张敏说好。" {
 		t.Errorf("去掉名字时纪要不动：%s", got)
+	}
+}
+
+// 互换、重名、英文名：不能把两个人改成一个人，也不能改到别的词里去。
+func TestRenameSpeakersAmbiguous(t *testing.T) {
+	before := transcript.Names{0: "张敏", 1: "王悦"}
+	content := "张敏提出一期只做网页端，王悦同意。"
+	// 一次互换两个人：一次换完，不串
+	if got := RenameSpeakers(content, before, map[int][2]string{0: {"张敏", "王悦"}, 1: {"王悦", "张敏"}}); got != "王悦提出一期只做网页端，张敏同意。" {
+		t.Errorf("一次互换两个人的名字：%s", got)
+	}
+	// 一个一个改：第一步改完和别人重名了，不动正文，留给人手动改
+	if got := RenameSpeakers(content, before, map[int][2]string{0: {"张敏", "王悦"}}); got != content {
+		t.Errorf("新名字和别人重名时不改正文：%s", got)
+	}
+	// 同一个人被分成了两个说话人、都叫张敏：改其中一个时不知道正文里的张敏是哪个，不改
+	if got := RenameSpeakers(content, transcript.Names{0: "张敏", 2: "张敏"}, map[int][2]string{2: {"张敏", "李雷"}}); got != content {
+		t.Errorf("旧名字不止一个人用时不改正文：%s", got)
+	}
+	// 「说话人 N」换成的名字不会再被当成旧名字换一遍：0 号原来叫错成张敏，一次改成「0 是王悦、1 是张敏」
+	if got := RenameSpeakers("张敏说A。说话人 2说B。", transcript.Names{0: "张敏"}, map[int][2]string{0: {"张敏", "王悦"}, 1: {"", "张敏"}}); got != "王悦说A。张敏说B。" {
+		t.Errorf("一次改完，不能换两遍：%s", got)
+	}
+	if got := RenameSpeakers("张敏说A。", transcript.Names{0: "张敏"}, map[int][2]string{0: {"张敏", "张敏华"}}); got != "张敏华说A。" {
+		t.Errorf("新名字里包含旧名字：%s", got)
+	}
+	// 英文名要整个单词对上
+	if got := RenameSpeakers("Li 说 Linux 要升级，Li。", transcript.Names{0: "Li"}, map[int][2]string{0: {"Li", "Li Wei"}}); got != "Li Wei 说 Linux 要升级，Li Wei。" {
+		t.Errorf("英文名：%s", got)
 	}
 }

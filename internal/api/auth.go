@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -14,6 +16,7 @@ type StatusOutput struct {
 		Initialized bool   `json:"initialized" doc:"是否已经创建过管理员；没有的话显示初始化向导"`
 		User        *User  `json:"user,omitempty" doc:"当前登录的用户，没登录时没有这个字段"`
 		LLMReady    bool   `json:"llm_ready" doc:"是否配置了大模型；只对登录用户有意义"`
+		FeishuReady bool   `json:"feishu_ready" doc:"是否配置了飞书（可以把纪要发到飞书）；只对登录用户有意义"`
 		Version     string `json:"version"`
 	}
 }
@@ -42,6 +45,11 @@ func (h *Handlers) Status(ctx context.Context, _ *struct{}) (*StatusOutput, erro
 			return nil, toHTTP(err)
 		}
 		out.Body.LLMReady = cfg.Ready()
+		fs, err := h.svc.FeishuSettings(ctx)
+		if err != nil {
+			return nil, toHTTP(err)
+		}
+		out.Body.FeishuReady = fs.Ready()
 	}
 	return out, nil
 }
@@ -90,9 +98,26 @@ var loginOp = huma.Operation{
 	Tags:        []string{"账号"},
 }
 
+// 认不出访问者 IP 时只提醒一次
+var warnNoForwardedFor, warnUntrustedProxy sync.Once
+
 func (h *Handlers) Login(ctx context.Context, in *LoginInput) (*UserOutput, error) {
-	ip, _ := ctx.Value(clientIPKey{}).(string)
-	user, err := h.svc.Login(ctx, in.Body.Email, in.Body.Password, ip)
+	cl, _ := ctx.Value(clientIPKey{}).(requester)
+	switch cl.why {
+	case noForwardedFor:
+		warnNoForwardedFor.Do(func() {
+			slog.Warn("登录请求来自信任的反向代理，但没有带能用的 X-Forwarded-For，这样的登录只按邮箱限制输错密码的次数，不按 IP。" +
+				"如果前面有反向代理，请让它加上 X-Forwarded-For（Nginx：proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for）；" +
+				"在服务器本机直接打开 zsmeet 的话可以不管")
+		})
+	case untrustedProxy:
+		warnUntrustedProxy.Do(func() {
+			slog.Warn("登录请求带着 X-Forwarded-For，从不在 ZSMEET_TRUSTED_PROXIES 里的内网地址连过来，多半是前面的反向代理没有配置成可信。"+
+				"这样的登录只按邮箱限制输错密码的次数，不按 IP。请把这个地址加进 ZSMEET_TRUSTED_PROXIES，"+
+				"并且只让反向代理访问 zsmeet 的端口（docker compose 里设 ZSMEET_PORT=127.0.0.1:8080）", "peer", cl.peer)
+		})
+	}
+	user, err := h.svc.Login(ctx, in.Body.Email, in.Body.Password, cl.ip)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

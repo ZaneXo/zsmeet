@@ -228,6 +228,399 @@
         },
         "type": "object"
       },
+      "FeishuChat": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "FeishuChatsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "default_chat_id": {
+            "description": "管理员设的默认群",
+            "type": "string"
+          },
+          "items": {
+            "description": "应用机器人所在的群",
+            "items": {
+              "$ref": "#/components/schemas/FeishuChat"
+            },
+            "type": "array"
+          },
+          "with_doc": {
+            "description": "默认是否同时导入成飞书文档",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "default_chat_id",
+          "with_doc"
+        ],
+        "type": "object"
+      },
+      "FeishuImport": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "detail": {
+            "description": "没导入的原因",
+            "type": "string"
+          },
+          "feishu_meeting_id": {
+            "description": "飞书的会议 ID",
+            "type": "string"
+          },
+          "meeting_id": {
+            "description": "导入后的会议",
+            "type": "string"
+          },
+          "owner_name": {
+            "description": "会议组织者（导入后的会议记在他名下）",
+            "type": "string"
+          },
+          "status": {
+            "description": "waiting 等飞书生成录制；imported 已导入；skipped 没有录制；failed 出错了",
+            "enum": [
+              "waiting",
+              "imported",
+              "skipped",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "topic": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "feishu_meeting_id",
+          "topic",
+          "status",
+          "detail",
+          "owner_name",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "FeishuSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "app_secret_set": {
+            "description": "是否已经保存了 App Secret；Secret 本身不会返回",
+            "type": "boolean"
+          },
+          "auto_push": {
+            "description": "纪要第一次生成后自动发到默认的群",
+            "type": "boolean"
+          },
+          "chat_id": {
+            "description": "默认发到的群",
+            "type": "string"
+          },
+          "chat_name": {
+            "type": "string"
+          },
+          "console_url": {
+            "description": "这个应用在飞书开发者后台的页面，没填 App ID 时为空",
+            "type": "string"
+          },
+          "doc_folder": {
+            "description": "文档放在哪个云空间文件夹（token）；为空时放在应用自己的云空间",
+            "type": "string"
+          },
+          "domain": {
+            "description": "飞书，或者飞书国际版 Lark",
+            "enum": [
+              "feishu",
+              "lark"
+            ],
+            "type": "string"
+          },
+          "import_recordings": {
+            "description": "自动导入飞书会议的云录制",
+            "type": "boolean"
+          },
+          "link_share": {
+            "description": "公司里拿到文档链接的人都能看",
+            "type": "boolean"
+          },
+          "site_url": {
+            "description": "zsmeet 的访问地址，卡片上的链接用它拼",
+            "type": "string"
+          },
+          "with_doc": {
+            "description": "发到群里时同时导入成飞书文档",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "domain",
+          "app_id",
+          "app_secret_set",
+          "site_url",
+          "chat_id",
+          "chat_name",
+          "auto_push",
+          "with_doc",
+          "doc_folder",
+          "link_share",
+          "import_recordings",
+          "console_url"
+        ],
+        "type": "object"
+      },
+      "FeishuSettingsInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "description": "清空表示不用飞书了，其他配置一起清掉",
+            "maxLength": 100,
+            "type": "string"
+          },
+          "app_secret": {
+            "description": "留空表示沿用已保存的（App ID 没变时）",
+            "maxLength": 200,
+            "type": "string"
+          },
+          "auto_push": {
+            "type": "boolean"
+          },
+          "chat_id": {
+            "maxLength": 100,
+            "type": "string"
+          },
+          "chat_name": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "doc_folder": {
+            "description": "云空间文件夹的链接或者 token",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "domain": {
+            "enum": [
+              "feishu",
+              "lark"
+            ],
+            "type": "string"
+          },
+          "import_recordings": {
+            "type": "boolean"
+          },
+          "link_share": {
+            "type": "boolean"
+          },
+          "site_url": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "with_doc": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "app_id"
+        ],
+        "type": "object"
+      },
+      "FeishuShare": {
+        "additionalProperties": false,
+        "properties": {
+          "chat_id": {
+            "description": "发到的群，只导入文档时为空",
+            "type": "string"
+          },
+          "chat_name": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "doc_url": {
+            "description": "导入的飞书文档",
+            "type": "string"
+          },
+          "error": {
+            "description": "失败的原因",
+            "type": "string"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "minutes_version": {
+            "description": "发的是第几版纪要",
+            "format": "int32",
+            "type": "integer"
+          },
+          "requested_by_name": {
+            "description": "谁发的；纪要生成后自动发的为空",
+            "type": "string"
+          },
+          "status": {
+            "description": "pending 发送中；done 已发送；failed 失败",
+            "enum": [
+              "pending",
+              "done",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "with_doc": {
+            "description": "是否同时导入成飞书文档",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "chat_id",
+          "chat_name",
+          "with_doc",
+          "minutes_version",
+          "status",
+          "error",
+          "doc_url",
+          "requested_by_name",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "FeishuSharesOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "最新的在前，最多 20 条",
+            "items": {
+              "$ref": "#/components/schemas/FeishuShare"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "FeishuStatusOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "description": "出错的原因",
+            "type": "string"
+          },
+          "imports": {
+            "description": "最近自动导入的飞书会议（只有组织者是成员的会议）",
+            "items": {
+              "$ref": "#/components/schemas/FeishuImport"
+            },
+            "type": "array"
+          },
+          "last_event": {
+            "description": "最近一次处理飞书会议的情况",
+            "type": "string"
+          },
+          "last_event_at": {
+            "description": "最近一次处理飞书会议的时间",
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "description": "接收飞书会议事件的长连接：没开、连接中、已连上、出错了",
+            "enum": [
+              "off",
+              "connecting",
+              "connected",
+              "error"
+            ],
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "detail",
+          "last_event",
+          "imports"
+        ],
+        "type": "object"
+      },
+      "FeishuTestInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "maxLength": 100,
+            "type": "string"
+          },
+          "app_secret": {
+            "description": "留空表示沿用已保存的（App ID 没变时）",
+            "maxLength": 200,
+            "type": "string"
+          },
+          "domain": {
+            "enum": [
+              "feishu",
+              "lark"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id"
+        ],
+        "type": "object"
+      },
+      "FeishuTestOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "bot_name": {
+            "description": "应用机器人的名字",
+            "type": "string"
+          },
+          "chats": {
+            "description": "机器人所在的群",
+            "items": {
+              "$ref": "#/components/schemas/FeishuChat"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "bot_name",
+          "chats"
+        ],
+        "type": "object"
+      },
       "Invite": {
         "additionalProperties": false,
         "properties": {
@@ -1082,9 +1475,28 @@
         ],
         "type": "object"
       },
+      "ShareToFeishuInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "chat_id": {
+            "description": "发到哪个群；为空表示只导入成文档",
+            "maxLength": 100,
+            "type": "string"
+          },
+          "with_doc": {
+            "description": "同时导入成飞书文档",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "StatusOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "feishu_ready": {
+            "description": "是否配置了飞书（可以把纪要发到飞书）；只对登录用户有意义",
+            "type": "boolean"
+          },
           "initialized": {
             "description": "是否已经创建过管理员；没有的话显示初始化向导",
             "type": "boolean"
@@ -1104,6 +1516,7 @@
         "required": [
           "initialized",
           "llm_ready",
+          "feishu_ready",
           "version"
         ],
         "type": "object"
@@ -1475,6 +1888,43 @@
         "summary": "查看一个邀请或重置链接",
         "tags": [
           "账号"
+        ]
+      }
+    },
+    "/api/feishu/chats": {
+      "get": {
+        "description": "应用机器人所在的群。没有配置飞书时返回 409。",
+        "operationId": "list-feishu-chats",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuChatsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "可以发纪要的飞书群",
+        "tags": [
+          "飞书"
         ]
       }
     },
@@ -2333,6 +2783,109 @@
         ]
       }
     },
+    "/api/meetings/{id}/feishu": {
+      "get": {
+        "operationId": "list-feishu-shares",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuSharesOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "这场会议发到飞书的记录",
+        "tags": [
+          "飞书"
+        ]
+      },
+      "post": {
+        "description": "把当前版本的纪要推到飞书群（卡片上是摘要、待办和链接），可以同时导入成飞书文档。后台发送，状态看 GET 同一个地址。创建者和管理员可以发。",
+        "operationId": "share-to-feishu",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShareToFeishuInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuShare"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "把纪要发到飞书",
+        "tags": [
+          "飞书"
+        ]
+      }
+    },
     "/api/meetings/{id}/marks": {
       "put": {
         "description": "网页录音过程中每标记一次就调用一次，整份替换。会议交给后台处理以后再调用返回 409。",
@@ -2946,6 +3499,179 @@
         "summary": "给成员生成重置密码的链接",
         "tags": [
           "成员"
+        ]
+      }
+    },
+    "/api/settings/feishu": {
+      "get": {
+        "operationId": "get-feishu-settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuSettings"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "飞书配置",
+        "tags": [
+          "设置"
+        ]
+      },
+      "put": {
+        "description": "全团队共用一个飞书自建应用。App Secret 加密后保存。",
+        "operationId": "put-feishu-settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeishuSettingsInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuSettings"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "保存飞书配置",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
+    "/api/settings/feishu/status": {
+      "get": {
+        "description": "接收会议事件的长连接连上没有、最近一次收到的会议、最近自动导入的会议。",
+        "operationId": "get-feishu-status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuStatusOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "飞书运行情况",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
+    "/api/settings/feishu/test": {
+      "post": {
+        "description": "用提交的凭证（不需要先保存）读机器人的信息和它所在的群。凭证不对、没开机器人能力、缺权限时返回 422，detail 里是原因。",
+        "operationId": "test-feishu",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeishuTestInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuTestOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "测试飞书应用能不能连上",
+        "tags": [
+          "设置"
         ]
       }
     },

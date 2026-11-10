@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -47,6 +48,7 @@ func (s *Service) RenameSpeakers(ctx context.Context, user sqlc.User, id uuid.UU
 			return errNotAllowed
 		}
 		current := transcript.ParseNames(m.Speakers)
+		before := maps.Clone(current)
 		renamed := map[int][2]string{}
 		for idx, name := range clean {
 			if current[idx] == name {
@@ -73,13 +75,14 @@ func (s *Service) RenameSpeakers(ctx context.Context, user sqlc.User, id uuid.UU
 		if err := q.SetMeetingSpeakers(ctx, sqlc.SetMeetingSpeakersParams{ID: id, Speakers: raw}); err != nil {
 			return err
 		}
-		// 当前纪要里的称呼跟着改。正在处理的会议不改：新生成的纪要会直接用名字
-		if m.CurrentVersion > 0 && m.Status != "queued" && m.Status != "processing" {
+		// 当前纪要里的称呼跟着改。正在处理的会议也改：后台这一轮如果写出了新的纪要，
+		// 写完时会对照最新的名字再换一遍；没写出来（失败了、没配大模型）的话，现在这一版就是对的
+		if m.CurrentVersion > 0 {
 			mv, err := q.GetMinutesVersion(ctx, sqlc.GetMinutesVersionParams{MeetingID: id, Version: m.CurrentVersion})
 			if err != nil {
 				return err
 			}
-			if content := minutes.RenameSpeakers(mv.Content, renamed); content != mv.Content {
+			if content := minutes.RenameSpeakers(mv.Content, before, renamed); content != mv.Content {
 				if _, err := q.AddMinutesVersion(ctx, sqlc.AddMinutesVersionParams{
 					MeetingID: id, Content: content, Source: "edit", Template: "", AuthorID: &user.ID,
 				}); err != nil {

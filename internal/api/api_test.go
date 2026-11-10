@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ZaneXo/zsmeet/internal/config"
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/password"
 	"github.com/ZaneXo/zsmeet/internal/queue"
@@ -73,7 +76,12 @@ func newServer(t *testing.T) *client {
 	// 和线上同一份会话配置，只是存在内存里
 	sess := NewSessions(memstore.New(), false)
 
-	server := httptest.NewServer(NewHandler(svc, sess, web.FS(), "test"))
+	// 和线上的默认值一样只信本机：测试客户端从本机连过来，相当于前面有一个同机的反向代理
+	proxies, err := config.ParseTrustedProxies("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(svc, sess, web.FS(), proxies, "test"))
 	t.Cleanup(server.Close)
 	c := &client{t: t, base: server.URL, pool: pool, svc: svc, store: store}
 	return c.another()
@@ -860,17 +868,18 @@ func TestLoginRateLimit(t *testing.T) {
 	email, good := admin["email"].(string), admin["password"].(string)
 	stranger := c.another()
 
+	const strangerIP = "198.51.100.20"
 	for i := range 5 {
-		if r := stranger.loginFrom("", email, "wrong-pass-"+fmt.Sprint(i)); r.Status != 401 {
+		if r := stranger.loginFrom(strangerIP, email, "wrong-pass-"+fmt.Sprint(i)); r.Status != 401 {
 			t.Fatalf("第 %d 次输错应该是 401：%d %s", i+1, r.Status, r.Raw)
 		}
 	}
-	locked := stranger.loginFrom("", email, good)
+	locked := stranger.loginFrom(strangerIP, email, good)
 	if locked.Status != 429 || !strings.Contains(locked.Raw, "分钟后再试") {
 		t.Fatalf("错满 5 次以后，密码对了也要先等一等：%d %s", locked.Status, locked.Raw)
 	}
 	// 同一个 IP 上别人的账号照常登录（这个 IP 才错了 5 次）
-	if r := stranger.loginFrom("", "member@example.com", "member-pass-123"); r.Status != 200 {
+	if r := stranger.loginFrom(strangerIP, "member@example.com", "member-pass-123"); r.Status != 200 {
 		t.Errorf("别的账号不该受影响：%d %s", r.Status, r.Raw)
 	}
 
@@ -898,18 +907,138 @@ func TestLoginRateLimit(t *testing.T) {
 	if r := attacker.loginFrom("198.51.100.7", "member@example.com", "member-pass-123"); r.Status != 200 {
 		t.Errorf("别的 IP 不受影响：%d %s", r.Status, r.Raw)
 	}
+
+	// 登录成功不算在 IP 头上：公司出口只有一个 IP，大家都登录也不会被锁
+	office := c.another()
+	for i := range 25 {
+		if r := office.loginFrom("198.51.100.30", "member@example.com", "member-pass-123"); r.Status != 200 {
+			t.Fatalf("第 %d 次登录成功也被算进了 IP 的次数：%d %s", i+1, r.Status, r.Raw)
+		}
+	}
+}
+
+// 同一个邮箱同时来一大批错误的登录：只有上限那么多个去校验密码（401），其余直接拒绝（429），
+// 不会因为「先查锁、再算哈希、最后才记次数」让一批请求全都溜过去。
+// 锁着的时候密码对了也不行；在服务器上执行 zsmeet unlock、或者用重置密码的链接设了新密码，就能马上登录。
+func TestLoginConcurrentLimit(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	email, good := admin["email"].(string), admin["password"].(string)
+
+	lockOut := func() {
+		t.Helper()
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		codes := map[int]int{}
+		for i := range 50 {
+			wg.Go(func() {
+				raw, _ := json.Marshal(obj{"email": email, "password": fmt.Sprint("wrong-pass-", i)})
+				resp, err := http.Post(c.base+"/api/login", "application/json", bytes.NewReader(raw))
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				resp.Body.Close()
+				mu.Lock()
+				codes[resp.StatusCode]++
+				mu.Unlock()
+			})
+		}
+		wg.Wait()
+		if codes[401] != 5 || codes[429] != 45 {
+			t.Fatalf("50 个同时输错的请求，应该正好 5 个 401、45 个 429：%v", codes)
+		}
+		if r := c.another().loginFrom("", email, good); r.Status != 429 {
+			t.Fatalf("锁着的时候密码对了也要等：%d %s", r.Status, r.Raw)
+		}
+	}
+
+	lockOut()
+	if _, _, err := c.svc.UnlockLogin(t.Context(), " Admin@Example.com "); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.another().loginFrom("", email, good); r.Status != 200 {
+		t.Fatalf("zsmeet unlock 以后应该能登录：%d %s", r.Status, r.Raw)
+	}
+	if _, _, err := c.svc.UnlockLogin(t.Context(), "nobody@example.com"); err == nil {
+		t.Error("没有这个账号时 unlock 应该报错")
+	}
+
+	lockOut()
+	token, _, err := c.svc.RecoverResetLink(t.Context(), email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visitor := c.another()
+	visitor.want(visitor.do("POST", "/api/account-links/accept", obj{"token": token, "password": "brand-new-pass-1"}), 200)
+	if r := c.another().loginFrom("", email, "brand-new-pass-1"); r.Status != 200 {
+		t.Fatalf("用重置链接设了新密码以后应该能登录：%d %s", r.Status, r.Raw)
+	}
+}
+
+// IP 被锁住以后，换着邮箱来试也不会在表里给每个邮箱留一条记录。
+func TestLockedIPLeavesNoRows(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	attacker := c.another()
+	for i := range 20 {
+		attacker.loginFrom("203.0.113.66", fmt.Sprintf("guess%d@example.com", i), "wrong-password-1")
+	}
+	var before int
+	if err := c.pool.QueryRow(t.Context(), "SELECT count(*) FROM login_failures").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 30 {
+		if r := attacker.loginFrom("203.0.113.66", fmt.Sprintf("spray%d@example.com", i), "wrong-password-1"); r.Status != 429 {
+			t.Fatalf("IP 锁住以后要直接拒绝：%d", r.Status)
+		}
+	}
+	var after int
+	if err := c.pool.QueryRow(t.Context(), "SELECT count(*) FROM login_failures").Scan(&after); err != nil || after != before {
+		t.Errorf("被拒绝的登录不该再留下记录：之前 %d 条，之后 %d 条 %v", before, after, err)
+	}
 }
 
 func TestClientIP(t *testing.T) {
-	for _, tc := range []struct{ remote, forwarded, want string }{
-		{"203.0.113.9:5000", "1.2.3.4", "203.0.113.9"},              // 外网直连：不信 X-Forwarded-For
-		{"127.0.0.1:5000", "", "127.0.0.1"},                         // 本机直连
-		{"172.18.0.3:5000", "203.0.113.9, 10.0.0.2", "203.0.113.9"}, // 代理在内网：取最右边的外网地址
-		{"127.0.0.1:5000", "spoofed, 198.51.100.7", "198.51.100.7"}, // 认不出的跳过
-		{"10.0.0.5:5000", "192.168.1.20, 10.0.0.2", "192.168.1.20"}, // 全是内网地址：取最初发请求的人
-		{"[::1]:5000", "2001:db8::1", "2001:db8::1"},
+	loopback, err := config.ParseTrustedProxies("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	docker, err := config.ParseTrustedProxies("172.16.0.0/12, 10.0.0.2 ::1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseTrustedProxies("10.0.0.0/8,not-an-ip"); err == nil {
+		t.Error("写错的 ZSMEET_TRUSTED_PROXIES 应该报错")
+	}
+	for _, tc := range []struct {
+		remote    string
+		forwarded []string
+		proxies   []netip.Prefix
+		want      string
+	}{
+		{"203.0.113.9:5000", []string{"1.2.3.4"}, loopback, "203.0.113.9"},                // 不是信任的代理：不信 X-Forwarded-For
+		{"192.168.1.20:5000", []string{"1.2.3.4"}, loopback, ""},                          // 内网地址带着这个头：多半是没配成可信的代理，不按 IP 计数
+		{"192.168.1.20:5000", nil, loopback, "192.168.1.20"},                              // 内网直连
+		{"127.0.0.1:5000", []string{"203.0.113.9"}, loopback, "203.0.113.9"},              // 同机的代理
+		{"127.0.0.1:5000", []string{"1.2.3.4, 192.168.1.20"}, loopback, "192.168.1.20"},   // 左边是访问者自己填的，取代理加的最右边那个
+		{"127.0.0.1:5000", []string{"1.2.3.4", "192.168.1.20"}, loopback, "192.168.1.20"}, // 多行 X-Forwarded-For 按顺序拼起来
+		{"127.0.0.1:5000", []string{"203.0.113.9, 127.0.0.1"}, loopback, "203.0.113.9"},   // 跳过信任的代理
+		{"127.0.0.1:5000", []string{"127.0.0.1"}, loopback, "127.0.0.1"},                  // 在本机通过代理打开
+		{"127.0.0.1:5000", []string{"203.0.113.9:4711"}, loopback, "203.0.113.9"},         // 带端口的
+		{"127.0.0.1:5000", nil, loopback, ""},                                             // 代理没带：不按 IP 计数
+		{"127.0.0.1:5000", []string{"unknown"}, loopback, ""},                             // 认不出来的
+		{"127.0.0.1:5000", []string{"198.51.100.7, unknown"}, loopback, ""},
+		{"[::1]:5000", []string{"2001:db8::1"}, loopback, "2001:db8::1"},
+		{"172.18.0.1:5000", []string{"192.168.1.20"}, docker, "192.168.1.20"},         // Docker 网桥的网关连过来
+		{"172.18.0.1:5000", []string{"203.0.113.9, 10.0.0.2"}, docker, "203.0.113.9"}, // 两层代理
+		{"172.18.0.1:5000", []string{"10.0.0.3"}, docker, "10.0.0.3"},                 // 只信写明的那一个地址，别的内网地址不跳过
+		{"172.18.0.1:5000", []string{"172.20.0.5, 172.18.0.9"}, docker, "172.20.0.5"}, // 全在信任的网段里：取最左边的
+		{"127.0.0.1:5000", []string{"203.0.113.9"}, docker, ""},                       // 设了 ZSMEET_TRUSTED_PROXIES 就不再默认信本机：当成没配好的代理
+		{"127.0.0.1:5000", nil, docker, "127.0.0.1"},                                  // 不带这个头的本机请求按本机地址计数
+		{"203.0.113.9:5000", []string{"1.2.3.4"}, docker, "203.0.113.9"},              // 外网地址带着这个头：不信，按它自己的地址计数
 	} {
-		if got := clientIP(tc.remote, tc.forwarded); got != tc.want {
+		if got, _ := clientIP(tc.remote, tc.forwarded, tc.proxies); got != tc.want {
 			t.Errorf("clientIP(%q, %q) = %q，想要 %q", tc.remote, tc.forwarded, got, tc.want)
 		}
 	}

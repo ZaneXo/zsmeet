@@ -53,5 +53,13 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, putLLMSettingsOp, h.PutLLMSettings)
 	huma.Register(api, testLLMSettingsOp, h.TestLLMSettings)
 	huma.Register(api, listLLMModelsOp, h.ListLLMModels)
+
+	huma.Register(api, getFeishuSettingsOp, h.GetFeishuSettings)
+	huma.Register(api, putFeishuSettingsOp, h.PutFeishuSettings)
+	huma.Register(api, testFeishuOp, h.TestFeishu)
+	huma.Register(api, getFeishuStatusOp, h.GetFeishuStatus)
+	huma.Register(api, listFeishuChatsOp, h.ListFeishuChats)
+	huma.Register(api, shareToFeishuOp, h.ShareToFeishu)
+	huma.Register(api, listFeishuSharesOp, h.ListFeishuShares)
 	// gen:routes —— make api 会在这一行上面插入新接口，别删
 }

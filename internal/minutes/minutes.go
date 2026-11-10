@@ -348,26 +348,80 @@ func unwrapFence(s string) string {
 // 纪要里对说话人的称呼：「说话人 3」，后面可能跟着括号里的名字「说话人 3（张敏）」
 var speakerRef = regexp.MustCompile(`说话人 ?(\d+)(（[^）\n]{0,20}）|\([^)\n]{0,20}\))?`)
 
-// RenameSpeakers 把纪要里的「说话人 N」（连同后面括号里的名字）换成起的名字。
-// renamed 是这次改的：编号 → [以前的名字, 新名字]。以前就起过名字的，纪要里的旧名字也换成新的；
-// 但只有一个字的旧名字不换，免得把正文里的同一个字也换掉。返回换完的纪要。
-func RenameSpeakers(content string, renamed map[int][2]string) string {
-	content = speakerRef.ReplaceAllStringFunc(content, func(ref string) string {
-		m := speakerRef.FindStringSubmatch(ref)
-		n, err := strconv.Atoi(m[1])
-		if err != nil {
-			return ref
-		}
-		if names, ok := renamed[n-1]; ok && names[1] != "" {
-			return names[1]
-		}
-		return ref
-	})
-	for _, names := range renamed {
-		old, now := names[0], names[1]
-		if now != "" && old != now && utf8.RuneCountInString(old) >= 2 {
-			content = strings.ReplaceAll(content, old, now)
+// RenameSpeakers 把纪要里对说话人的称呼换成新名字。before 是这次改之前各说话人的名字，
+// renamed 是这次改的：编号 → [以前的名字, 新名字]。
+//
+// 「说话人 N」（连同后面括号里大模型猜的名字）换成新名字。以前起过的名字在正文里也换成新名字，
+// 但有歧义的不换，留给人手动改：旧名字只有一个字、旧名字不止一个说话人在用、新名字和别的说话人重名。
+// 所有替换一次做完，一次互换两个人的名字也不会串；英文名要整个单词对上（Li 不会换掉 Linux 里的 Li）。
+// 返回换完的纪要。
+func RenameSpeakers(content string, before transcript.Names, renamed map[int][2]string) string {
+	after := make(transcript.Names, len(before))
+	for idx, name := range before {
+		after[idx] = name
+	}
+	for idx, names := range renamed {
+		if names[1] == "" {
+			delete(after, idx)
+		} else {
+			after[idx] = names[1]
 		}
 	}
-	return content
+	uses := func(names transcript.Names, name string) int {
+		n := 0
+		for _, v := range names {
+			if v == name {
+				n++
+			}
+		}
+		return n
+	}
+	pairs := map[string]string{}
+	for _, names := range renamed {
+		old, now := names[0], names[1]
+		if now == "" || old == now || utf8.RuneCountInString(old) < 2 || uses(before, old) > 1 || uses(after, now) > 1 {
+			continue
+		}
+		pairs[old] = now
+	}
+
+	// 「说话人 N」和旧名字放在同一个正则里一次换完：换上去的新名字不会再被当成旧名字换一遍
+	alts := []string{speakerRef.String()}
+	olds := make([]string, 0, len(pairs))
+	for old := range pairs {
+		olds = append(olds, old)
+	}
+	// 长的名字先比，免得「张敏敏」里的「张敏」先被换掉
+	slices.SortFunc(olds, func(a, b string) int { return len(b) - len(a) })
+	for _, old := range olds {
+		p := regexp.QuoteMeta(old)
+		if first, _ := utf8.DecodeRuneInString(old); isASCIIWord(first) {
+			p = `\b` + p
+		}
+		if last, _ := utf8.DecodeLastRuneInString(old); isASCIIWord(last) {
+			p += `\b`
+		}
+		alts = append(alts, p)
+	}
+	re := regexp.MustCompile(strings.Join(alts, "|"))
+	return re.ReplaceAllStringFunc(content, func(m string) string {
+		if ref := speakerRef.FindStringSubmatch(m); ref != nil && ref[0] == m {
+			n, err := strconv.Atoi(ref[1])
+			if err != nil {
+				return m
+			}
+			if names, ok := renamed[n-1]; ok && names[1] != "" {
+				return names[1]
+			}
+			return m
+		}
+		if now, ok := pairs[m]; ok {
+			return now
+		}
+		return m
+	})
+}
+
+func isASCIIWord(r rune) bool {
+	return r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_')
 }

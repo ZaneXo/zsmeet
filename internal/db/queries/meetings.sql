@@ -56,8 +56,10 @@ DELETE FROM upload_chunks WHERE meeting_id = $1;
 
 -- name: QueueMeeting :one
 -- 入队：换一个新的 run_id。from_status 限定允许从哪些状态入队。
+-- 顺带清掉「要重新识别」的标记：重试、重新生成纪要只用现有的转写（重新转写在同一个事务里再标上）。
+-- 不然重新识别失败（比如录音没了）以后，每次重试都会再识别一遍、再失败，纪要也一直改不了
 UPDATE meetings
-SET status = 'queued', stage = '', progress = 0, error = '',
+SET status = 'queued', stage = '', progress = 0, error = '', retranscribe = false,
     run_id = sqlc.arg('run_id'), run_by = sqlc.narg('run_by'), heartbeat_at = NULL, requeues = 0,
     template = coalesce(sqlc.narg('template'), template),
     updated_at = now()
@@ -180,9 +182,22 @@ WHERE id = $1 AND deleted_at IS NOT NULL
 RETURNING *;
 
 -- name: PurgeMeeting :one
--- 彻底删除回收站里的一场会议（转写、纪要、分片记录跟着级联删掉），返回录音文件的位置，由调用方删文件
-DELETE FROM meetings WHERE id = $1 AND deleted_at IS NOT NULL
-RETURNING audio_key;
+-- 彻底删除回收站里的一场会议（转写、纪要、分片记录、发到飞书的记录跟着级联删掉），返回录音文件的位置，由调用方删文件。
+-- 从飞书会议导入的，导入记录留着（同一场会议不会再被导入一次），但会议主题清掉
+WITH gone AS (
+    DELETE FROM meetings WHERE meetings.id = $1 AND meetings.deleted_at IS NOT NULL
+    RETURNING meetings.id, meetings.audio_key
+), imported AS (
+    SELECT feishu_imports.topic FROM feishu_imports WHERE feishu_imports.meeting_id IN (SELECT gone.id FROM gone) AND feishu_imports.topic <> ''
+), forget AS (
+    UPDATE feishu_imports SET topic = '', detail = '', updated_at = now()
+    WHERE feishu_imports.meeting_id IN (SELECT gone.id FROM gone)
+), forget_note AS (
+    -- 设置页面上「最近一次」提到这场会议的话，也不再写主题
+    UPDATE feishu_link SET last_event = '一场飞书会议的录制导入以后被彻底删除了'
+    WHERE EXISTS (SELECT 1 FROM imported WHERE strpos(feishu_link.last_event, imported.topic) > 0)
+)
+SELECT gone.audio_key FROM gone;
 
 -- name: ListTrash :many
 -- 回收站里的会议，最近删的在前。owner 不为空时只列这个人创建的

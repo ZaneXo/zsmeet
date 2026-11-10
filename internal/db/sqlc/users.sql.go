@@ -12,6 +12,19 @@ import (
 	"github.com/google/uuid"
 )
 
+const clearLockedIPs = `-- name: ClearLockedIPs :execrows
+DELETE FROM login_failures WHERE key LIKE 'ip:%' AND locked_until > now()
+`
+
+// 解开所有被锁住的 IP（zsmeet unlock 用：反向代理没配好时所有人共用一个 IP，被锁住就谁都登录不了）
+func (q *Queries) ClearLockedIPs(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, clearLockedIPs)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const clearLoginFailures = `-- name: ClearLoginFailures :exec
 DELETE FROM login_failures WHERE key = $1
 `
@@ -64,6 +77,16 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.SessionEpoch,
 	)
 	return i, err
+}
+
+const deleteEmptyLoginFailure = `-- name: DeleteEmptyLoginFailure :exec
+DELETE FROM login_failures WHERE key = $1 AND failures = 0 AND (locked_until IS NULL OR locked_until <= now())
+`
+
+// 退回到 0、又没锁着的记录直接删掉，表不会越来越大
+func (q *Queries) DeleteEmptyLoginFailure(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, deleteEmptyLoginFailure, key)
+	return err
 }
 
 const deleteStaleLoginFailures = `-- name: DeleteStaleLoginFailures :exec
@@ -128,31 +151,43 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 	return i, err
 }
 
-const loginLockedUntil = `-- name: LoginLockedUntil :many
-SELECT locked_until FROM login_failures
-WHERE key = ANY($1::text[]) AND locked_until > now()
-ORDER BY locked_until DESC
+const lockLoginIfOverLimit = `-- name: LockLoginIfOverLimit :exec
+UPDATE login_failures
+SET locked_until = now() + make_interval(secs => $1::float8)
+WHERE key = $2
+  AND failures >= $3::int
+  AND window_start >= now() - make_interval(secs => $1::float8)
+  AND (locked_until IS NULL OR locked_until <= now())
 `
 
-// 这几个 key 里还锁着的，锁到什么时候（最晚的排第一）
-func (q *Queries) LoginLockedUntil(ctx context.Context, keys []string) ([]*time.Time, error) {
-	rows, err := q.db.Query(ctx, loginLockedUntil, keys)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []*time.Time
-	for rows.Next() {
-		var locked_until *time.Time
-		if err := rows.Scan(&locked_until); err != nil {
-			return nil, err
-		}
-		items = append(items, locked_until)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+type LockLoginIfOverLimitParams struct {
+	WindowSecs  float64
+	Key         string
+	MaxFailures int32
+}
+
+// 密码不对：占上的那次就算一次失败。窗口里的次数到了上限就锁住一段时间
+func (q *Queries) LockLoginIfOverLimit(ctx context.Context, arg LockLoginIfOverLimitParams) error {
+	_, err := q.db.Exec(ctx, lockLoginIfOverLimit, arg.WindowSecs, arg.Key, arg.MaxFailures)
+	return err
+}
+
+const loginRetryAt = `-- name: LoginRetryAt :one
+SELECT greatest(locked_until, window_start + make_interval(secs => $1::float8))::timestamptz
+FROM login_failures WHERE key = $2
+`
+
+type LoginRetryAtParams struct {
+	WindowSecs float64
+	Key        string
+}
+
+// 被拒绝的登录什么时候能再试：锁着的看锁到什么时候，还没锁（有校验还没出结果）的看窗口什么时候结束
+func (q *Queries) LoginRetryAt(ctx context.Context, arg LoginRetryAtParams) (time.Time, error) {
+	row := q.db.QueryRow(ctx, loginRetryAt, arg.WindowSecs, arg.Key)
+	var column_1 time.Time
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const putSetting = `-- name: PutSetting :exec
@@ -170,27 +205,43 @@ func (q *Queries) PutSetting(ctx context.Context, arg PutSettingParams) error {
 	return err
 }
 
-const recordLoginFailure = `-- name: RecordLoginFailure :exec
+const releaseLoginAttempt = `-- name: ReleaseLoginAttempt :exec
+UPDATE login_failures SET failures = greatest(failures - 1, 0) WHERE key = $1
+`
+
+// 把占上的一次退回去（密码对了，或者这次登录没真正校验）
+func (q *Queries) ReleaseLoginAttempt(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, releaseLoginAttempt, key)
+	return err
+}
+
+const reserveLoginAttempt = `-- name: ReserveLoginAttempt :one
 INSERT INTO login_failures (key, failures, window_start) VALUES ($1, 1, now())
 ON CONFLICT (key) DO UPDATE SET
     failures     = CASE WHEN login_failures.window_start < now() - make_interval(secs => $2::float8)
                         THEN 1 ELSE login_failures.failures + 1 END,
     window_start = CASE WHEN login_failures.window_start < now() - make_interval(secs => $2::float8)
                         THEN now() ELSE login_failures.window_start END,
-    locked_until = CASE WHEN login_failures.window_start >= now() - make_interval(secs => $2::float8)
-                         AND login_failures.failures + 1 >= $3::int
-                        THEN now() + make_interval(secs => $2::float8)
-                        ELSE login_failures.locked_until END
+    locked_until = CASE WHEN login_failures.window_start < now() - make_interval(secs => $2::float8)
+                        THEN NULL ELSE login_failures.locked_until END
+WHERE (login_failures.locked_until IS NULL OR login_failures.locked_until <= now())
+  AND (login_failures.window_start < now() - make_interval(secs => $2::float8)
+       OR login_failures.failures < $3::int)
+RETURNING failures
 `
 
-type RecordLoginFailureParams struct {
+type ReserveLoginAttemptParams struct {
 	Key         string
 	WindowSecs  float64
 	MaxFailures int32
 }
 
-// 记一次登录失败。上一次计数已经超出时间窗口就从 1 重新数；数到上限就锁住一段时间
-func (q *Queries) RecordLoginFailure(ctx context.Context, arg RecordLoginFailureParams) error {
-	_, err := q.db.Exec(ctx, recordLoginFailure, arg.Key, arg.WindowSecs, arg.MaxFailures)
-	return err
+// 校验密码之前先占一次尝试：在时间窗口里把计数加一（上一次计数已经超出窗口就从 1 重新数）。
+// 锁着、或者窗口里的次数已经到上限（包括正在校验、还没出结果的）时什么都不改，也不返回行，这次登录直接拒绝。
+// 判断和加一在同一条语句里，同时来的请求在这一行上排队，不会都看到「还没到上限」
+func (q *Queries) ReserveLoginAttempt(ctx context.Context, arg ReserveLoginAttemptParams) (int32, error) {
+	row := q.db.QueryRow(ctx, reserveLoginAttempt, arg.Key, arg.WindowSecs, arg.MaxFailures)
+	var failures int32
+	err := row.Scan(&failures)
+	return failures, err
 }

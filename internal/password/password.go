@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -23,11 +24,22 @@ const (
 
 var b64 = base64.RawStdEncoding
 
+// 算一次哈希要占 19 MiB 内存、跑满一个核。同时算的个数不超过 CPU 核数（容器限了核数的话按限的算）：
+// 再多也不会更快，只会让一波同时来的登录请求把内存吃光。多出来的排队等着
+var slots = make(chan struct{}, max(runtime.GOMAXPROCS(0), 1))
+
+// idKey 是排着队的 argon2.IDKey。
+func idKey(plain, salt []byte, t, m uint32, p uint8, n uint32) []byte {
+	slots <- struct{}{}
+	defer func() { <-slots }()
+	return argon2.IDKey(plain, salt, t, m, p, n)
+}
+
 // Hash 返回 PHC 格式的哈希，参数和盐都在字符串里，以后调参数不影响旧密码。
 func Hash(plain string) string {
 	salt := make([]byte, saltLen)
 	rand.Read(salt)
-	key := argon2.IDKey([]byte(plain), salt, passes, memoryKiB, threads, keyLen)
+	key := idKey([]byte(plain), salt, passes, memoryKiB, threads, keyLen)
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, memoryKiB, passes, threads, b64.EncodeToString(salt), b64.EncodeToString(key))
 }
@@ -57,6 +69,6 @@ func Verify(plain, encoded string) (bool, error) {
 	if err != nil || len(want) == 0 {
 		return false, errFormat
 	}
-	got := argon2.IDKey([]byte(plain), salt, t, m, p, uint32(len(want)))
+	got := idKey([]byte(plain), salt, t, m, p, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }

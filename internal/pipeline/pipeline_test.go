@@ -81,6 +81,10 @@ func newEnv(t *testing.T) *env {
 	engine := &fakeEngine{}
 	w.ensureModels = func(context.Context, func(done, total int64)) error { return nil }
 	w.newEngine = func() (recognizer, error) { return engine, nil }
+	// 测试里不跑 River：加进队列的任务留在表里，由测试自己检查、自己执行
+	if w.queue, err = queue.NewInserter(pool); err != nil {
+		t.Fatal(err)
+	}
 
 	user, err := q.CreateUser(t.Context(), sqlc.CreateUserParams{Email: "admin@example.com", Name: "张敏", PasswordHash: "x", Role: "admin"})
 	if err != nil {
@@ -437,7 +441,8 @@ func TestMarksReachMinutesPrompt(t *testing.T) {
 	}
 }
 
-// 重新转写：旧的转写在新的存好之前一直留着；识别失败时旧的转写和纪要都还在，标记也留着（重试时还会重新识别）。
+// 重新转写：旧的转写在新的存好之前一直留着；识别失败时旧的转写和纪要都还在，「重试」只重新写纪要，不再识别；
+// 以前给说话人起的名字跟着人走。
 func TestRetranscribeKeepsOldTranscriptUntilReplaced(t *testing.T) {
 	e := newEnv(t)
 	e.llm(nil)
@@ -447,14 +452,20 @@ func TestRetranscribeKeepsOldTranscriptUntilReplaced(t *testing.T) {
 	}
 	id := args.MeetingID
 	ctx := t.Context()
-	setOld := func() {
+	// 换成旧模型的转写（一整段），起过名字；再要求重新转写（和网页上一样：先入队，再标上要重新识别）
+	retranscribe := func() queue.ProcessArgs {
 		t.Helper()
 		if _, err := e.pool.Exec(ctx, `UPDATE transcripts SET segments = '[{"start":0,"end":1,"speaker":0,"text":"旧的转写。"}]' WHERE meeting_id = $1`, id); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := e.pool.Exec(ctx, `UPDATE meetings SET speakers = '{"0": "张敏", "3": "对不上的人"}' WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+		a := e.enqueue(id, "done")
 		if err := e.q.MarkRetranscribe(ctx, id); err != nil {
 			t.Fatal(err)
 		}
+		return a
 	}
 	text := func() string {
 		t.Helper()
@@ -465,25 +476,63 @@ func TestRetranscribeKeepsOldTranscriptUntilReplaced(t *testing.T) {
 		return string(raw)
 	}
 
-	// 成功：重新识别，新的转写替换旧的，标记清掉
-	setOld()
-	if err := e.work(e.enqueue(id, "done")); err != nil {
+	// 成功：重新识别，新的转写替换旧的，标记清掉；名字对到新的编号上，对不上的去掉
+	if err := e.work(retranscribe()); err != nil {
 		t.Fatal(err)
 	}
-	if m := e.meeting(id); m.Status != "done" || m.Retranscribe || e.engine.transcribed.Load() != 2 || !strings.Contains(text(), "一期只做网页端") {
+	m := e.meeting(id)
+	if m.Status != "done" || m.Retranscribe || e.engine.transcribed.Load() != 2 || !strings.Contains(text(), "一期只做网页端") {
 		t.Fatalf("应该重新识别并替换旧的转写：状态 %s，标记 %v，识别 %d 次，转写 %s", m.Status, m.Retranscribe, e.engine.transcribed.Load(), text())
+	}
+	if string(m.Speakers) != `{"0": "张敏"}` {
+		t.Errorf("名字要跟着人走，对不上的去掉：%s", m.Speakers)
 	}
 
 	// 失败（录音文件没了）：旧的转写还在，标记也还在
-	setOld()
-	m := e.meeting(id)
+	a := retranscribe()
 	if err := os.Remove(e.w.store.Path(m.AudioKey)); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.work(e.enqueue(id, "done")); err == nil {
+	if err := e.work(a); err == nil {
 		t.Fatal("录音没了，重新识别应该失败")
 	}
 	if m := e.meeting(id); m.Status != "failed" || !m.Retranscribe || !strings.Contains(text(), "旧的转写") || m.CurrentVersion == 0 {
 		t.Errorf("失败时旧的转写和纪要都要留着：状态 %s，标记 %v，版本 %d，转写 %s", m.Status, m.Retranscribe, m.CurrentVersion, text())
+	}
+	// 「重试」：不再识别，用旧的转写重新写纪要，会议回到完成
+	if err := e.work(e.enqueue(id, "failed")); err != nil {
+		t.Fatal(err)
+	}
+	if m := e.meeting(id); m.Status != "done" || m.Retranscribe || e.engine.transcribed.Load() != 2 {
+		t.Errorf("重试只重新写纪要：状态 %s，标记 %v，识别 %d 次", m.Status, m.Retranscribe, e.engine.transcribed.Load())
+	}
+}
+
+// 写纪要期间有人给说话人改了名字：存下来的纪要用最新的名字。
+func TestRenameWhileWritingMinutes(t *testing.T) {
+	e := newEnv(t)
+	args := e.upload(wav())
+	var id uuid.UUID
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 大模型写的时候，有人在网页上把说话人 1 改成了张敏
+		e.pool.Exec(r.Context(), `UPDATE meetings SET speakers = '{"0": "张敏"}' WHERE id = $1`, id)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": "x", "object": "chat.completion", "model": "test",
+			"choices": []map[string]any{{"index": 0, "finish_reason": "stop",
+				"message": map[string]any{"role": "assistant", "content": "## 摘要\n说话人 1 提出一期只做网页端。"}}},
+		})
+	}))
+	t.Cleanup(server.Close)
+	if err := e.w.settings.SaveLLM(t.Context(), settings.LLM{BaseURL: server.URL + "/v1", Model: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	id = args.MeetingID
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	mv, err := e.q.GetMinutesVersion(t.Context(), sqlc.GetMinutesVersionParams{MeetingID: id, Version: 1})
+	if err != nil || mv.Content != "## 摘要\n张敏 提出一期只做网页端。" {
+		t.Errorf("纪要要用最新的名字：%q %v", mv.Content, err)
 	}
 }

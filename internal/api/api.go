@@ -8,8 +8,8 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -65,10 +65,12 @@ type Handlers struct {
 	svc  *service.Service
 	sess *scs.SessionManager
 	api  huma.API
+	// 前面的反向代理的地址，取访问者 IP 时用
+	proxies []netip.Prefix
 }
 
 // newHandlers 在 mux 上注册所有接口。svc 和 sess 传 nil 时只能用来导出接口文档。
-func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionManager, version string) *Handlers {
+func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionManager, proxies []netip.Prefix, version string) *Handlers {
 	cfg := huma.DefaultConfig("zsmeet", version)
 	cfg.Info.Description = "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login 以外都需要先登录。"
 	cfg.OpenAPIPath = "/api/openapi"
@@ -80,23 +82,24 @@ func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionMana
 		"session": {Type: "apiKey", In: "cookie", Name: CookieName},
 	}
 
-	h := &Handlers{svc: svc, sess: sess}
+	h := &Handlers{svc: svc, sess: sess, proxies: proxies}
 	h.api = humago.New(mux, cfg)
-	h.api.UseMiddleware(rememberClientIP, h.authenticate)
+	h.api.UseMiddleware(h.rememberClientIP, h.authenticate)
 	h.Register(h.api)
 	return h
 }
 
 // OpenAPI 返回接口文档（OpenAPI 3.1 JSON），不需要数据库。前端的 TypeScript 类型由它生成。
 func OpenAPI(version string) ([]byte, error) {
-	h := newHandlers(http.NewServeMux(), nil, nil, version)
+	h := newHandlers(http.NewServeMux(), nil, nil, nil, version)
 	return json.MarshalIndent(h.api.OpenAPI(), "", "  ")
 }
 
 // NewHandler 组装完整的 HTTP 服务：接口、录音回放、网页。
-func NewHandler(svc *service.Service, sess *scs.SessionManager, web fs.FS, version string) http.Handler {
+// proxies 是前面的反向代理的地址（config.TrustedProxies），只有从这些地址来的请求才采用 X-Forwarded-For。
+func NewHandler(svc *service.Service, sess *scs.SessionManager, web fs.FS, proxies []netip.Prefix, version string) http.Handler {
 	mux := http.NewServeMux()
-	h := newHandlers(mux, svc, sess, version)
+	h := newHandlers(mux, svc, sess, proxies, version)
 	// 录音要支持拖动进度（HTTP Range），用标准库直接发文件
 	mux.HandleFunc("GET /api/meetings/{id}/audio", h.audio)
 	mux.Handle("/", spa(web))
@@ -105,36 +108,91 @@ func NewHandler(svc *service.Service, sess *scs.SessionManager, web fs.FS, versi
 
 type clientIPKey struct{}
 
-// rememberClientIP 把发请求的人的 IP 放进 context，登录限流用。
-func rememberClientIP(ctx huma.Context, next func(huma.Context)) {
-	next(huma.WithValue(ctx, clientIPKey{}, clientIP(ctx.RemoteAddr(), ctx.Header("X-Forwarded-For"))))
+// rememberClientIP 把发请求的人的 IP 放进 context，登录限流用。认不出来时放空字符串，这次登录就不按 IP 计数。
+func (h *Handlers) rememberClientIP(ctx huma.Context, next func(huma.Context)) {
+	var forwarded []string
+	ctx.EachHeader(func(name, value string) {
+		if strings.EqualFold(name, "X-Forwarded-For") {
+			forwarded = append(forwarded, value)
+		}
+	})
+	ip, why := clientIP(ctx.RemoteAddr(), forwarded, h.proxies)
+	next(huma.WithValue(ctx, clientIPKey{}, requester{ip: ip, why: why, peer: ctx.RemoteAddr()}))
 }
 
-// clientIP 找出发请求的人的 IP。zsmeet 前面通常有一层反向代理（配 HTTPS 用），这时连过来的是代理：
-// 只有当对方是本机或内网地址（代理一般就在这里）时，才采用代理在 X-Forwarded-For 里记下的地址，
-// 从右往左取第一个外网地址（右边是离我们最近的代理加的）。直接从外网连过来的请求不信这个头，谁都能伪造。
-func clientIP(remoteAddr, forwarded string) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
+// requester 是发请求的人的 IP。ip 为空时 why 说明为什么认不出来。
+type requester struct {
+	ip, why, peer string
+}
+
+// 认不出访问者 IP 的原因
+const (
+	// 信任的代理没带能用的 X-Forwarded-For
+	noForwardedFor = "no-forwarded-for"
+	// 内网或者本机的地址带着 X-Forwarded-For 连过来，但它不在 ZSMEET_TRUSTED_PROXIES 里：多半是没配置成可信的反向代理
+	untrustedProxy = "untrusted-proxy"
+)
+
+// clientIP 找出发请求的人的 IP。forwarded 是请求里所有的 X-Forwarded-For，按出现的顺序。
+//
+// zsmeet 前面通常有一层反向代理（配 HTTPS 用），这时连过来的是代理。只有连过来的地址在 proxies 里，
+// 才相信 X-Forwarded-For：从右往左看（右边是离我们最近的代理加的），跳过 proxies 里的地址，
+// 第一个不在里面的就是访问者；左边的都可能是访问者自己填的，不看。全在 proxies 里的话取最左边那个。
+// 别处连过来的请求不信这个头，谁都能伪造，访问者就是连过来的地址。
+//
+// 认不出来时返回空字符串和原因，这样的请求不按 IP 计数（只按邮箱）：按代理的地址计数的话，
+// 所有人共用一个计数，有人输错 20 次，大家就都登录不了了。两种情况：
+//   - 连过来的是信任的代理，但它没带能认出来的 X-Forwarded-For；
+//   - 内网或者本机的地址带着 X-Forwarded-For 连过来，却不在 proxies 里：多半是没配置成可信的反向代理
+//     （默认的 docker compose 前面再加一层代理就是这样）。代价是内网里的人自己加上这个头，也能不按 IP 计数。
+func clientIP(remoteAddr string, forwarded []string, proxies []netip.Prefix) (string, string) {
+	peer, err := netip.ParseAddrPort(remoteAddr)
 	if err != nil {
-		host = remoteAddr
+		return "", noForwardedFor
 	}
-	peer := net.ParseIP(host)
-	if peer == nil {
-		return host
-	}
-	if (peer.IsLoopback() || peer.IsPrivate()) && strings.TrimSpace(forwarded) != "" {
-		parts := strings.Split(forwarded, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			if ip := net.ParseIP(strings.TrimSpace(parts[i])); ip != nil && !ip.IsLoopback() && !ip.IsPrivate() {
-				return ip.String()
-			}
+	addr := peer.Addr().Unmap()
+	if !trusted(addr, proxies) {
+		if len(forwarded) > 0 && (addr.IsPrivate() || addr.IsLoopback()) {
+			return "", untrustedProxy
 		}
-		// 全是内网地址（比如公司内网直接访问）：取最左边那个，也就是最初发请求的人
-		if ip := net.ParseIP(strings.TrimSpace(parts[0])); ip != nil {
-			return ip.String()
+		return addr.String(), ""
+	}
+	var hops []string
+	for _, line := range forwarded {
+		hops = append(hops, strings.Split(line, ",")...)
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop, ok := parseHop(hops[i])
+		if !ok {
+			// 认不出来的地址（unknown、乱写的）。再往左都不可靠了
+			return "", noForwardedFor
+		}
+		if !trusted(hop, proxies) || i == 0 {
+			return hop.String(), ""
 		}
 	}
-	return peer.String()
+	return "", noForwardedFor
+}
+
+// parseHop 解析 X-Forwarded-For 里的一项。有的代理会带上端口（1.2.3.4:5678、[2001:db8::1]:80）。
+func parseHop(s string) (netip.Addr, bool) {
+	s = strings.TrimSpace(s)
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr.Unmap(), true
+	}
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return ap.Addr().Unmap(), true
+	}
+	return netip.Addr{}, false
+}
+
+func trusted(addr netip.Addr, proxies []netip.Prefix) bool {
+	for _, p := range proxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // authenticate 给需要登录的接口查出当前用户，放进 context。

@@ -522,6 +522,10 @@ func (s *Service) AcceptLink(ctx context.Context, token, name, pass string) (sql
 			if err != nil {
 				return err
 			}
+			// 有人故意输错这个账号的密码、让它一直锁着的话，用重置链接设了新密码就能马上登录
+			if err := q.ClearLoginFailures(ctx, loginKey(target.Email)); err != nil {
+				return err
+			}
 		}
 		return q.MarkLinkUsed(ctx, link.ID)
 	})

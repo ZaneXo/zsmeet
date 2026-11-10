@@ -70,7 +70,7 @@ function TrashRow({ item }: { item: Trashed }) {
       </div>
       {confirming && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-bad-tint/60 px-4 py-3 text-sm">
-          <span className="text-ink-2">彻底删除以后，录音、转写和纪要都没了，不能恢复。</span>
+          <span className="text-ink-2">彻底删除以后，录音、转写和纪要都没了，不能恢复。已经发到飞书群的卡片和导入的飞书文档不会跟着删除。</span>
           <span className="flex gap-2">
             <Button size="sm" variant="danger" disabled={busy} onClick={() => purge.mutate()}>
               确定彻底删除

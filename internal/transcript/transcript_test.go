@@ -81,3 +81,34 @@ func TestMergeJoinsEnglishWithSpace(t *testing.T) {
 		t.Errorf("英文句子之间要有空格，中文直接接上：%+v", got)
 	}
 }
+
+// 重新识别以后编号变了：名字跟着人走；对不上的不要。
+func TestRemapNames(t *testing.T) {
+	old := []Segment{
+		{Start: 0, End: 10, Speaker: 0},  // 张敏
+		{Start: 10, End: 20, Speaker: 1}, // 王悦
+		{Start: 20, End: 30, Speaker: 0},
+	}
+	// 新的转写里先说话的是王悦，编号换了；还多出一个新的人
+	segs := []Segment{
+		{Start: 0, End: 2, Speaker: 1},
+		{Start: 2, End: 10, Speaker: 0},
+		{Start: 10, End: 20, Speaker: 1},
+		{Start: 20, End: 28, Speaker: 0},
+		{Start: 28, End: 30, Speaker: 2},
+	}
+	// 新的 0 和旧的 0 重叠 16 秒，新的 1 和旧的 1 重叠 10 秒（和旧的 0 只有 2 秒）
+	got := RemapNames(old, segs, Names{0: "张敏", 1: "王悦"})
+	if len(got) != 2 || got[0] != "张敏" || got[1] != "王悦" {
+		t.Errorf("名字要跟着人走：%v", got)
+	}
+	swapped := []Segment{{Start: 0, End: 10, Speaker: 1}, {Start: 10, End: 20, Speaker: 0}, {Start: 20, End: 30, Speaker: 1}}
+	if got := RemapNames(old, swapped, Names{0: "张敏", 1: "王悦"}); got[1] != "张敏" || got[0] != "王悦" {
+		t.Errorf("编号互换了：%v", got)
+	}
+	// 两个旧的人和同一个新的人重叠一样多：对不上，不要
+	merged := []Segment{{Start: 5, End: 15, Speaker: 0}}
+	if got := RemapNames(old, merged, Names{0: "张敏", 1: "王悦"}); len(got) != 0 {
+		t.Errorf("对不上的名字不要：%v", got)
+	}
+}

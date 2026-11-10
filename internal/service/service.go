@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/feishu"
 	"github.com/ZaneXo/zsmeet/internal/queue"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/storage"
@@ -21,10 +22,14 @@ type Service struct {
 	store    *storage.Local
 	settings *settings.Store
 	queue    *queue.Client
+	feishu   *feishu.Pool
+
+	// FeishuBaseURL 是飞书开放平台的地址。一般为空，按设置里选的飞书 / Lark 决定；私有化部署和测试时才设
+	FeishuBaseURL string
 }
 
 func New(pool *pgxpool.Pool, store *storage.Local, st *settings.Store, qc *queue.Client) *Service {
-	return &Service{pool: pool, q: sqlc.New(pool), store: store, settings: st, queue: qc}
+	return &Service{pool: pool, q: sqlc.New(pool), store: store, settings: st, queue: qc, feishu: &feishu.Pool{}}
 }
 
 // tx 在一个事务里执行 fn，fn 返回错误就回滚。

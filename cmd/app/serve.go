@@ -73,12 +73,13 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	svc := service.New(d.pool, d.store, d.settings, inserter)
+	svc.FeishuBaseURL = d.cfg.FeishuBaseURL
 
 	sess := api.NewSessions(pgxstore.New(d.pool), d.cfg.SecureCookie)
 
 	srv := &http.Server{
 		Addr:    d.cfg.Listen,
-		Handler: api.NewHandler(svc, sess, web.FS(), version),
+		Handler: api.NewHandler(svc, sess, web.FS(), d.cfg.TrustedProxies, version),
 		// 不设整体的读写超时：进度推送是长连接，录音回放和分片上传也可能很慢
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,

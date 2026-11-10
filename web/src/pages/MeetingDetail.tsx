@@ -10,6 +10,7 @@ import { Button, buttonClass, Card, Chip, Icon, Input, Notice, ProgressBar, Spin
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
+import { FeishuShareDialog, LatestFeishuShare } from "./FeishuShare";
 import { meetingChip, recordingLive } from "./Meetings";
 import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
@@ -32,7 +33,7 @@ function useMeetingEvents(id: string, active: boolean) {
   }, [id, active]);
 }
 
-export function MeetingDetailPage({ user, llmReady, isAdmin }: { user: User; llmReady: boolean; isAdmin: boolean }) {
+export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { user: User; llmReady: boolean; feishuReady: boolean; isAdmin: boolean }) {
   const { id = "" } = useParams();
   const meeting = useQuery({
     queryKey: ["meeting", id],
@@ -69,6 +70,8 @@ export function MeetingDetailPage({ user, llmReady, isAdmin }: { user: User; llm
   }, [jumpSec]);
   const audio = useRef<HTMLAudioElement>(null);
   const [now, setNow] = useState(0);
+  // 「发到飞书」的弹窗开着没有
+  const [sharing, setSharing] = useState(false);
   const seek = useCallback((sec: number) => {
     const el = audio.current;
     if (!el) return;
@@ -105,6 +108,8 @@ export function MeetingDetailPage({ user, llmReady, isAdmin }: { user: User; llm
 
   const chip = meetingChip(m);
   const hasTranscript = segments.length > 0;
+  // 管理员配置了飞书、已经有纪要时，创建者和管理员可以把纪要发到飞书
+  const canShare = feishuReady && m.can_edit && m.minutes_version > 0;
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4">
@@ -119,13 +124,21 @@ export function MeetingDetailPage({ user, llmReady, isAdmin }: { user: User; llm
             <span>{SOURCE_LABEL[m.source]}</span>
             <span>创建者 {m.owner_name}</span>
           </div>
+          {feishuReady && <LatestFeishuShare meeting={m} onOpen={canShare ? () => setSharing(true) : undefined} />}
         </div>
         <span className="flex items-center gap-2">
           <Chip tone={chip.tone}>{chip.text}</Chip>
+          {canShare && (
+            <Button size="sm" variant="ghost" onClick={() => setSharing(true)}>
+              <Icon name="upload" size={15} />
+              发到飞书
+            </Button>
+          )}
           <ExportMenu meeting={m} hasTranscript={hasTranscript} />
           {m.can_edit && <DeleteMeeting meeting={m} />}
         </span>
       </div>
+      {sharing && <FeishuShareDialog meeting={m} onClose={() => setSharing(false)} />}
 
       {m.status !== "done" && <ProcessingPanel meeting={m} user={user} minutesOnly={hasTranscript} />}
 

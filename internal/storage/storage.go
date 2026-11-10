@@ -51,10 +51,25 @@ func (s *Local) PutChunk(meeting uuid.UUID, seq int, r io.Reader) (int64, error)
 	return n, os.Rename(tmp.Name(), s.ChunkPath(meeting, seq))
 }
 
+// AdoptChunk 把一个已经下载好的文件（在同一个数据目录里）直接当成会议的第 seq 片，返回它的大小。
+func (s *Local) AdoptChunk(meeting uuid.UUID, seq int, path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(s.chunkDir(meeting), 0o755); err != nil {
+		return 0, err
+	}
+	return info.Size(), os.Rename(path, s.ChunkPath(meeting, seq))
+}
+
 // RemoveChunks 拼好整段录音后删掉分片。
 func (s *Local) RemoveChunks(meeting uuid.UUID) error {
 	return os.RemoveAll(s.chunkDir(meeting))
 }
+
+// MaxRecordingBytes 是一场会议的录音（上传的，或者从飞书下载的）最大多少字节。
+const MaxRecordingBytes = 4 << 30
 
 // AudioKey 拼好、转码后的录音在存储里的名字。
 func AudioKey(meeting uuid.UUID) string {
@@ -80,8 +95,8 @@ func (s *Local) Exists(key string) bool {
 	return err == nil
 }
 
-// TempDir 给 worker 处理一场会议用的临时目录，用完调用方删掉。
-func (s *Local) TempDir(meeting uuid.UUID) (string, error) {
-	dir := filepath.Join(s.root, "tmp", meeting.String())
+// TempDir 给 worker 处理一场会议的某一轮（run）用的临时目录，用完调用方删掉。
+func (s *Local) TempDir(meeting, run uuid.UUID) (string, error) {
+	dir := filepath.Join(s.root, "tmp", meeting.String(), run.String())
 	return dir, os.MkdirAll(dir, 0o755)
 }

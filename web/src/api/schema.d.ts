@@ -44,6 +44,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/feishu/chats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 可以发纪要的飞书群
+         * @description 应用机器人所在的群。没有配置飞书时返回 409。
+         */
+        get: operations["list-feishu-chats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/invites": {
         parameters: {
             query?: never;
@@ -301,6 +321,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/meetings/{id}/feishu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 这场会议发到飞书的记录 */
+        get: operations["list-feishu-shares"];
+        put?: never;
+        /**
+         * 把纪要发到飞书
+         * @description 把当前版本的纪要推到飞书群（卡片上是摘要、待办和链接），可以同时导入成飞书文档。后台发送，状态看 GET 同一个地址。创建者和管理员可以发。
+         */
+        post: operations["share-to-feishu"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/meetings/{id}/marks": {
         parameters: {
             query?: never;
@@ -501,6 +542,67 @@ export interface paths {
          * @description 链接发错了人，或者不确定是谁生成的时候用。撤销后那个链接立刻失效。
          */
         delete: operations["revoke-reset-link"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/feishu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 飞书配置 */
+        get: operations["get-feishu-settings"];
+        /**
+         * 保存飞书配置
+         * @description 全团队共用一个飞书自建应用。App Secret 加密后保存。
+         */
+        put: operations["put-feishu-settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/feishu/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 飞书运行情况
+         * @description 接收会议事件的长连接连上没有、最近一次收到的会议、最近自动导入的会议。
+         */
+        get: operations["get-feishu-status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/feishu/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 测试飞书应用能不能连上
+         * @description 用提交的凭证（不需要先保存）读机器人的信息和它所在的群。凭证不对、没开机器人能力、缺权限时返回 422，detail 里是原因。
+         */
+        post: operations["test-feishu"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -770,6 +872,147 @@ export interface components {
              * @example https://example.com/errors/example
              */
             type: string;
+        };
+        FeishuChat: {
+            id: string;
+            name: string;
+        };
+        FeishuChatsOutputBody: {
+            /** @description 管理员设的默认群 */
+            default_chat_id: string;
+            /** @description 应用机器人所在的群 */
+            items: components["schemas"]["FeishuChat"][];
+            /** @description 默认是否同时导入成飞书文档 */
+            with_doc: boolean;
+        };
+        FeishuImport: {
+            /** Format: date-time */
+            created_at: string;
+            /** @description 没导入的原因 */
+            detail: string;
+            /** @description 飞书的会议 ID */
+            feishu_meeting_id: string;
+            /** @description 导入后的会议 */
+            meeting_id?: string;
+            /** @description 会议组织者（导入后的会议记在他名下） */
+            owner_name: string;
+            /**
+             * @description waiting 等飞书生成录制；imported 已导入；skipped 没有录制；failed 出错了
+             * @enum {string}
+             */
+            status: "waiting" | "imported" | "skipped" | "failed";
+            topic: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        FeishuSettings: {
+            app_id: string;
+            /** @description 是否已经保存了 App Secret；Secret 本身不会返回 */
+            app_secret_set: boolean;
+            /** @description 纪要第一次生成后自动发到默认的群 */
+            auto_push: boolean;
+            /** @description 默认发到的群 */
+            chat_id: string;
+            chat_name: string;
+            /** @description 这个应用在飞书开发者后台的页面，没填 App ID 时为空 */
+            console_url: string;
+            /** @description 文档放在哪个云空间文件夹（token）；为空时放在应用自己的云空间 */
+            doc_folder: string;
+            /**
+             * @description 飞书，或者飞书国际版 Lark
+             * @enum {string}
+             */
+            domain: "feishu" | "lark";
+            /** @description 自动导入飞书会议的云录制 */
+            import_recordings: boolean;
+            /** @description 公司里拿到文档链接的人都能看 */
+            link_share: boolean;
+            /** @description zsmeet 的访问地址，卡片上的链接用它拼 */
+            site_url: string;
+            /** @description 发到群里时同时导入成飞书文档 */
+            with_doc: boolean;
+        };
+        FeishuSettingsInputBody: {
+            /** @description 清空表示不用飞书了，其他配置一起清掉 */
+            app_id: string;
+            /** @description 留空表示沿用已保存的（App ID 没变时） */
+            app_secret?: string;
+            auto_push?: boolean;
+            chat_id?: string;
+            chat_name?: string;
+            /** @description 云空间文件夹的链接或者 token */
+            doc_folder?: string;
+            /** @enum {string} */
+            domain?: "feishu" | "lark";
+            import_recordings?: boolean;
+            link_share?: boolean;
+            site_url?: string;
+            with_doc?: boolean;
+        };
+        FeishuShare: {
+            /** @description 发到的群，只导入文档时为空 */
+            chat_id: string;
+            chat_name: string;
+            /** Format: date-time */
+            created_at: string;
+            /** @description 导入的飞书文档 */
+            doc_url: string;
+            /** @description 失败的原因 */
+            error: string;
+            /** Format: date-time */
+            finished_at?: string;
+            id: string;
+            /**
+             * Format: int32
+             * @description 发的是第几版纪要
+             */
+            minutes_version: number;
+            /** @description 谁发的；纪要生成后自动发的为空 */
+            requested_by_name: string;
+            /**
+             * @description pending 发送中；done 已发送；failed 失败
+             * @enum {string}
+             */
+            status: "pending" | "done" | "failed";
+            /** @description 是否同时导入成飞书文档 */
+            with_doc: boolean;
+        };
+        FeishuSharesOutputBody: {
+            /** @description 最新的在前，最多 20 条 */
+            items: components["schemas"]["FeishuShare"][];
+        };
+        FeishuStatusOutputBody: {
+            /** @description 出错的原因 */
+            detail: string;
+            /** @description 最近自动导入的飞书会议（只有组织者是成员的会议） */
+            imports: components["schemas"]["FeishuImport"][];
+            /** @description 最近一次处理飞书会议的情况 */
+            last_event: string;
+            /**
+             * Format: date-time
+             * @description 最近一次处理飞书会议的时间
+             */
+            last_event_at?: string;
+            /**
+             * @description 接收飞书会议事件的长连接：没开、连接中、已连上、出错了
+             * @enum {string}
+             */
+            state: "off" | "connecting" | "connected" | "error";
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        FeishuTestInputBody: {
+            app_id: string;
+            /** @description 留空表示沿用已保存的（App ID 没变时） */
+            app_secret?: string;
+            /** @enum {string} */
+            domain?: "feishu" | "lark";
+        };
+        FeishuTestOutputBody: {
+            /** @description 应用机器人的名字 */
+            bot_name: string;
+            /** @description 机器人所在的群 */
+            chats: components["schemas"]["FeishuChat"][];
         };
         Invite: {
             /** Format: date-time */
@@ -1074,7 +1317,15 @@ export interface components {
             /** @description 8 到 200 位 */
             password: string;
         };
+        ShareToFeishuInputBody: {
+            /** @description 发到哪个群；为空表示只导入成文档 */
+            chat_id?: string;
+            /** @description 同时导入成飞书文档 */
+            with_doc?: boolean;
+        };
         StatusOutputBody: {
+            /** @description 是否配置了飞书（可以把纪要发到飞书）；只对登录用户有意义 */
+            feishu_ready: boolean;
             /** @description 是否已经创建过管理员；没有的话显示初始化向导 */
             initialized: boolean;
             /** @description 是否配置了大模型；只对登录用户有意义 */
@@ -1246,6 +1497,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LinkInfoOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "list-feishu-chats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuChatsOutputBody"];
                 };
             };
             /** @description Error */
@@ -1787,6 +2067,72 @@ export interface operations {
             };
         };
     };
+    "list-feishu-shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuSharesOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "share-to-feishu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareToFeishuInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuShare"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "save-marks": {
         parameters: {
             query?: never;
@@ -2164,6 +2510,130 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-feishu-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuSettings"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "put-feishu-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeishuSettingsInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuSettings"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-feishu-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuStatusOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "test-feishu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeishuTestInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuTestOutputBody"];
+                };
             };
             /** @description Error */
             default: {

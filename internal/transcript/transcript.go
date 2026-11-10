@@ -157,6 +157,31 @@ func (n Names) Of(speaker int) string {
 	return SpeakerName(speaker)
 }
 
+// Marshal 写成数据库里存的样子（{"0": "张敏"}）。
+func (n Names) Marshal() ([]byte, error) {
+	stored := make(map[string]string, len(n))
+	for idx, name := range n {
+		stored[strconv.Itoa(idx)] = name
+	}
+	return json.Marshal(stored)
+}
+
+// Diff 返回从 n 改成 now 改了哪些：编号 → [以前的名字, 现在的名字]，去掉了的现在的名字是空字符串。
+func (n Names) Diff(now Names) map[int][2]string {
+	out := map[int][2]string{}
+	for idx, name := range now {
+		if n[idx] != name {
+			out[idx] = [2]string{n[idx], name}
+		}
+	}
+	for idx, name := range n {
+		if _, ok := now[idx]; !ok {
+			out[idx] = [2]string{name, ""}
+		}
+	}
+	return out
+}
+
 // Lines 把转写写成一行一段的文本：`[mm:ss] 说话人 1：内容`。给大模型和导出用。
 func Lines(segs []Segment, names Names) []string {
 	lines := make([]string, len(segs))
@@ -174,4 +199,54 @@ func PlainText(segs []Segment) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// RemapNames 重新识别以后，同一个人的说话人编号可能变了。按新旧两份转写里各个说话人说话时间的重叠，
+// 把以前起的名字对到新的编号上：只有旧的 a 和新的 b 互相是对方重叠最多的那个，才算同一个人。
+// 对不上的名字不要了，宁可让人重新起，也不要张冠李戴。
+func RemapNames(old, segs []Segment, names Names) Names {
+	out := Names{}
+	if len(names) == 0 {
+		return out
+	}
+	overlap := map[[2]int]float64{}
+	for _, o := range old {
+		if o.Speaker < 0 {
+			continue
+		}
+		for _, n := range segs {
+			if n.Speaker < 0 {
+				continue
+			}
+			if d := min(o.End, n.End) - max(o.Start, n.Start); d > 0 {
+				overlap[[2]int{o.Speaker, n.Speaker}] += d
+			}
+		}
+	}
+	// best[a] 是和旧的 a 重叠最多的新编号，back[b] 是和新的 b 重叠最多的旧编号；并列的算对不上（-1）
+	type pick struct {
+		id   int
+		secs float64
+	}
+	best, back := map[int]pick{}, map[int]pick{}
+	consider := func(m map[int]pick, key, id int, secs float64) {
+		cur, ok := m[key]
+		switch {
+		case !ok || secs > cur.secs:
+			m[key] = pick{id, secs}
+		case secs == cur.secs:
+			m[key] = pick{-1, secs}
+		}
+	}
+	for k, secs := range overlap {
+		consider(best, k[0], k[1], secs)
+		consider(back, k[1], k[0], secs)
+	}
+	for a, name := range names {
+		b, ok := best[a]
+		if ok && b.id >= 0 && back[b.id].id == a {
+			out[b.id] = name
+		}
+	}
+	return out
 }

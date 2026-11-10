@@ -12,6 +12,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/k2-fsa/sherpa-onnx-go v1.13.8
+	github.com/larksuite/oapi-sdk-go/v3 v3.12.2
 	github.com/openai/openai-go/v3 v3.97.0
 	github.com/pressly/goose/v3 v3.29.0
 	github.com/riverqueue/river v0.51.1
@@ -21,6 +22,8 @@ require (
 
 require (
 	github.com/coder/websocket v1.8.15 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect

@@ -10,6 +10,7 @@
 //
 //	zsmeet reset-link 邮箱   给这个账号生成重置密码的链接
 //	zsmeet make-admin 邮箱   把这个账号设为管理员
+//	zsmeet unlock 邮箱       解开这个账号的登录锁（密码输错太多次被锁住时）
 package main
 
 import (
@@ -50,8 +51,10 @@ func main() {
 		err = resetLink(ctx, os.Args[2:])
 	case "make-admin":
 		err = makeAdmin(ctx, os.Args[2:])
+	case "unlock":
+		err = unlock(ctx, os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "用法：zsmeet serve | worker | models | openapi | ping | reset-link 邮箱 | make-admin 邮箱")
+		fmt.Fprintln(os.Stderr, "用法：zsmeet serve | worker | models | openapi | ping | reset-link 邮箱 | make-admin 邮箱 | unlock 邮箱")
 		os.Exit(2)
 	}
 	if err != nil {

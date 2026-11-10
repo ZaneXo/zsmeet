@@ -33,6 +33,11 @@ var rules = []struct {
 		why:     "大模型 SDK 只能通过 internal/llm 使用",
 	},
 	{
+		prefix:  "github.com/larksuite/oapi-sdk-go",
+		allowed: []string{"internal/feishu/"},
+		why:     "飞书 SDK 只用在 internal/feishu 的长连接里，别处通过 internal/feishu 调用飞书",
+	},
+	{
 		prefix:  "github.com/ZaneXo/zsmeet/internal/api",
 		allowed: []string{"cmd/"},
 		why:     "接口层在最外面，内部的包不能反过来依赖它",

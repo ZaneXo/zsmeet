@@ -23,6 +23,44 @@ type AccountLink struct {
 	UsedAt    *time.Time
 }
 
+type FeishuImport struct {
+	FeishuMeetingID string
+	Topic           string
+	Status          string
+	Detail          string
+	OwnerID         uuid.UUID
+	MeetingID       *uuid.UUID
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type FeishuLink struct {
+	ID          bool
+	State       string
+	Detail      string
+	UpdatedAt   time.Time
+	LastEventAt *time.Time
+	LastEvent   string
+}
+
+type FeishuShare struct {
+	ID             uuid.UUID
+	MeetingID      uuid.UUID
+	ChatID         string
+	ChatName       string
+	WithDoc        bool
+	MinutesVersion int32
+	Status         string
+	Error          string
+	ImportTicket   string
+	DocToken       string
+	DocUrl         string
+	MessageID      string
+	RequestedBy    *uuid.UUID
+	CreatedAt      time.Time
+	FinishedAt     *time.Time
+}
+
 type LoginFailure struct {
 	Key         string
 	Failures    int32

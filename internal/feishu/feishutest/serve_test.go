@@ -34,7 +34,7 @@ func TestServeForBrowser(t *testing.T) {
 		Calls:      map[string]int{},
 		tasks:      map[string]*Import{},
 		grants:     map[string]*grant{},
-		userTokens: map[string]LoginUser{},
+		userTokens: map[string]userGrant{},
 		// 用飞书登录时，授权页上登录着的是演示用户
 		LoginAs: &LoginUser{OpenID: "ou_demo", UnionID: "on_demo", Name: "演示用户", EnterpriseEmail: os.Getenv("FEISHU_MOCK_EMAIL")},
 		Chats:   [][2]string{{"oc_demo_team", "产品组"}, {"oc_demo_dev", "研发群"}},

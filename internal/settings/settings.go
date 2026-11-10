@@ -154,16 +154,27 @@ func (s *Store) SaveFeishu(ctx context.Context, f Feishu) error {
 	if err != nil {
 		return err
 	}
-	if site.URL == "" && f.SiteURL == "" {
+	testHookAfterSiteRead()
+	switch {
+	case f.SiteURL != "" && f.SiteURL != site.URL:
+		// 管理员在飞书设置里填了新地址
+		if err := s.SaveSite(ctx, Site{URL: f.SiteURL}); err != nil {
+			return err
+		}
+	case f.SiteURL == "" && site.URL == "":
 		old, err := s.feishuStored(ctx)
 		if err != nil && !errors.Is(err, secret.ErrDecrypt) {
 			return err
 		}
-		f.SiteURL = old.SiteURL
-	}
-	if f.SiteURL != "" && f.SiteURL != site.URL {
-		if err := s.SaveSite(ctx, Site{URL: f.SiteURL}); err != nil {
-			return err
+		// 搬旧地址时通用设置可能刚被别人填上（上面读到的已经过时了）：只在它还空着时写，不盖掉新填的
+		if old.SiteURL != "" {
+			raw, err := json.Marshal(Site{URL: cleanURL(old.SiteURL)})
+			if err != nil {
+				return err
+			}
+			if err := s.q.PutSettingIfNoURL(ctx, sqlc.PutSettingIfNoURLParams{Key: keySite, Value: raw}); err != nil {
+				return err
+			}
 		}
 	}
 	f.SiteURL = ""
@@ -257,8 +268,15 @@ func (s *Store) Site(ctx context.Context) (Site, error) {
 	return site, json.Unmarshal(raw, &site)
 }
 
+// testHookAfterSiteRead 在 SaveFeishu 读完访问地址之后调用，测试用它模拟这时有人同时保存了访问地址。
+var testHookAfterSiteRead = func() {}
+
+func cleanURL(raw string) string {
+	return strings.TrimRight(strings.TrimSpace(raw), "/")
+}
+
 func (s *Store) SaveSite(ctx context.Context, site Site) error {
-	site.URL = strings.TrimRight(strings.TrimSpace(site.URL), "/")
+	site.URL = cleanURL(site.URL)
 	raw, err := json.Marshal(site)
 	if err != nil {
 		return err

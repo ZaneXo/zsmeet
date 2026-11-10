@@ -224,7 +224,7 @@ export interface paths {
         };
         /**
          * 我关联的飞书账号
-         * @description 要关联飞书账号，浏览器整页打开 /api/auth/feishu/start?mode=link。
+         * @description 要关联飞书账号，先用 POST /api/me/feishu/link 核对当前密码，再在浏览器里整页打开返回的飞书授权页地址。
          */
         get: operations["get-feishu-link"];
         put?: never;

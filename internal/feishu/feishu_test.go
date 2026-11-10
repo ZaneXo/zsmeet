@@ -341,10 +341,20 @@ func TestLoginUser(t *testing.T) {
 
 	c, fs := newClient(t)
 	fs.LoginAs = &feishutest.LoginUser{OpenID: "ou_1", UnionID: "on_1", Name: "李航", Email: "li@example.com", EnterpriseEmail: "li@corp.example.com"}
-	authorize := func(verifier string) string {
+	// authorizeWith 打开授权页，可以改掉申请的权限（scope 为 nil 时用 AuthorizeURL 给的）
+	authorizeWith := func(verifier string, scope []string) string {
 		t.Helper()
 		hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		resp, err := hc.Get(AuthorizeURL("feishu", fs.URL, feishutest.AppID, "https://meet.example.com/cb", "st", PKCEChallenge(verifier)))
+		page, err := url.Parse(AuthorizeURL("feishu", fs.URL, feishutest.AppID, "https://meet.example.com/cb", "st", PKCEChallenge(verifier)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if scope != nil {
+			q := page.Query()
+			q.Set("scope", strings.Join(scope, " "))
+			page.RawQuery = q.Encode()
+		}
+		resp, err := hc.Get(page.String())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -355,12 +365,30 @@ func TestLoginUser(t *testing.T) {
 		}
 		return u.Query().Get("code")
 	}
+	authorize := func(verifier string) string {
+		t.Helper()
+		return authorizeWith(verifier, nil)
+	}
 
 	verifier := strings.Repeat("v", 43)
 	code := authorize(verifier)
 	u, err := c.LoginUser(t.Context(), code, "https://meet.example.com/cb", verifier)
 	if err != nil || u != (LoginUser{Name: "李航", OpenID: "ou_1", UnionID: "on_1", Email: "li@example.com", EnterpriseEmail: "li@corp.example.com", TenantKey: "tenant_test"}) {
 		t.Fatalf("用户信息：%+v %v", u, err)
+	}
+	// 和真的飞书一样，邮箱要申请了对应的权限才给：上面拿到了两个邮箱，说明 LoginScopes 里两个权限都申请了
+	for _, tc := range []struct {
+		scope             []string
+		email, enterprise string
+	}{
+		{[]string{}, "", ""},
+		{[]string{"contact:user.email:readonly"}, "li@example.com", ""},
+		{[]string{"contact:user.employee:readonly"}, "", "li@corp.example.com"},
+	} {
+		u, err := c.LoginUser(t.Context(), authorizeWith(verifier, tc.scope), "https://meet.example.com/cb", verifier)
+		if err != nil || u.Name != "李航" || u.UnionID != "on_1" || u.Email != tc.email || u.EnterpriseEmail != tc.enterprise {
+			t.Errorf("申请的权限 %v：%+v %v", tc.scope, u, err)
+		}
 	}
 	// 授权码只能用一次
 	if _, err := c.LoginUser(t.Context(), code, "https://meet.example.com/cb", verifier); err == nil || !strings.Contains(err.Error(), "重新点「用飞书登录」") {

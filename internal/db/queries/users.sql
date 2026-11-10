@@ -19,6 +19,13 @@ SELECT value FROM settings WHERE key = $1;
 INSERT INTO settings (key, value) VALUES ($1, $2)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
+-- name: PutSettingIfNoURL :exec
+-- 只在这项配置还没有地址（没有这一行，或者 url 是空的）时写入。判断和写入在同一条语句里：
+-- 同时有人保存了新地址的话，这里看到的是他保存的，不会盖掉
+INSERT INTO settings (key, value) VALUES ($1, $2)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+WHERE coalesce(settings.value->>'url', '') = '';
+
 -- name: ReserveLoginAttempt :one
 -- 校验密码之前先占一次尝试：在时间窗口里把计数加一（上一次计数已经超出窗口就从 1 重新数）。
 -- 锁着、或者窗口里的次数已经到上限（包括正在校验、还没出结果的）时什么都不改，也不返回行，这次登录直接拒绝。

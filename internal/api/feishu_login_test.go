@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ZaneXo/zsmeet/internal/feishu/feishutest"
+	"github.com/ZaneXo/zsmeet/internal/secret"
 	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
@@ -834,5 +835,75 @@ func TestPasswordChangeDropsFeishuLink(t *testing.T) {
 	c.another().want(c.another().do("POST", "/api/account-links/accept", obj{"token": token, "password": "reset-password-789"}), 200)
 	if c.linkedTo("lihang@example.com") != "" {
 		t.Error("用重置链接设了新密码，飞书的关联也要解除")
+	}
+}
+
+// 点了「关联飞书」以后、飞书跳回来之前改了密码：改密码时解除了关联，这次关联也作废，不能在改密码之后又关联上去。
+func TestFeishuLinkAfterPasswordChange(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	fs := c.enableFeishuLogin(false)
+	li := c.addMember("lihang@example.com", "李航")
+	fs.LoginAs = &feishutest.LoginUser{OpenID: "ou_li", UnionID: "on_li", Name: "李航"}
+
+	status, loc := li.startLink("member-pass-123")
+	if status != http.StatusOK || !strings.HasPrefix(loc, fs.URL) {
+		t.Fatalf("关联飞书：%d %s", status, loc)
+	}
+	_, back := li.noFollow(loc)
+	li.want(li.do("POST", "/api/me/password", obj{"current_password": "member-pass-123", "new_password": "new-password-456"}), 204)
+	if li.whoami() != "lihang@example.com" {
+		t.Fatal("改密码的这台设备保持登录")
+	}
+	if _, loc = li.noFollow(back); loc != "/settings?feishu_error="+service.FeishuPasswordChanged || c.linkedTo("lihang@example.com") != "" {
+		t.Errorf("改密码之前发起的关联要作废：%s，关联到 %q", loc, c.linkedTo("lihang@example.com"))
+	}
+
+	// 用新密码重新发起就可以
+	status, loc = li.startLink("new-password-456")
+	if status != http.StatusOK || !strings.HasPrefix(loc, fs.URL) {
+		t.Fatalf("重新关联：%d %s", status, loc)
+	}
+	_, back = li.noFollow(loc)
+	if _, loc = li.noFollow(back); loc != "/settings?feishu=linked" || c.linkedTo("lihang@example.com") != "on_li" {
+		t.Errorf("用新密码重新关联：%s", loc)
+	}
+}
+
+// ZSMEET_SECRET_KEY 改过、保存的 App Secret 和 API Key 解不开时：网页照样能打开（登录页上只是没有「用飞书登录」），
+// 大模型和飞书当作没配置好，管理员到设置里重新填就行。
+func TestStatusWithUndecryptableSecrets(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	fs := c.enableFeishuLogin(false)
+	li := c.addMember("lihang@example.com", "李航")
+	fs.LoginAs = &feishutest.LoginUser{OpenID: "ou_li", UnionID: "on_li", Name: "李航"}
+
+	other, err := secret.New("another-secret-key-0123456789")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := `"` + other.Seal("sealed-with-the-old-key") + `"`
+	for _, stmt := range []string{
+		`UPDATE settings SET value = jsonb_set(value, '{app_secret}', '` + sealed + `') WHERE key = 'feishu'`,
+		`INSERT INTO settings (key, value) VALUES ('llm', jsonb_build_object('base_url', 'http://llm.example.com/v1', 'model', 'm', 'api_key', ` + strings.ReplaceAll(sealed, `"`, `'`) + `))`,
+	} {
+		if _, err := c.pool.Exec(t.Context(), stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	anon := c.another()
+	if r := anon.want(anon.do("GET", "/api/status", nil), 200); r.Body["feishu_login"] != false || r.Body["initialized"] != true {
+		t.Errorf("没登录的人照样看到登录页，只是没有「用飞书登录」：%s", r.Raw)
+	}
+	if r := c.want(c.do("GET", "/api/status", nil), 200); r.Body["user"] == nil || r.Body["llm_ready"] != false || r.Body["feishu_ready"] != false {
+		t.Errorf("登录着的人照样能用，大模型和飞书当作没配置好：%s", r.Raw)
+	}
+	if r := li.want(li.do("GET", "/api/me/feishu", nil), 200); r.Body["enabled"] != false {
+		t.Errorf("账号页上不能关联飞书：%s", r.Raw)
+	}
+	if page, code := anon.feishuLogin(fs); page != "/" || code != service.FeishuUnavailable {
+		t.Errorf("用飞书登录：%s %q", page, code)
 	}
 }

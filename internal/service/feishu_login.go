@@ -17,6 +17,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/feishu"
 	"github.com/ZaneXo/zsmeet/internal/password"
+	"github.com/ZaneXo/zsmeet/internal/secret"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 )
 
@@ -61,6 +62,8 @@ const (
 	FeishuSignedOut = "signed_out"
 	// 关联飞书要先在账号页上输入密码（用地址直接发起关联不行）
 	FeishuLinkPassword = "link_password"
+	// 发起关联以后改过密码（或者用重置链接设了新密码），这次关联作废
+	FeishuPasswordChanged = "password_changed"
 	// 在飞书的授权页上没有同意
 	FeishuDenied = "denied"
 	// 账号被停用了
@@ -107,7 +110,9 @@ func (s *Service) feishuLoginConfig(ctx context.Context) (settings.Feishu, error
 		return settings.Feishu{}, authErr(FeishuUnavailable)
 	}
 	cfg, err := s.settings.Feishu(ctx)
-	if err != nil {
+	// App Secret 解不开（ZSMEET_SECRET_KEY 改过）时 cfg.AppSecret 是空的，下面按没配置好处理：
+	// 登录页照常显示（只是没有「用飞书登录」），管理员在设置里重新填 App Secret 就好
+	if err != nil && !errors.Is(err, secret.ErrDecrypt) {
 		return settings.Feishu{}, err
 	}
 	if !cfg.LoginReady() {
@@ -150,6 +155,9 @@ type FeishuState struct {
 	Mode     string `json:"m"`
 	// 关联飞书时，发起的是哪个 zsmeet 账号
 	UserID uuid.UUID `json:"u,omitzero"`
+	// 关联飞书时，发起那一刻这个账号的 session_epoch。之后改过密码（关联会被一起解除）的话，这次关联作废，
+	// 免得在改密码之后才把飞书账号关联上去
+	Epoch int32 `json:"p,omitzero"`
 	// 什么时候过期（Unix 秒）
 	Expires int64 `json:"e"`
 }
@@ -166,7 +174,7 @@ func (s *Service) StartFeishuAuth(ctx context.Context, mode string, user *sqlc.U
 		if user == nil {
 			return "", "", authErr(FeishuSignedOut)
 		}
-		st.Mode, st.UserID = FeishuModeLink, user.ID
+		st.Mode, st.UserID, st.Epoch = FeishuModeLink, user.ID, user.SessionEpoch
 	}
 	return feishu.AuthorizeURL(cfg.Domain, s.FeishuBaseURL, cfg.AppID, FeishuRedirectURL(cfg.SiteURL), st.State, feishu.PKCEChallenge(st.Verifier)),
 		s.SealFeishuState(st), nil
@@ -436,24 +444,32 @@ func (s *Service) joinFromFeishu(ctx context.Context, name, email, subject strin
 	return user, err
 }
 
-// LinkFeishu 把飞书账号关联到登录着的这个人（在「设置 → 账号」里点「关联飞书」）。
+// LinkFeishu 把飞书账号关联到登录着的这个人（在「设置 → 账号」里点「关联飞书」）。st 是发起关联时记下的。
 // 他已经登录了，所以不看邮箱。这个飞书账号已经关联了别人、或者他自己已经关联了另一个飞书账号时拒绝。
-func (s *Service) LinkFeishu(ctx context.Context, user sqlc.User, code, verifier string) error {
+func (s *Service) LinkFeishu(ctx context.Context, user sqlc.User, code string, st FeishuState) error {
 	cfg, err := s.feishuLoginConfig(ctx)
 	if err != nil {
 		return err
 	}
-	_, subject, err := s.feishuIdentity(ctx, cfg, code, verifier)
+	_, subject, err := s.feishuIdentity(ctx, cfg, code, st.Verifier)
 	if err != nil {
 		return err
 	}
 	return s.tx(ctx, func(_ pgx.Tx, q *sqlc.Queries) error {
+		// 锁住这个人：和改密码、重置密码（它们锁同一行，改 session_epoch、解除关联）排队
 		me, err := q.LockUser(ctx, user.ID)
 		if err != nil {
 			return err
 		}
 		if me.Disabled {
 			return authErr(FeishuAccountDisabled)
+		}
+		if st.Mode != FeishuModeLink || me.ID != st.UserID {
+			return authErr(FeishuSignedOut)
+		}
+		// 发起关联以后改过密码：改密码时解除了关联，这里不能再关联回去
+		if me.SessionEpoch != st.Epoch {
+			return authErr(FeishuPasswordChanged)
 		}
 		link, err := q.GetIdentity(ctx, sqlc.GetIdentityParams{Provider: providerFeishu, Subject: subject})
 		switch {

@@ -1,0 +1,184 @@
+# 推 v 开头的标签（比如 v0.1.0）时发布：
+#   1. 先跑一遍 CI（检查和测试）
+#   2. 在 amd64 和 arm64 的机器上各自构建镜像（识别库通过 cgo 调用，不交叉编译）
+#   3. 合成一个多架构镜像推到 ghcr.io/<owner>/zsmeet，标签是 0.1.0、0.1 和 latest（预发布版本不打 latest）
+#   4. 发 GitHub Release，附上自动生成的更新说明
+# 也可以在 Actions 页面手动运行：只试着构建两种架构，不推镜像、不发 Release。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: 构建 ${{ matrix.platform }}
+    needs: ci
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 准备
+        id: prep
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          # 镜像名只能用小写
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "arch=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 镜像里的标签（版本号、源码地址）和 merge 里合成的一致
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ steps.prep.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      # 先只按摘要推上去，两种架构都好了再在 merge 里合成一个带版本号的镜像
+      - name: 构建镜像
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: VERSION=${{ github.ref_name }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.prep.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ github.event_name == 'push' }}
+          cache-from: type=gha,scope=${{ steps.prep.outputs.arch }}
+          cache-to: type=gha,mode=max,scope=${{ steps.prep.outputs.arch }}
+
+      - name: 记下镜像摘要
+        if: github.event_name == 'push'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: digest-${{ steps.prep.outputs.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: 合成多架构镜像
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.prep.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: 准备
+        id: prep
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # v0.1.0 → 0.1.0、0.1、latest；v0.2.0-rc.1 这样的预发布版本只打它自己的版本号
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ steps.prep.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: 合成并推送
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ steps.prep.outputs.image }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          # shellcheck disable=SC2046,SC2086
+          docker buildx imagetools create $tags \
+            --annotation "index:org.opencontainers.image.source=$SOURCE" \
+            --annotation "index:org.opencontainers.image.description=zsmeet：开源、自己部署的会议纪要系统" \
+            --annotation "index:org.opencontainers.image.licenses=Apache-2.0" \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      - name: 检查推上去的镜像
+        env:
+          REF: ${{ steps.prep.outputs.image }}:${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "$REF"
+
+  release:
+    name: 发 GitHub Release
+    needs: merge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 发 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          IMAGE: ${{ needs.merge.outputs.image }}
+          VERSION: ${{ needs.merge.outputs.version }}
+        run: |
+          # 重新运行时 Release 已经在了，不再发一次
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG 已经存在"
+            exit 0
+          fi
+          notes="镜像：\`$IMAGE:$VERSION\`（linux/amd64、linux/arm64）。部署和升级见 README 的「部署」一节。"
+          flags=()
+          # 标签里带「-」的（v0.2.0-rc.1）是预发布版本
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --notes "$notes" "${flags[@]}"

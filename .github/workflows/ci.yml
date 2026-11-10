@@ -1,0 +1,52 @@
+# 每次 push 到 main、每个 PR：跑 make check 和 make test，和本地提交前跑的一样。
+# 发布镜像（release.yml）之前也先调用它，测试不过就不发。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: 检查和测试
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          # pnpm 由 corepack 按 web/package.json 里的 packageManager 装，这里不用 setup-node 的缓存
+          package-manager-cache: false
+
+      - name: 安装前端依赖
+        run: |
+          corepack enable
+          pnpm -C web install --frozen-lockfile
+
+      # 后台处理的测试要用 ffmpeg 转码
+      - name: 安装 ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: 检查（格式、静态检查、生成的代码是不是最新的）
+        run: make check
+
+      # make test 会用 Docker 起一个测试用的 Postgres（端口 55432）
+      - name: 测试
+        run: make test

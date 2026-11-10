@@ -11,7 +11,7 @@
 
 ## 部署
 
-需要一台装了 Docker 的 Linux 服务器，建议 4 核 CPU、8 GB 内存以上。
+需要一台装了 Docker 的服务器（x86 的 Linux，或者 Apple 芯片的 Mac 装 Docker Desktop / OrbStack），建议 4 核 CPU、8 GB 内存以上。
 
 ```bash
 git clone https://github.com/ZaneXo/zsmeet.git && cd zsmeet/deploy
@@ -19,6 +19,8 @@ cp .env.example .env
 # 编辑 .env，填两个密码（文件里有生成方法）
 docker compose up -d --build
 ```
+
+不想在服务器上构建的话，可以用发布好的镜像（同一个镜像里有 linux/amd64 和 linux/arm64）：在 `.env` 里加一行 `ZSMEET_IMAGE=ghcr.io/zanexo/zsmeet:0.1.0`（换成 [Releases](https://github.com/ZaneXo/zsmeet/releases) 里最新的版本号），再用 `docker compose pull && docker compose up -d --no-build` 代替上面最后一行。
 
 然后用浏览器打开 `http://服务器地址:8080`：
 
@@ -30,7 +32,7 @@ docker compose up -d --build
 
 第一次处理会议时，后台会下载约 280 MB 的识别模型（来自 Hugging Face，连不上时自动换国内镜像），之后不用再等。
 
-**升级**：`git pull && docker compose up -d --build`，数据库会自动迁移。
+**升级**：`git pull && docker compose up -d --build`，数据库会自动迁移。用发布好的镜像的话，把 `.env` 里 `ZSMEET_IMAGE` 的版本号改成新的，再执行 `docker compose pull && docker compose up -d --no-build`。
 
 **备份**：数据在三个 Docker 数据卷里。`zsmeet_pgdata` 是数据库，`zsmeet_data` 是录音，这两个要备份；`zsmeet_models` 是识别模型，丢了会重新下载。另外请保管好 `.env` 里的 `ZSMEET_SECRET_KEY`，没有它就解不开数据库里保存的 API Key。
 
@@ -204,6 +206,20 @@ make api NAME=DeleteMeeting METHOD=DELETE ROUTE=/api/meetings/{id}
 - 给用户看的文字（报错、提示）都写成能照着处理的中文，不把内部报错直接抛给用户。
 - 生成的文件（sqlc 的代码、`openapi.json`、`schema.d.ts`）都提交进仓库，`make test` 和 `make check` 会检查它们是不是最新的。
 - 网页里的站内链接用 `AppLink`（`web/src/components/AppLink.tsx`），不直接用 react-router 的 `Link`：用户按住 Option 点 `Link` 时，浏览器会下载一个没用的网页空壳。`make check` 会检查。
+
+### 发布
+
+每次 push 到 main、每个 PR，GitHub Actions 都会跑一遍 `make check` 和 `make test`（`.github/workflows/ci.yml`）。
+
+发新版本就推一个 v 开头的标签：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Actions（`.github/workflows/release.yml`）会先跑一遍检查和测试，再分别在 amd64 和 arm64 的机器上构建镜像（识别库通过 cgo 调用，不交叉编译），合成一个多架构镜像推到 `ghcr.io/zanexo/zsmeet`，打上 `0.1.0`、`0.1`、`latest` 三个标签（`v0.2.0-rc.1` 这样带「-」的预发布版本只打它自己的版本号），最后发一个 GitHub Release。在 Actions 页面手动运行 Release 时只试着构建两种架构，不推镜像、不发 Release。
+
+第一次发布后如果别人拉镜像提示没有权限，说明镜像还是私有的：在仓库主页右边的 Packages 里打开 zsmeet，到 Package settings 把 Visibility 改成 Public（只用改一次）。
 
 ## 路线图
 

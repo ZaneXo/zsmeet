@@ -1,10 +1,11 @@
 # zsmeet 的完整部署：数据库、网页和接口、后台处理。
 #
 #   cp .env.example .env    # 填两个密码
-#   docker compose up -d
+#   docker compose up -d --build
 #   打开 http://服务器地址:8080，按提示创建管理员
 #
-# 升级：docker compose pull && docker compose up -d（数据库会自动迁移）
+# 升级：git pull && docker compose up -d --build（数据库会自动迁移）
+# 用发布好的镜像（.env 里设了 ZSMEET_IMAGE）时，启动和升级都用 docker compose pull && docker compose up -d --no-build
 name: zsmeet
 
 x-zsmeet: &zsmeet

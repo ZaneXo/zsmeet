@@ -12,9 +12,13 @@ import (
 
 type Box struct{ aead cipher.AEAD }
 
+// derivePrefix 混进密钥派生里的固定前缀。它不是模块路径，永远不能改：
+// 一改，派生出的密钥就变了，数据库里已经存的凭证全都解不开（TestOpensEarlierCiphertext 守着它）。
+const derivePrefix = "zsmeet/secret/v1:"
+
 // New 用主密钥派生 AES-256-GCM 密钥。
 func New(masterKey string) (*Box, error) {
-	key := sha256.Sum256([]byte("github.com/ZaneXo/zsmeet/secret/v1:" + masterKey))
+	key := sha256.Sum256([]byte(derivePrefix + masterKey))
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return nil, err

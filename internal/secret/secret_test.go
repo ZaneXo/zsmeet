@@ -26,3 +26,16 @@ func TestSealOpen(t *testing.T) {
 		t.Fatalf("换了主密钥应该解不开，得到 %v", err)
 	}
 }
+
+// 之前版本存进数据库的凭证要一直解得开。这段密文是用主密钥 "sample-master-key" 加密 "sk-sample-000" 得到的，
+// 密钥派生方式（derivePrefix）一改，这个测试就会失败。
+func TestOpensEarlierCiphertext(t *testing.T) {
+	box, err := New("sample-master-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := box.Open("uVREWxlZkr5kcZ9RQ2xJ7Bpe+Tu0GMwxcCs37PszZl7XxkzbQWRJSfA=")
+	if err != nil || got != "sk-sample-000" {
+		t.Fatalf("解不开之前版本加密的凭证，密钥派生方式被改过了：%q %v", got, err)
+	}
+}

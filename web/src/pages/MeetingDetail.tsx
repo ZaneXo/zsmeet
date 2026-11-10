@@ -8,7 +8,7 @@ import type { Citation, Meeting, Segment, User } from "../api/client";
 import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings";
 import { Button, buttonClass, Card, Chip, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
-import { citeJump, LEAD_IN, parseJump } from "../lib/jump";
+import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
 import { AccessDialog, VISIBILITY_LABEL } from "./AccessDialog";
@@ -130,10 +130,13 @@ export function MeetingDetailPage({
 
   // 点了回答里的出处：在原地跳到那句话（和从搜索结果点过来一样，打开转写、定位、从前 3 秒开始播放）。
   // 总是在这里直接播放，不靠网址变化触发：网址里的时间点数值没变时（哪怕写法不同，「70」和「70.0」）上面的效果不会再跳。
-  // 网址统一改成出处时间点的写法，转写按它定位，刷新页面也还在这里。纪要里没标时间的行就打开纪要
+  // 网址统一改成出处时间点的写法，转写按它定位，刷新页面也还在这里。
+  // 纪要里没标时间的行就打开纪要，并去掉网址里的 ?t=，刷新页面也停在纪要
   const cite = (c: Citation) => {
     if (c.at < 0) {
       setTab("minutes");
+      const next = withoutJump(params);
+      if (next) setParams(next, { replace: true });
       return;
     }
     const j = citeJump(params.get("t"), c.at, c.source === "transcript");

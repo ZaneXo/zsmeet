@@ -1,7 +1,7 @@
 // 用 Node 自带的测试运行：pnpm -C web test
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { citeJump, jumpParam, parseJump } from "./jump.ts";
+import { citeJump, jumpParam, parseJump, withoutJump } from "./jump.ts";
 
 test("同一个时间点只有一种写法", () => {
   assert.equal(jumpParam(70, true), "70.0");
@@ -47,4 +47,14 @@ test("换了时间点：改网址，并标记已经跳过了", () => {
   assert.equal(j.param, "1.2");
   assert.equal(j.moved, true);
   assert.equal(citeJump(null, 12, false).moved, true);
+});
+
+test("打开纪要时去掉网址里的 ?t=，其他参数不动", () => {
+  const next = withoutJump(new URLSearchParams("t=70.5&x=1"));
+  assert.equal(next?.toString(), "x=1");
+  assert.equal(withoutJump(new URLSearchParams("x=1")), undefined);
+  // 不改传进来的参数
+  const params = new URLSearchParams("t=70");
+  withoutJump(params);
+  assert.equal(params.get("t"), "70");
 });

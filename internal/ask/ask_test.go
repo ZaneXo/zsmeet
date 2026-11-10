@@ -177,6 +177,61 @@ func TestBuildLabelsEveryLineAndKeepsBudget(t *testing.T) {
 	}
 }
 
+func TestBuildKeepsTranscriptWhenMinutesAreLong(t *testing.T) {
+	// 纪要比整份材料还长、又搜到了转写片段：转写片段也要放进去，不能被纪要挤掉
+	minutes := make([]Line, 100)
+	for i := range minutes {
+		minutes[i] = Line{Start: -1, Text: strings.Repeat("纪要", 50), Minutes: true}
+	}
+	src := Source{
+		MeetingID: uuid.New(), Title: "长会", Date: now, Minutes: minutes,
+		Transcript: [][]Line{
+			{{Start: 600, Speaker: "张敏", Text: "报价定为每年 12 万。"}},
+			{{Start: 1200, Speaker: "李航", Text: "合同下周签。"}},
+		},
+	}
+	m := Build([]Source{src}, 3000)
+	if n := utf8.RuneCountInString(m.Text); n > 3000 {
+		t.Errorf("材料不能超过 3000 字，实际 %d 字", n)
+	}
+	for _, want := range []string{"10:00 张敏：报价定为每年 12 万。", "……\n", "20:00 李航：合同下周签。", "纪要：纪要纪要"} {
+		if !strings.Contains(m.Text, want) {
+			t.Errorf("材料里应该有 %q：\n%s", want, m.Text)
+		}
+	}
+	if strings.HasSuffix(m.Text, "……") {
+		t.Errorf("材料末尾不要多一个「……」：\n%s", m.Text)
+	}
+
+	// 转写片段不多时，纪要可以用掉剩下的地方
+	full := Build([]Source{src}, 100_000)
+	if c := strings.Count(m.Text, "纪要："); c < 5 || c >= len(minutes) || strings.Count(full.Text, "纪要：") != len(minutes) {
+		t.Errorf("放得下时纪要全放，放不下时放一部分：%d、%d", c, strings.Count(full.Text, "纪要："))
+	}
+}
+
+func TestBuildDoesNotChargeDroppedSeparator(t *testing.T) {
+	// 第一场的第二段转写放不下：它前面的「……」没放进材料，也不能占后面会议的字数
+	a := Source{
+		MeetingID: uuid.New(), Title: "短会", Date: now,
+		Minutes:    []Line{{Start: -1, Text: "好。", Minutes: true}},
+		Transcript: [][]Line{{{Start: 1, Speaker: "张敏", Text: strings.Repeat("报价", 100)}}},
+	}
+	b := Source{MeetingID: uuid.New(), Title: "长会", Date: now, Transcript: [][]Line{{{Start: 1, Speaker: "李航", Text: strings.Repeat("合同", 60)}}}}
+	// 各自单独放进材料要多少字（Build 去掉了末尾的换行，加回来）
+	size := func(src Source) int { return utf8.RuneCountInString(Build([]Source{src}, 100_000).Text) + 1 }
+	onlyMinutes := a
+	onlyMinutes.Transcript = nil
+	budget := size(onlyMinutes) + size(b)
+	m := Build([]Source{a, b}, budget)
+	if m.Meetings != 2 || strings.Contains(m.Text, "报价") {
+		t.Errorf("第一场只放纪要，第二场正好放得下：%d 场\n%s", m.Meetings, m.Text)
+	}
+	if strings.Contains(m.Text, "……") {
+		t.Errorf("没放的转写片段前面不要「……」：\n%s", m.Text)
+	}
+}
+
 func TestCite(t *testing.T) {
 	a := uuid.New()
 	snippets := map[string]Snippet{

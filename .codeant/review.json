@@ -1,0 +1,106 @@
+{
+  "rules": [
+    {
+      "id": "user-facing-chinese-no-secrets",
+      "description": "给用户看的文字（报错、提示、界面文案）要写成能照着处理的中文，不把内部报错直接抛给用户。日志、报错和接口返回里不能带出密钥：大模型的 API Key、飞书的 App Secret、ZSMEET_SECRET_KEY 等。",
+      "files": [
+        "**/*.go",
+        "web/src/**/*.{ts,tsx}"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "generated-files-in-sync",
+      "description": "sqlc 生成的代码、web/openapi.json、web/src/api/schema.d.ts 不能手改：改 internal/db/queries 里的 SQL 或接口定义以后运行 make gen，生成的文件和源头一起提交。",
+      "files": [
+        "internal/db/queries/**",
+        "internal/db/migrations/**",
+        "internal/api/**"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "api-layer-and-permissions",
+      "description": "huma 只能出现在 internal/api 里（internal/arch 有测试守着），业务逻辑放在 internal/service。读写会议数据的接口都要带上当前用户，交给 service 按权限检查（internal/service/access.go 的 Access：看、编辑、管理）。看不到的会议一律当作不存在，返回 404，不能用 403 或者别的方式泄露它的存在、标题和内容。",
+      "files": [
+        "internal/api/**/*.go"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "meeting-access-rules",
+      "description": "会议的权限规则：管理员和创建者什么都能做；可见范围 team 所有成员能看，members 只有单独指定的人能看，private 只有创建者（和管理员）能看；指定能编辑的人可以改标题、编辑纪要、重新生成、重试、重新转写、给说话人改名、发到飞书；删除、恢复、改可见范围、上传录音只有创建者和管理员能做。搜索结果和搜索词扩展也不能带出看不到的会议。检查完权限再在另一个事务里修改时，注意中间状态被别人改掉的竞态，必要时 LockMeeting 或者在同一个事务里重新检查。",
+      "files": [
+        "internal/service/**/*.go"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "append-only-migrations",
+      "description": "goose 迁移：已经发布过的迁移不能改，只能加新的；每个迁移都要有能用的 Down。升级时库里已经有数据：加 NOT NULL 列要有默认值，改约束要考虑旧数据。",
+      "files": [
+        "internal/db/migrations/**/*.sql"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "sqlc-queries",
+      "description": "列出会议的查询要按 viewer 的可见范围过滤，和 ListMeetings 的写法一致。ANY、unnest 传进来的数组可能是空的；NULL 和空数组的语义不一样。",
+      "files": [
+        "internal/db/queries/**/*.sql"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "pipeline-runs-and-retries",
+      "description": "后台处理用 River 队列。同一场会议可能被重新排队：写结果前要用 run_id 确认这一轮还有效，过期的一轮不能改数据。任务会重试：每一步要能重复执行，失败要区分能重试的和不能重试的（permanent）。",
+      "files": [
+        "internal/pipeline/**/*.go"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "web-conventions",
+      "description": "站内链接用 web/src/components/AppLink.tsx 的 AppLink，不直接用 react-router 的 Link。接口类型来自生成的 web/src/api/schema.d.ts。按钮和入口按接口返回的 can_edit、can_manage 显示，不在前端自己判断角色。",
+      "files": [
+        "web/src/**/*.{ts,tsx}"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "workflows",
+      "description": "识别库 sherpa-onnx 通过 cgo 调用，镜像在 amd64、arm64 的机器上各自构建，不交叉编译。权限按需最小化；第三方 Action 用官方维护的。",
+      "files": [
+        ".github/workflows/**"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    }
+  ]
+}

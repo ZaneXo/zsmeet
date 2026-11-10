@@ -221,6 +221,16 @@ Actions（`.github/workflows/release.yml`）会先跑一遍检查和测试，再
 
 第一次发布后如果别人拉镜像提示没有权限，说明镜像还是私有的：在仓库主页右边的 Packages 里打开 zsmeet，到 Package settings 把 Visibility 改成 Public（只用改一次）。
 
+### 代码审查
+
+PR 由 [CodeAnt AI](https://www.codeant.ai) 自动做 AI 代码审查，审查意见写成 PR 评论。审查要求放在 `.codeant/` 目录里：
+
+- `instructions.json`：审查用中文、意见怎么写。
+- `review.json`：按目录检查的项目规矩，比如会议的权限规则、迁移只加不改、后台任务的 run_id。
+- `configuration.json`：不审查的文件，也就是生成的代码和锁文件。CodeAnt 的两份文档写法不一样，所以 `review_configuration`（PR 审查用）和 `file_filters`（代码扫描用）都写了。
+
+它是一个 GitHub App，不跑在 Actions 里，只审查 PR，直接 push 到 main 的提交不审查。fork 的仓库要用，得自己在 codeant.ai 装。
+
 ## 路线图
 
 接下来：实时字幕、桌面录音器（录系统声音）、钉钉 / 企业微信 / Slack、飞书扫码登录、GPU 加速。

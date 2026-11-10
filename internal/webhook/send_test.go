@@ -75,6 +75,12 @@ func TestSendFailures(t *testing.T) {
 		{webhook.Slack, webhooktest.Reply{Status: 403, Body: "action_prohibited"}, false, "限制了", 0},
 		{webhook.Slack, webhooktest.Reply{Status: 400, Body: "invalid_payload"}, false, "invalid_payload", 0},
 		{webhook.Slack, webhooktest.Reply{Status: 429, Body: "rate_limited"}, true, "发得太快了", time.Minute},
+		// Slack 用 Retry-After 说等多久：按它说的等，太短、太长的夹在 1 秒到 1 小时之间
+		{webhook.Slack, webhooktest.Reply{Status: 429, Body: "rate_limited", Header: map[string]string{"Retry-After": "30"}}, true, "发得太快了", 30 * time.Second},
+		{webhook.Slack, webhooktest.Reply{Status: 429, Body: "rate_limited", Header: map[string]string{"Retry-After": "0"}}, true, "发得太快了", time.Second},
+		{webhook.Slack, webhooktest.Reply{Status: 429, Body: "rate_limited", Header: map[string]string{"Retry-After": "99999999999"}}, true, "发得太快了", time.Hour},
+		{webhook.Slack, webhooktest.Reply{Status: 429, Body: "rate_limited", Header: map[string]string{"Retry-After": "soon"}}, true, "发得太快了", time.Minute},
+		{webhook.WeCom, webhooktest.Reply{Status: 429, Body: "", Header: map[string]string{"Retry-After": "5"}}, true, "HTTP 429", 5 * time.Second},
 		{webhook.Slack, webhooktest.Reply{Status: 500, Body: "oops"}, true, "HTTP 500", 0},
 	} {
 		tok := fmt.Sprintf("failing%02dsecret0000", i)

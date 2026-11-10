@@ -133,20 +133,32 @@ func (s *Service) resolveWebhook(in WebhookInput, prev *sqlc.Webhook) (sqlc.Webh
 	return w, nil
 }
 
+// 群机器人的锁（事务级的 advisory lock）：加群机器人的事务一个一个来，数出来的个数才不会过期
+const webhooksLock = 7_368_825
+
 // CreateWebhook 加一个群机器人。
 func (s *Service) CreateWebhook(ctx context.Context, user sqlc.User, in WebhookInput) (sqlc.Webhook, error) {
 	w, err := s.resolveWebhook(in, nil)
 	if err != nil {
 		return sqlc.Webhook{}, err
 	}
-	if n, err := s.q.CountWebhooks(ctx); err != nil {
-		return sqlc.Webhook{}, err
-	} else if n >= maxWebhooks {
-		return sqlc.Webhook{}, invalid("最多加 %d 个群机器人", maxWebhooks)
-	}
-	return s.q.CreateWebhook(ctx, sqlc.CreateWebhookParams{
-		Platform: w.Platform, Name: w.Name, Url: w.Url, UrlMasked: w.UrlMasked, Secret: w.Secret, AutoPush: w.AutoPush, CreatedBy: &user.ID,
+	var created sqlc.Webhook
+	err = s.tx(ctx, func(tx pgx.Tx, q *sqlc.Queries) error {
+		// 两个管理员同时加第 50 个：先拿锁再数，后一个数的时候能看到前一个加的
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", webhooksLock); err != nil {
+			return err
+		}
+		if n, err := q.CountWebhooks(ctx); err != nil {
+			return err
+		} else if n >= maxWebhooks {
+			return invalid("最多加 %d 个群机器人，请先删掉不用的再加", maxWebhooks)
+		}
+		created, err = q.CreateWebhook(ctx, sqlc.CreateWebhookParams{
+			Platform: w.Platform, Name: w.Name, Url: w.Url, UrlMasked: w.UrlMasked, Secret: w.Secret, AutoPush: w.AutoPush, CreatedBy: &user.ID,
+		})
+		return err
 	})
+	return created, err
 }
 
 func (s *Service) getWebhook(ctx context.Context, q *sqlc.Queries, id uuid.UUID) (sqlc.Webhook, error) {
@@ -274,14 +286,10 @@ func (s *Service) MeetingWebhooks(ctx context.Context, user sqlc.User, id uuid.U
 }
 
 // SendToWebhooks 把会议当前版本的纪要发到选的几个群机器人。真正的发送在后台做，这里记下来、加任务就返回。
-// 能编辑这场会议的人可以发。
-func (s *Service) SendToWebhooks(ctx context.Context, user sqlc.User, id uuid.UUID, ids []uuid.UUID) ([]sqlc.WebhookSend, error) {
-	m, err := s.editable(ctx, user, id)
-	if err != nil {
+// 能编辑这场会议的人可以发。version 是网页上看到的、要发的那一版：纪要已经变成别的版本时不发，免得发出去的不是看到的那一版；为 0 时不检查。
+func (s *Service) SendToWebhooks(ctx context.Context, user sqlc.User, id uuid.UUID, ids []uuid.UUID, version int32) ([]sqlc.WebhookSend, error) {
+	if _, err := s.editable(ctx, user, id); err != nil {
 		return nil, err
-	}
-	if m.CurrentVersion == 0 {
-		return nil, conflict("这场会议还没有纪要，等生成以后再发")
 	}
 	// 去掉重复的，保持选的顺序
 	seen := map[uuid.UUID]bool{}
@@ -295,11 +303,32 @@ func (s *Service) SendToWebhooks(ctx context.Context, user sqlc.User, id uuid.UU
 	}
 
 	var sends []sqlc.WebhookSend
-	err = s.tx(ctx, func(tx pgx.Tx, q *sqlc.Queries) error {
+	err := s.tx(ctx, func(tx pgx.Tx, q *sqlc.Queries) error {
 		// 同一个群一次只发一条，免得连点几下发出好几条。先锁住会议这一行，
 		// 同时到的两个请求排队检查，后一个能看到前一个刚记下的「发送中」
-		if _, err := q.LockMeeting(ctx, id); err != nil {
+		m, err := q.LockMeeting(ctx, id)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && m.DeletedAt != nil) {
+			return errNoMeeting
+		}
+		if err != nil {
 			return err
+		}
+		// 上面的检查是在锁外面做的：等锁的时候权限可能被收回了、纪要可能重新生成了，锁住以后按现在的再看一遍
+		access, err := accessIn(ctx, q, user, m)
+		if err != nil {
+			return err
+		}
+		if !access.View {
+			return errNoMeeting
+		}
+		if !access.Edit {
+			return errNotAllowed
+		}
+		if m.CurrentVersion == 0 {
+			return conflict("这场会议还没有纪要，等生成以后再发")
+		}
+		if version != 0 && version != m.CurrentVersion {
+			return conflict("纪要刚刚更新成了第 %d 版，和你看到的第 %d 版不一样。请看一下新的纪要，再重新发送", m.CurrentVersion, version)
 		}
 		pending, err := q.PendingWebhookSends(ctx, sqlc.PendingWebhookSendsParams{MeetingID: id, WindowSecs: WebhookPendingWindow.Seconds()})
 		if err != nil {

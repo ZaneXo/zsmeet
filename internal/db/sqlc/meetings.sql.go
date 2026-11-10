@@ -1098,6 +1098,48 @@ func (q *Queries) SetMeetingTerms(ctx context.Context, arg SetMeetingTermsParams
 	return err
 }
 
+const shareLockMeeting = `-- name: ShareLockMeeting :one
+SELECT id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers FROM meetings WHERE id = $1 FOR SHARE
+`
+
+// 共享锁：拿着它时会议这一行（可见范围、版本、删除）改不了，UPDATE、DELETE 和 LockMeeting 都要等它放开；别的读不受影响
+func (q *Queries) ShareLockMeeting(ctx context.Context, id uuid.UUID) (Meeting, error) {
+	row := q.db.QueryRow(ctx, shareLockMeeting, id)
+	var i Meeting
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Title,
+		&i.Source,
+		&i.Status,
+		&i.Stage,
+		&i.Progress,
+		&i.Error,
+		&i.RunID,
+		&i.RunBy,
+		&i.HeartbeatAt,
+		&i.Requeues,
+		&i.Template,
+		&i.Hotwords,
+		&i.DurationSec,
+		&i.AudioKey,
+		&i.AudioDeletedAt,
+		&i.Visibility,
+		&i.CurrentVersion,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastChunkAt,
+		&i.Marks,
+		&i.Terms,
+		&i.DeletedAt,
+		&i.DeletedBy,
+		&i.Speakers,
+		&i.Retranscribe,
+		&i.AutoSpeakers,
+	)
+	return i, err
+}
+
 const termsMatching = `-- name: TermsMatching :many
 SELECT DISTINCT (t.value->>'term')::text AS term, (t.value->'variants')::jsonb AS variants
 FROM meetings m

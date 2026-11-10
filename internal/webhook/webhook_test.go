@@ -319,3 +319,21 @@ func TestPayloadSizeLimits(t *testing.T) {
 		}
 	}
 }
+
+// Retry-After 可以是秒数，也可以是一个 HTTP 日期。
+func TestRetryAfter(t *testing.T) {
+	now := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+	for v, want := range map[string]time.Duration{
+		"":                              time.Minute,
+		"12":                            12 * time.Second,
+		" 7 ":                           7 * time.Second,
+		"-3":                            time.Second,
+		"Thu, 01 Jan 2026 09:02:00 GMT": 2 * time.Minute,
+		"Thu, 01 Jan 2026 08:00:00 GMT": time.Second,
+		"Fri, 02 Jan 2026 09:00:00 GMT": time.Hour,
+	} {
+		if got := retryAfter(v, now); got != want {
+			t.Errorf("Retry-After %q：要等 %v，算出来 %v", v, want, got)
+		}
+	}
+}

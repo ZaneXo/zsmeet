@@ -23,10 +23,11 @@ type Received struct {
 	Body     string
 }
 
-// Reply 是指定的返回：HTTP 状态码和内容。
+// Reply 是指定的返回：HTTP 状态码、内容，和要加的响应头（比如 Retry-After）。
 type Reply struct {
 	Status int
 	Body   string
+	Header map[string]string
 }
 
 type Server struct {
@@ -103,6 +104,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.received = append(s.received, rec)
 		s.mu.Unlock()
+	}
+	for k, v := range reply.Header {
+		w.Header().Set(k, v)
 	}
 	w.WriteHeader(reply.Status)
 	io.WriteString(w, reply.Body)

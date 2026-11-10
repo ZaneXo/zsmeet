@@ -321,7 +321,8 @@ func (h *Handlers) ListMeetingWebhooks(ctx context.Context, in *MeetingID) (*Mee
 type SendToWebhooksInput struct {
 	ID   string `path:"id" format:"uuid"`
 	Body struct {
-		WebhookIDs []string `json:"webhook_ids" minItems:"1" maxItems:"50" doc:"发到哪几个群机器人"`
+		WebhookIDs     []string `json:"webhook_ids" minItems:"1" maxItems:"50" doc:"发到哪几个群机器人"`
+		MinutesVersion int32    `json:"minutes_version,omitempty" minimum:"0" doc:"网页上看到的纪要版本：当前版本已经不是它时返回 409、不发。不传表示发当前版本，不检查"`
 	}
 }
 
@@ -355,7 +356,7 @@ func (h *Handlers) SendToWebhooks(ctx context.Context, in *SendToWebhooksInput) 
 		ids = append(ids, hid)
 	}
 	user := currentUser(ctx)
-	sends, err := h.svc.SendToWebhooks(ctx, user, id, ids)
+	sends, err := h.svc.SendToWebhooks(ctx, user, id, ids, in.Body.MinutesVersion)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

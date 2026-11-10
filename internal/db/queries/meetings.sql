@@ -11,6 +11,10 @@ WHERE m.id = $1;
 -- name: LockMeeting :one
 SELECT * FROM meetings WHERE id = $1 FOR UPDATE;
 
+-- name: ShareLockMeeting :one
+-- 共享锁：拿着它时会议这一行（可见范围、版本、删除）改不了，UPDATE、DELETE 和 LockMeeting 都要等它放开；别的读不受影响
+SELECT * FROM meetings WHERE id = $1 FOR SHARE;
+
 -- name: ListMeetings :many
 -- 只列 viewer 能看的会议（管理员都能看，见 service.Access）。
 -- query 是 Go 里拼好的 tsquery（见 search.TSQuery），为空表示不筛选。

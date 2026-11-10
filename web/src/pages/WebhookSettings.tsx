@@ -4,6 +4,7 @@ import type { FormEvent, ReactNode } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { components } from "../api/schema";
 import { Button, Card, Chip, Field, Input, Notice, Select, Spinner } from "../components/ui";
+import { localOnly } from "../lib/site";
 
 type Webhook = components["schemas"]["Webhook"];
 type Body = components["schemas"]["WebhookBody"];
@@ -27,16 +28,6 @@ function refresh() {
   void queryClient.invalidateQueries({ queryKey: ["settings", "webhooks"] });
   // 会议页上「发到群里」能选的群跟着变
   void queryClient.invalidateQueries({ queryKey: ["meeting-webhooks"] });
-}
-
-/** 只有这台电脑自己能打开的地址。消息里的链接用它拼的话，同事点了打不开。 */
-function localOnly(url: string): boolean {
-  try {
-    const host = new URL(url).hostname;
-    return host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "0.0.0.0" || host === "[::1]";
-  } catch {
-    return false;
-  }
 }
 
 /** 群机器人：钉钉、企业微信、Slack 群里的自定义机器人，纪要可以发到这些群里。只有管理员能看、能改。 */

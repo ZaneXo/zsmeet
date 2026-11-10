@@ -77,6 +77,10 @@ func Send(ctx context.Context, t Target, payload []byte) error {
 	default:
 		result = slackResult(resp.StatusCode, body)
 	}
+	// HTTP 429 带着 Retry-After（Slack 会给）的，按它说的等
+	if e, ok := errors.AsType[*Error](result); ok && resp.StatusCode == http.StatusTooManyRequests {
+		e.Wait = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
 	if e, ok := errors.AsType[*Error](result); ok {
 		e.Msg = redact(e.Msg, t, checked)
 	}
@@ -95,6 +99,27 @@ func Sign(secret string, ms int64) string {
 func signURL(checked, secret string, now time.Time) string {
 	ms := now.UnixMilli()
 	return checked + "&timestamp=" + strconv.FormatInt(ms, 10) + "&sign=" + url.QueryEscape(Sign(secret, ms))
+}
+
+// Retry-After 的上下限：太短的当作 1 秒；太长的（多半是写错了）最多等 1 小时，
+// 超过了后台最晚重试的时间（service.WebhookRetryUntil）就直接记成失败，不白等
+const (
+	minRetryAfter = time.Second
+	maxRetryAfter = time.Hour
+)
+
+// retryAfter 解析 HTTP 429 的 Retry-After（秒数，或者一个 HTTP 日期），夹在上下限之间。没有或者看不懂时等 1 分钟。
+func retryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	var d time.Duration
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		d = time.Duration(min(max(secs, 0), int64(maxRetryAfter/time.Second))) * time.Second
+	} else if at, err := http.ParseTime(v); err == nil {
+		d = at.Sub(now)
+	} else {
+		return minuteThrottle
+	}
+	return min(max(d, minRetryAfter), maxRetryAfter)
 }
 
 // httpResult 处理钉钉、企业微信返回的不是 200 的情况。

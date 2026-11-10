@@ -7,6 +7,7 @@ import type { components } from "../api/schema";
 import { Button, Chip, Modal, Notice } from "../components/ui";
 import type { Tone } from "../components/ui";
 import { dateTime } from "../lib/format";
+import { newestFirst } from "../lib/time";
 import { PLATFORM_LABEL } from "./WebhookSettings";
 
 // 把纪要发到钉钉、企业微信、Slack 的群机器人：会议页上「发到群里」的弹窗（选群、发送、每个群最近一次的情况），
@@ -55,7 +56,7 @@ export function LatestWebhookSends({ hooks, meeting, onOpen }: { hooks: Hook[]; 
   const sends = hooks
     .map((h) => h.latest)
     .filter((s): s is Send => !!s && (!!onOpen || s.status === "done"))
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    .sort((a, b) => newestFirst(a.created_at, b.created_at));
   const [latest] = sends;
   if (!latest) return null;
 
@@ -97,23 +98,34 @@ export function LatestWebhookSends({ hooks, meeting, onOpen }: { hooks: Hook[]; 
 /** 「发到群里」弹窗：勾上要发的群，发送；每个群旁边是这场会议最近一次发到那里的情况。发送在后台进行，弹窗开着就能看到结果。 */
 export function WebhookShareDialog({ meeting, hooks, onClose }: { meeting: Meeting; hooks: Hook[]; onClose: () => void }) {
   const [chosen, setChosen] = useState<string[]>([]);
+  const pending = (h: Hook) => h.latest?.status === "pending";
+  // 真正要发的：选了以后别人（或者自动发送）开始往那个群发了、群被删了的不算。不然复选框灰着取消不掉，发送按钮还亮着
+  const sendable = chosen.filter((id) => hooks.some((h) => h.id === id && !pending(h)));
   const send = useMutation({
-    mutationFn: () => unwrap(api.POST("/api/meetings/{id}/webhooks", { params: { path: { id: meeting.id } }, body: { webhook_ids: chosen } })),
+    // 带上看到的版本：纪要在这期间重新生成或者被改过的话，服务器不发，免得发出去的不是这里写的那一版
+    mutationFn: () =>
+      unwrap(
+        api.POST("/api/meetings/{id}/webhooks", {
+          params: { path: { id: meeting.id } },
+          body: { webhook_ids: sendable, minutes_version: meeting.minutes_version },
+        }),
+      ),
     onSuccess: () => setChosen([]),
+    // 版本对不上时重新取会议，上面写的版本跟着变成新的
+    onError: () => queryClient.invalidateQueries({ queryKey: ["meeting", meeting.id] }),
     // 成功、失败都重新取一次：失败可能是别人（或者自动发送）正在发，要显示出来
     onSettled: () => queryClient.invalidateQueries({ queryKey: hooksKey(meeting.id) }),
   });
-  const pending = (h: Hook) => h.latest?.status === "pending";
   const toggle = (id: string, on: boolean) => {
-    setChosen((c) => (on ? [...c, id] : c.filter((x) => x !== id)));
+    setChosen(on ? [...sendable, id] : sendable.filter((x) => x !== id));
     send.reset();
   };
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    send.mutate();
+    if (sendable.length > 0) send.mutate();
   };
   // 这一版已经发到过选中的群：提醒一下，再发群里会多一条
-  const repeat = hooks.some((h) => chosen.includes(h.id) && h.latest?.status === "done" && h.latest.minutes_version === meeting.minutes_version);
+  const repeat = hooks.some((h) => sendable.includes(h.id) && h.latest?.status === "done" && h.latest.minutes_version === meeting.minutes_version);
 
   return (
     <Modal title="发到群里" onClose={onClose}>
@@ -128,7 +140,7 @@ export function WebhookShareDialog({ meeting, hooks, onClose }: { meeting: Meeti
                 <input
                   type="checkbox"
                   className="size-4 shrink-0 cursor-pointer accent-brand disabled:cursor-not-allowed"
-                  checked={chosen.includes(h.id)}
+                  checked={sendable.includes(h.id)}
                   disabled={pending(h)}
                   onChange={(e) => toggle(h.id, e.target.checked)}
                 />
@@ -148,8 +160,8 @@ export function WebhookShareDialog({ meeting, hooks, onClose }: { meeting: Meeti
         {send.isSuccess && <Notice tone="ok">已经开始发送，结果会显示在上面。</Notice>}
         <div className="flex flex-wrap items-center justify-end gap-3">
           {repeat && <span className="mr-auto text-[13px] text-muted">这一版已经发到过选中的群，再发一次群里会多一条。</span>}
-          <Button type="submit" variant="primary" disabled={chosen.length === 0 || send.isPending}>
-            {send.isPending ? "正在发送…" : chosen.length > 1 ? `发到 ${chosen.length} 个群` : "发送"}
+          <Button type="submit" variant="primary" disabled={sendable.length === 0 || send.isPending}>
+            {send.isPending ? "正在发送…" : sendable.length > 1 ? `发到 ${sendable.length} 个群` : "发送"}
           </Button>
         </div>
       </form>

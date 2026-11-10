@@ -141,19 +141,38 @@ func sendMessage(err error) string {
 	return "服务器内部出错了，没发出去"
 }
 
+// send 发一条。返回 nil 表示群机器人已经收下了，之后不管怎样都不能再让 River 重试（群里会收到两条一样的）。
+//
+// 从检查会议到发完，一直拿着会议这一行的共享锁（ShareLockMeeting）：改可见范围、删除会议都要先锁住会议，
+// 只能排在这次发送前面（这里就看得到，不发）或者后面（发的时候确实是团队可见的）。代价是这段时间里改会议的操作
+// 要等这一条发完，最多等 webhook.SendTimeout（15 秒），一般一秒以内；webhook 队列一次只发一条，也只占一个数据库连接。
 func (ww *webhookWorker) send(ctx context.Context, send sqlc.WebhookSend) error {
 	w := ww.w
 	if send.WebhookID == nil {
 		return permanent("这个群机器人已经被管理员删掉了")
 	}
-	hook, err := w.q.GetWebhook(ctx, *send.WebhookID)
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	q := w.q.WithTx(tx)
+
+	_, err = q.ShareLockMeeting(ctx, send.MeetingID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return permanent("会议已经删除了")
+	}
+	if err != nil {
+		return err
+	}
+	hook, err := q.GetWebhook(ctx, *send.WebhookID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return permanent("这个群机器人已经被管理员删掉了")
 	}
 	if err != nil {
 		return err
 	}
-	row, err := w.q.GetMeeting(ctx, send.MeetingID)
+	row, err := q.GetMeeting(ctx, send.MeetingID)
 	if err != nil {
 		return err
 	}
@@ -170,7 +189,7 @@ func (ww *webhookWorker) send(ctx context.Context, send sqlc.WebhookSend) error 
 			return permanent("管理员关掉了这个群的自动发送")
 		}
 	}
-	mv, err := w.q.GetMinutesVersion(ctx, sqlc.GetMinutesVersionParams{MeetingID: m.ID, Version: send.MinutesVersion})
+	mv, err := q.GetMinutesVersion(ctx, sqlc.GetMinutesVersionParams{MeetingID: m.ID, Version: send.MinutesVersion})
 	if err != nil {
 		return err
 	}
@@ -205,7 +224,32 @@ func (ww *webhookWorker) send(ctx context.Context, send sqlc.WebhookSend) error 
 		}
 		return err
 	}
-	return w.q.FinishWebhookSend(ctx, send.ID)
+	// 发出去了：先放开会议的锁（事务里只读过，回滚就行），再记成已发送
+	_ = tx.Rollback(context.WithoutCancel(ctx))
+	ww.finish(ctx, send)
+	return nil
+}
+
+// finishTries 是群机器人收下以后，记成「已发送」最多试几次、每次隔多久
+var finishTries, finishPause = 3, time.Second
+
+// finish 把发出去了的 send 记成已发送。写不进去（数据库暂时连不上）就隔一会儿再试几次；还是不行只记日志：
+// 不能让 River 重试，否则群里会再收到一条一样的。这一条在网页上会一直是发送中，过了 WebhookPendingWindow 报成没发出去。
+func (ww *webhookWorker) finish(ctx context.Context, send sqlc.WebhookSend) {
+	bg := context.WithoutCancel(ctx)
+	var err error
+	for i := range finishTries {
+		if i > 0 {
+			time.Sleep(finishPause)
+		}
+		tctx, cancel := context.WithTimeout(bg, 15*time.Second)
+		err = ww.w.q.FinishWebhookSend(tctx, send.ID)
+		cancel()
+		if err == nil {
+			return
+		}
+	}
+	slog.Error("纪要已经发到群里了，但没能记成已发送", "meeting", send.MeetingID, "send", send.ID, "err", err)
 }
 
 // NextRetry 决定第 job.Attempt 次失败以后，过多久再试。和 webhookRetry 里算的一样（限流的不走这里，是 snooze）。

@@ -7,6 +7,7 @@ import { AppLink } from "../components/AppLink";
 import { Button, buttonClass, Card, Chip, Field, Input, Notice, Select, Spinner } from "../components/ui";
 import type { Tone } from "../components/ui";
 import { dateTime } from "../lib/format";
+import { localOnly } from "../lib/site";
 
 type Saved = components["schemas"]["FeishuSettings"];
 type Chat = components["schemas"]["FeishuChat"];
@@ -50,16 +51,6 @@ function redirectURL(siteURL: string): string {
     return "";
   }
   return site + CALLBACK_PATH;
-}
-
-/** 只有这台电脑自己能打开的地址。卡片上的链接用它拼的话，同事点了打不开。 */
-function localOnly(url: string): boolean {
-  try {
-    const host = new URL(url).hostname;
-    return host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "0.0.0.0" || host === "[::1]";
-  } catch {
-    return false;
-  }
 }
 
 /**

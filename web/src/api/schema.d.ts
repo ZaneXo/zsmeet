@@ -1884,6 +1884,11 @@ export interface components {
             text: string;
         };
         SendToWebhooksInputBody: {
+            /**
+             * Format: int32
+             * @description 网页上看到的纪要版本：当前版本已经不是它时返回 409、不发。不传表示发当前版本，不检查
+             */
+            minutes_version?: number;
             /** @description 发到哪几个群机器人 */
             webhook_ids: string[] | null;
         };

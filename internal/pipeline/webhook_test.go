@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -365,5 +366,118 @@ func TestWebhookSendFailures(t *testing.T) {
 	}
 	if err := work(s, 1); err != nil {
 		t.Errorf("记录没了就什么都不做：%v", err)
+	}
+}
+
+// waitLockWait 等到这个测试数据库里有一个会话在等锁（行锁、advisory lock 都算），期间 done 先返回了就是没在等锁。
+func (e *env) waitLockWait(done <-chan error, what string) {
+	e.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := e.pool.QueryRow(e.t.Context(), "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting); err != nil {
+			e.t.Fatal(err)
+		}
+		if waiting > 0 {
+			return
+		}
+		select {
+		case err := <-done:
+			e.t.Fatalf("%s：不该不等锁就做完（%v）", what, err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("%s：等了 10 秒也没在锁上排队", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// 自动发送检查可见范围时锁住会议：正在改可见范围（已经锁住了会议、还没提交）时，发送等它改完再看，
+// 改成只有自己能看的就不发。反过来，正在发的时候改可见范围要等这一条发完。
+func TestWebhookAutoPushWaitsForVisibilityChange(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fake := e.hooks()
+	e.addHook(fake, webhook.WeCom, "wecomtoken0123456789", "研发群", true)
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	sends := e.webhookSends(args.MeetingID)
+	if len(sends) != 1 {
+		t.Fatalf("排上了自动发送：%+v", sends)
+	}
+	ctx := t.Context()
+
+	// 相当于 service.SetMeetingAccess：先锁住会议，再改可见范围
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := e.q.WithTx(tx).LockMeeting(ctx, args.MeetingID); err != nil {
+		t.Fatal(err)
+	}
+	ww := &webhookWorker{w: e.w}
+	done := make(chan error, 1)
+	go func() { done <- ww.Work(ctx, jobOf(queue.WebhookSendArgs{SendID: sends[0].ID}, 1)) }()
+	e.waitLockWait(done, "改可见范围的时候发送")
+	if _, err := tx.Exec(ctx, "UPDATE meetings SET visibility = 'private' WHERE id = $1", args.MeetingID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, &rivertype.JobCancelError{}) {
+			t.Fatalf("改成只有自己能看以后不再发：%v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("可见范围改完以后发送应该做完")
+	}
+	if got := fake.Received(); len(got) != 0 {
+		t.Errorf("改成只有自己能看的会议不能发到群里：%+v", got)
+	}
+}
+
+// 群机器人已经收下了、但记成已发送时数据库出错：不能让 River 重试（群里会再收到一条一样的）。
+func TestWebhookNoRepostWhenFinishFails(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fake := e.hooks()
+	e.addHook(fake, webhook.Slack, "slacktoken0123456789", "#product", true)
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	sends := e.webhookSends(args.MeetingID)
+	if len(sends) != 1 {
+		t.Fatalf("排上了自动发送：%+v", sends)
+	}
+	ctx := t.Context()
+	// 模拟数据库写不进去：把发送记录改成已发送时报错
+	if _, err := e.pool.Exec(ctx, `
+CREATE FUNCTION test_fail_done() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	IF NEW.status = 'done' THEN RAISE EXCEPTION 'database is down'; END IF;
+	RETURN NEW;
+END $$;
+CREATE TRIGGER test_fail_done BEFORE UPDATE ON webhook_sends FOR EACH ROW EXECUTE FUNCTION test_fail_done();`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = e.pool.Exec(context.Background(), "DROP TRIGGER test_fail_done ON webhook_sends; DROP FUNCTION test_fail_done()")
+	})
+	finishPause = 10 * time.Millisecond
+	t.Cleanup(func() { finishPause = time.Second })
+
+	ww := &webhookWorker{w: e.w}
+	if err := ww.Work(ctx, jobOf(queue.WebhookSendArgs{SendID: sends[0].ID}, 1)); err != nil {
+		t.Errorf("已经发出去了，不能交给 River 重试：%v", err)
+	}
+	if got := fake.Received(); len(got) != 1 {
+		t.Errorf("群里只收到一条：%d", len(got))
 	}
 }

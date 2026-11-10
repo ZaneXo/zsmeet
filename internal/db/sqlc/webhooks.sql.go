@@ -96,8 +96,8 @@ func (q *Queries) CreateWebhook(ctx context.Context, arg CreateWebhookParams) (W
 }
 
 const createWebhookSend = `-- name: CreateWebhookSend :one
-INSERT INTO webhook_sends (meeting_id, webhook_id, webhook_name, platform, minutes_version, requested_by)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO webhook_sends (meeting_id, webhook_id, webhook_name, platform, minutes_version, requested_by, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
 RETURNING id, meeting_id, webhook_id, webhook_name, platform, minutes_version, status, error, requested_by, created_at, finished_at
 `
 
@@ -110,6 +110,8 @@ type CreateWebhookSendParams struct {
 	RequestedBy    *uuid.UUID
 }
 
+// created_at 用写入时的时间（clock_timestamp），不用事务开始的时间（now）：两条路径都是锁住会议以后才写，
+// 等锁的那一段不算进去，「最近一次」才按真正的先后排、「发送中」的期限才从真正开始发算起
 func (q *Queries) CreateWebhookSend(ctx context.Context, arg CreateWebhookSendParams) (WebhookSend, error) {
 	row := q.db.QueryRow(ctx, createWebhookSend,
 		arg.MeetingID,
@@ -315,7 +317,7 @@ func (q *Queries) NoteWebhookSendRetry(ctx context.Context, arg NoteWebhookSendR
 const pendingWebhookSends = `-- name: PendingWebhookSends :many
 SELECT DISTINCT webhook_id FROM webhook_sends
 WHERE meeting_id = $1 AND status = 'pending' AND webhook_id IS NOT NULL
-  AND created_at > now() - make_interval(secs => $2::float8)
+  AND created_at > clock_timestamp() - make_interval(secs => $2::float8)
 `
 
 type PendingWebhookSendsParams struct {

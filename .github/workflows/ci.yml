@@ -30,12 +30,14 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          # pnpm 由 corepack 按 web/package.json 里的 packageManager 装，这里不用 setup-node 的缓存
           package-manager-cache: false
 
-      - name: 安装前端依赖
+      # 装 web/package.json 里 packageManager 指定的 pnpm 版本。不用 corepack：它按当前目录找 package.json，
+      # 在仓库根目录执行 pnpm -C web 时会装成最新版，和锁定的版本对不上
+      - name: 安装 pnpm 和前端依赖
         run: |
-          corepack enable
+          npm install -g "$(node -p 'require("./web/package.json").packageManager.split("+")[0]')"
+          pnpm --version
           pnpm -C web install --frozen-lockfile
 
       # 后台处理的测试要用 ffmpeg 转码

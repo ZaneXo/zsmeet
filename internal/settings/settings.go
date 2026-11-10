@@ -36,6 +36,11 @@ func New(q *sqlc.Queries, box *secret.Box) *Store {
 	return &Store{q: q, box: box}
 }
 
+// WithTx 返回在事务里读写的 Store（q 是 sqlc.Queries.WithTx 得到的）：拿着锁读、写设置时用，读到的和锁保护的改动在同一个事务里。
+func (s *Store) WithTx(q *sqlc.Queries) *Store {
+	return &Store{q: q, box: s.box}
+}
+
 // Box 是加密凭证的那把钥匙。用飞书登录时，暂存在浏览器里的 state 也用它加密（见 secret.Box.SealFor）。
 func (s *Store) Box() *secret.Box { return s.box }
 

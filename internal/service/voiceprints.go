@@ -38,9 +38,16 @@ func (s *Service) VoiceprintSettings(ctx context.Context) (settings.Voiceprints,
 }
 
 // SaveVoiceprintSettings 打开或关掉声纹。关掉以后不再收集、不再比对，已经记下的声纹留着，要删的话用 DeleteAllVoiceprints。
+// 拿着声纹库的锁改：正在存声音特征、比对的事务（转写完、改名）都是拿着锁、在锁里读的设置，
+// 所以关掉的请求返回时，它们要么已经做完，要么之后读到的是关着，不会在关掉以后还存或者比对。
 func (s *Service) SaveVoiceprintSettings(ctx context.Context, enabled bool) (settings.Voiceprints, error) {
 	v := settings.Voiceprints{Enabled: enabled}
-	return v, s.settings.SaveVoiceprints(ctx, v)
+	return v, s.tx(ctx, func(_ pgx.Tx, q *sqlc.Queries) error {
+		if err := LockVoiceprints(ctx, q); err != nil {
+			return err
+		}
+		return s.settings.WithTx(q).SaveVoiceprints(ctx, v)
+	})
 }
 
 // Voiceprint 是声纹库里的一个人。只给管理员看：不说是哪几场会议，只说有几场。
@@ -110,7 +117,8 @@ func (s *Service) learnVoices(ctx context.Context, q *sqlc.Queries, meetingID uu
 	if err := LockVoiceprints(ctx, q); err != nil {
 		return err
 	}
-	cfg, err := s.settings.Voiceprints(ctx)
+	// 在锁里、同一个事务里读设置（见 SaveVoiceprintSettings）
+	cfg, err := s.settings.WithTx(q).Voiceprints(ctx)
 	if err != nil {
 		return err
 	}

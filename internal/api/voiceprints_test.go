@@ -256,7 +256,7 @@ func TestVoiceprintCleanupOnlyTouchesItsOwn(t *testing.T) {
 	}
 }
 
-// 改声纹库的操作（改名记样本、删一个、全部删掉）都要先拿声纹库的锁：别的事务拿着锁时它们等着，放开以后才做。
+// 改声纹库的操作（改名记样本、删一个、全部删掉）和打开、关掉声纹都要先拿声纹库的锁：别的事务拿着锁时它们等着，放开以后才做。
 func TestVoiceprintMutationsWaitForLibraryLock(t *testing.T) {
 	c := newServer(t)
 	c.setup()
@@ -276,6 +276,8 @@ func TestVoiceprintMutationsWaitForLibraryLock(t *testing.T) {
 		{"改名记样本", "PUT", "/api/meetings/" + id + "/speakers", obj{"names": obj{"1": "李航"}}, 200},
 		{"删一个", "DELETE", "/api/voiceprints/" + zhang, nil, 204},
 		{"全部删掉", "DELETE", "/api/voiceprints", nil, 204},
+		// 打开、关掉也拿锁：正在存声音特征、比对的事务做完以后才算关掉（见 service.SaveVoiceprintSettings）
+		{"关掉声纹", "PUT", "/api/settings/voiceprints", obj{"enabled": false}, 200},
 	} {
 		t.Run(op.name, func(t *testing.T) {
 			tx, err := c.pool.Begin(t.Context())

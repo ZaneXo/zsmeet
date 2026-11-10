@@ -18,8 +18,8 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/google/uuid"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
 // CookieName 是会话 Cookie 的名字。

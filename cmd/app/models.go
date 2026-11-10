@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"os"
 
-	"zsmeet/internal/models"
+	"github.com/ZaneXo/zsmeet/internal/models"
 )
 
 // downloadModels 不需要数据库，只看模型目录和镜像地址这两个环境变量。

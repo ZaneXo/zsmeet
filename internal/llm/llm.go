@@ -14,7 +14,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 
-	"zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/settings"
 )
 
 // 一次请求最长等多久。长会议的纪要在慢模型上要几分钟。

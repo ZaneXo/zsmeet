@@ -9,8 +9,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/queue"
 )
 
 // reaper 每分钟巡检一次：会议显示「处理中」但心跳已经停了，说明处理它的 worker 挂了

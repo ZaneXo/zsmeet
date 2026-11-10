@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 func input(n int) Input {

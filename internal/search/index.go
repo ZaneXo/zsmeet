@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 // Reindex 用会议的标题、当前纪要和转写重建搜索索引。

@@ -13,13 +13,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"zsmeet/internal/audio"
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/llm"
-	"zsmeet/internal/minutes"
-	"zsmeet/internal/search"
-	"zsmeet/internal/storage"
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/audio"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/llm"
+	"github.com/ZaneXo/zsmeet/internal/minutes"
+	"github.com/ZaneXo/zsmeet/internal/search"
+	"github.com/ZaneXo/zsmeet/internal/storage"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 // 处理阶段。网页按这个顺序显示进度。

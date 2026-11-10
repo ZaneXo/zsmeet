@@ -33,7 +33,7 @@ var rules = []struct {
 		why:     "大模型 SDK 只能通过 internal/llm 使用",
 	},
 	{
-		prefix:  "zsmeet/internal/api",
+		prefix:  "github.com/ZaneXo/zsmeet/internal/api",
 		allowed: []string{"cmd/"},
 		why:     "接口层在最外面，内部的包不能反过来依赖它",
 	},

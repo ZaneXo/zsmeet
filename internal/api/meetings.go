@@ -11,8 +11,8 @@ import (
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/google/uuid"
 
-	"zsmeet/internal/minutes"
-	"zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/minutes"
+	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
 // ---- 模板 ----

@@ -6,8 +6,8 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
-	"zsmeet/internal/service"
-	"zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/settings"
 )
 
 type LLMSettings struct {

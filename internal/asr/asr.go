@@ -10,9 +10,9 @@ import (
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
-	"zsmeet/internal/audio"
-	"zsmeet/internal/models"
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/audio"
+	"github.com/ZaneXo/zsmeet/internal/models"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 // Engine 持有加载好的模型。加载一次要几秒、占几百 MB 内存，所以整个进程共用一个。

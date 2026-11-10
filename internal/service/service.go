@@ -9,10 +9,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/queue"
-	"zsmeet/internal/settings"
-	"zsmeet/internal/storage"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/storage"
 )
 
 type Service struct {

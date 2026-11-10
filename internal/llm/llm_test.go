@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/settings"
 )
 
 func TestModels(t *testing.T) {

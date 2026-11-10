@@ -9,8 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/password"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/password"
 )
 
 // 初始化时用的 Postgres advisory lock，防止两个人同时创建第一个管理员

@@ -8,8 +8,8 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
 // 成员管理的接口。系统不发邮件：邀请和重置密码都是生成一次性链接，由管理员自己发给对方。

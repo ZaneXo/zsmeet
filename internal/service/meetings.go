@@ -14,12 +14,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"zsmeet/internal/audio"
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/minutes"
-	"zsmeet/internal/queue"
-	"zsmeet/internal/search"
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/audio"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/minutes"
+	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/search"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 const (

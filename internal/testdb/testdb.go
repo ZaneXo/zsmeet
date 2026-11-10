@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"zsmeet/internal/db"
+	"github.com/ZaneXo/zsmeet/internal/db"
 )
 
 // 每个测试包用自己的数据库（go test 会并行跑不同的包），同一个包里只迁移一次

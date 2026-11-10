@@ -21,15 +21,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
-	"zsmeet/internal/config"
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/queue"
-	"zsmeet/internal/search"
-	"zsmeet/internal/secret"
-	"zsmeet/internal/settings"
-	"zsmeet/internal/storage"
-	"zsmeet/internal/testdb"
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/config"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/search"
+	"github.com/ZaneXo/zsmeet/internal/secret"
+	"github.com/ZaneXo/zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/storage"
+	"github.com/ZaneXo/zsmeet/internal/testdb"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 // fakeEngine 代替真的识别引擎：不看音频内容，返回固定的两句话。

@@ -16,15 +16,15 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"zsmeet/internal/asr"
-	"zsmeet/internal/audio"
-	"zsmeet/internal/config"
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/models"
-	"zsmeet/internal/queue"
-	"zsmeet/internal/settings"
-	"zsmeet/internal/storage"
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/asr"
+	"github.com/ZaneXo/zsmeet/internal/audio"
+	"github.com/ZaneXo/zsmeet/internal/config"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/models"
+	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/storage"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 const (

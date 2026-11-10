@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/secret"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/secret"
 )
 
 // LLM 是写纪要用的大模型，任意 OpenAI 兼容接口。

@@ -14,7 +14,7 @@ type Box struct{ aead cipher.AEAD }
 
 // New 用主密钥派生 AES-256-GCM 密钥。
 func New(masterKey string) (*Box, error) {
-	key := sha256.Sum256([]byte("zsmeet/secret/v1:" + masterKey))
+	key := sha256.Sum256([]byte("github.com/ZaneXo/zsmeet/secret/v1:" + masterKey))
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return nil, err

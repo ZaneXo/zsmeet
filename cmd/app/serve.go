@@ -12,17 +12,17 @@ import (
 	"github.com/alexedwards/scs/pgxstore"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"zsmeet/internal/api"
-	"zsmeet/internal/config"
-	"zsmeet/internal/db"
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/pipeline"
-	"zsmeet/internal/queue"
-	"zsmeet/internal/secret"
-	"zsmeet/internal/service"
-	"zsmeet/internal/settings"
-	"zsmeet/internal/storage"
-	"zsmeet/web"
+	"github.com/ZaneXo/zsmeet/internal/api"
+	"github.com/ZaneXo/zsmeet/internal/config"
+	"github.com/ZaneXo/zsmeet/internal/db"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/pipeline"
+	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/secret"
+	"github.com/ZaneXo/zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/storage"
+	"github.com/ZaneXo/zsmeet/web"
 )
 
 // version 在发布构建时用 -ldflags "-X main.version=..." 写入。

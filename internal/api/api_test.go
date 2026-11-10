@@ -16,15 +16,15 @@ import (
 	"github.com/alexedwards/scs/v2/memstore"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/password"
-	"zsmeet/internal/queue"
-	"zsmeet/internal/secret"
-	"zsmeet/internal/service"
-	"zsmeet/internal/settings"
-	"zsmeet/internal/storage"
-	"zsmeet/internal/testdb"
-	"zsmeet/web"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/password"
+	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/secret"
+	"github.com/ZaneXo/zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/storage"
+	"github.com/ZaneXo/zsmeet/internal/testdb"
+	"github.com/ZaneXo/zsmeet/web"
 )
 
 // 这里的测试走真实的 HTTP：会话 Cookie、登录校验、参数校验都和线上一样，只是不启动 worker。

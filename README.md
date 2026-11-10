@@ -14,7 +14,7 @@
 需要一台装了 Docker 的 Linux 服务器，建议 4 核 CPU、8 GB 内存以上。
 
 ```bash
-git clone <本仓库地址> zsmeet && cd zsmeet/deploy
+git clone https://github.com/ZaneXo/zsmeet.git && cd zsmeet/deploy
 cp .env.example .env
 # 编辑 .env，填两个密码（文件里有生成方法）
 docker compose up -d --build
@@ -176,4 +176,6 @@ make api NAME=DeleteMeeting METHOD=DELETE ROUTE=/api/meetings/{id}
 
 ## 开源协议
 
-待定。
+[Apache License 2.0](LICENSE)：可以免费使用、修改和分发，也可以商用，需要保留原来的版权和许可声明。
+
+语音识别用到的模型（Paraformer 识别、标点、语音检测、说话人区分）不在这个仓库里，第一次处理会议时才从 Hugging Face 下载。它们各有自己的许可，不受上面这份协议约束，商用前请自行确认。

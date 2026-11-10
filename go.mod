@@ -1,4 +1,4 @@
-module zsmeet
+module github.com/ZaneXo/zsmeet
 
 go 1.26.0
 

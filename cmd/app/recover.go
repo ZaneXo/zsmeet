@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
 // 这两个命令在服务器上救急用：系统不发邮件，唯一的管理员忘了密码、

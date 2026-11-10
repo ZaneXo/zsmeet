@@ -3,9 +3,9 @@ package api
 import (
 	"time"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/service"
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 // 这个文件是接口的数据结构，也就是前后端的约定。

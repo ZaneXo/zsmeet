@@ -15,8 +15,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"zsmeet/internal/db/sqlc"
-	"zsmeet/internal/password"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/password"
 )
 
 // 成员管理：邀请、角色、停用、重置密码。

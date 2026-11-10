@@ -6,7 +6,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
-	"zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 )
 
 type StatusOutput struct {

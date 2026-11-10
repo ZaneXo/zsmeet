@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 // Template 是一种纪要写法。一期内置四种，自定义模板后面再做。

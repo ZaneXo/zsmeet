@@ -5,8 +5,8 @@ import (
 	"net/url"
 	"strings"
 
-	"zsmeet/internal/llm"
-	"zsmeet/internal/settings"
+	"github.com/ZaneXo/zsmeet/internal/llm"
+	"github.com/ZaneXo/zsmeet/internal/settings"
 )
 
 // LLMSettings 返回大模型配置。API Key 不会传到接口层之外，那里只告诉网页「填没填」。

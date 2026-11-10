@@ -8,9 +8,9 @@ import (
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
-	"zsmeet/internal/audio"
-	"zsmeet/internal/models"
-	"zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/audio"
+	"github.com/ZaneXo/zsmeet/internal/models"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
 // 这个测试要用到约 560 MB 的模型和一段真实录音，默认跳过。运行方法：

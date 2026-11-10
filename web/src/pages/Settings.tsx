@@ -6,7 +6,8 @@ import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { User } from "../api/client";
 import { Button, Card, Field, Input, Notice, Select, Spinner } from "../components/ui";
-import { feishuErrorText, useFeishuResult } from "../lib/feishuAuth";
+import { useFeishuResult } from "../lib/feishuAuth";
+import { feishuErrorText } from "../lib/feishuErrors";
 import { dateTime } from "../lib/format";
 import { FeishuSettingsSection } from "./FeishuSettings";
 import { MembersSection } from "./Members";
@@ -124,6 +125,19 @@ function FeishuLinkCard() {
     },
   });
   const data = link.data;
+  // 读不到关联情况：不能悄悄不显示，飞书跳回来时带的错误也要让人看到
+  if (!data && link.isError) {
+    return (
+      <Card className="flex flex-col items-start gap-3 p-6">
+        <h2 className="text-lg font-bold">飞书账号</h2>
+        {result.error && <Notice tone="bad">{feishuErrorText(result.error, "account")}</Notice>}
+        <Notice tone="bad">读不到你的飞书账号关联情况：{errorMessage(link.error)}</Notice>
+        <Button size="sm" disabled={link.isFetching} onClick={() => link.refetch()}>
+          {link.isFetching ? "正在重试…" : "重试"}
+        </Button>
+      </Card>
+    );
+  }
   if (!data || (!data.enabled && !data.linked && !result.error)) return null;
   return (
     <Card className="flex flex-col gap-3 p-6">

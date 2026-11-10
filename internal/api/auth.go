@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/secret"
 )
 
 type StatusOutput struct {
@@ -45,16 +47,18 @@ func (h *Handlers) Status(ctx context.Context, _ *struct{}) (*StatusOutput, erro
 	}
 	if user, err := h.sessionUser(ctx); err == nil {
 		out.Body.User = new(toUser(user))
+		// 保存的 API Key、App Secret 解不开（ZSMEET_SECRET_KEY 改过）时当作没配置好，不让整个网页打不开：
+		// 管理员到设置里重新填就好
 		cfg, err := h.svc.LLMSettings(ctx)
-		if err != nil {
+		if err != nil && !errors.Is(err, secret.ErrDecrypt) {
 			return nil, toHTTP(err)
 		}
-		out.Body.LLMReady = cfg.Ready()
+		out.Body.LLMReady = err == nil && cfg.Ready()
 		fs, err := h.svc.FeishuSettings(ctx)
-		if err != nil {
+		if err != nil && !errors.Is(err, secret.ErrDecrypt) {
 			return nil, toHTTP(err)
 		}
-		out.Body.FeishuReady = fs.Ready()
+		out.Body.FeishuReady = err == nil && fs.Ready()
 		vp, err := h.svc.VoiceprintSettings(ctx)
 		if err != nil {
 			return nil, toHTTP(err)

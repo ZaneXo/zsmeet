@@ -16,7 +16,7 @@ import (
 
 // 用飞书登录：网页上的按钮是一个普通链接，指向 /api/auth/feishu/start，浏览器整页跳过去，
 // 再被带到飞书的授权页；飞书带着授权码跳回 /api/auth/feishu/callback，登录成功后回到首页。
-// 登录着的人在「设置 → 账号」里点「关联飞书」也走这一套（mode=link），完成后回到账号页。
+// 登录着的人在「设置 → 账号」里输入密码、点「关联飞书」（POST /api/me/feishu/link）以后，回调也走这一套，完成后回到账号页。
 //
 // 发起时的 state 和 PKCE 的 code_verifier 加密后放在一个 10 分钟的 Cookie 里（只发给 /api/auth/feishu），
 // 不放进服务器的会话：没登录的人点一下按钮，不该在服务器上留一条 30 天的会话。整个过程只有登录成功那一下写会话。
@@ -190,7 +190,7 @@ func (h *Handlers) feishuCallback(ctx context.Context, in *FeishuCallbackInput) 
 		if err != nil || user.ID != st.UserID {
 			return feishuFailed(accountPage, &service.FeishuAuthError{Code: service.FeishuSignedOut}), nil
 		}
-		if err := h.svc.LinkFeishu(ctx, user, in.Code, st.Verifier); err != nil {
+		if err := h.svc.LinkFeishu(ctx, user, in.Code, st); err != nil {
 			return feishuFailed(accountPage, err), nil
 		}
 		return redirect(accountPage + "?feishu=linked"), nil
@@ -224,7 +224,7 @@ var getFeishuLinkOp = huma.Operation{
 	Method:      http.MethodGet,
 	Path:        "/api/me/feishu",
 	Summary:     "我关联的飞书账号",
-	Description: "要关联飞书账号，浏览器整页打开 /api/auth/feishu/start?mode=link。",
+	Description: "要关联飞书账号，先用 POST /api/me/feishu/link 核对当前密码，再在浏览器里整页打开返回的飞书授权页地址。",
 	Tags:        []string{"账号"},
 	Security:    loggedIn,
 }

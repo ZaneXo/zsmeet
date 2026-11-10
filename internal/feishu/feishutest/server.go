@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -74,8 +75,22 @@ type LoginUser struct {
 type grant struct {
 	user           LoginUser
 	redirect, pkce string
-	used           bool
+	// 打开授权页时申请的权限（scope）
+	scopes []string
+	used   bool
 }
+
+// userGrant 是换出来的一个用户访问凭证：是谁，申请过哪些权限。
+type userGrant struct {
+	user   LoginUser
+	scopes []string
+}
+
+// 读邮箱要申请的权限：和真的飞书一样，没申请的话用户信息里没有对应的邮箱
+const (
+	scopeEmail      = "contact:user.email:readonly"
+	scopeEnterprise = "contact:user.employee:readonly"
+)
 
 // Server 是假的开放平台。
 type Server struct {
@@ -105,7 +120,7 @@ type Server struct {
 	Calls      map[string]int
 	tasks      map[string]*Import
 	grants     map[string]*grant
-	userTokens map[string]LoginUser
+	userTokens map[string]userGrant
 	seq        int
 }
 
@@ -121,7 +136,7 @@ func New(t *testing.T) *Server {
 		Calls:      map[string]int{},
 		tasks:      map[string]*Import{},
 		grants:     map[string]*grant{},
-		userTokens: map[string]LoginUser{},
+		userTokens: map[string]userGrant{},
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
@@ -202,16 +217,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.userToken(w, r)
 		return
 	case "GET /open-apis/authen/v1/user_info":
-		u, ok := s.userTokens[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		ug, ok := s.userTokens[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
 		if !ok {
 			reply(w, 99991668, "invalid user access token", nil)
 			return
 		}
+		u := ug.user
 		data := map[string]string{"name": u.Name, "open_id": u.OpenID, "union_id": u.UnionID, "tenant_key": "tenant_test"}
-		if u.Email != "" {
+		// 名字和 ID 不用权限；邮箱、企业邮箱只有申请了对应的权限才给
+		if u.Email != "" && slices.Contains(ug.scopes, scopeEmail) {
 			data["email"] = u.Email
 		}
-		if u.EnterpriseEmail != "" {
+		if u.EnterpriseEmail != "" && slices.Contains(ug.scopes, scopeEnterprise) {
 			data["enterprise_email"] = u.EnterpriseEmail
 		}
 		reply(w, 0, "success", data)
@@ -451,7 +468,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		params.Set("error", "access_denied")
 	} else {
 		code := s.next("code_")
-		s.grants[code] = &grant{user: *s.LoginAs, redirect: q.Get("redirect_uri"), pkce: q.Get("code_challenge")}
+		s.grants[code] = &grant{user: *s.LoginAs, redirect: q.Get("redirect_uri"), pkce: q.Get("code_challenge"), scopes: strings.Fields(q.Get("scope"))}
 		params.Set("code", code)
 	}
 	back.RawQuery = params.Encode()
@@ -490,11 +507,11 @@ func (s *Server) userToken(w http.ResponseWriter, r *http.Request) {
 	default:
 		g.used = true
 		tok := s.next("u-token-")
-		s.userTokens[tok] = g.user
+		s.userTokens[tok] = userGrant{user: g.user, scopes: g.scopes}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"code": 0, "access_token": tok, "expires_in": 7200, "token_type": "Bearer",
-			"scope": "contact:user.email:readonly contact:user.employee:readonly",
+			"scope": strings.Join(g.scopes, " "),
 		})
 	}
 }

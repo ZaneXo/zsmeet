@@ -3,7 +3,8 @@ import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import { Button, buttonClass, Card, Field, Input, Notice } from "../components/ui";
-import { feishuErrorText, useFeishuResult } from "../lib/feishuAuth";
+import { useFeishuResult } from "../lib/feishuAuth";
+import { feishuErrorText } from "../lib/feishuErrors";
 
 export function AuthLayout({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
   return (

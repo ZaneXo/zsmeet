@@ -38,9 +38,10 @@ func (r *run) nameSpeakers(ctx context.Context, q *sqlc.Queries, m sqlc.Meeting,
 	if err := service.LockVoiceprints(ctx, q); err != nil {
 		return err
 	}
-	// 算的时候管理员可能刚把声纹关掉了：关掉以后一点都不存
+	// 算的时候管理员可能刚把声纹关掉了：关掉以后一点都不存。关掉也要拿声纹库的锁（见 service.SaveVoiceprintSettings），
+	// 所以在锁里、同一个事务里读到的设置，到这个事务提交都不会变
 	if len(voices) > 0 {
-		cfg, err := r.w.settings.Voiceprints(ctx)
+		cfg, err := r.w.settings.WithTx(q).Voiceprints(ctx)
 		if err != nil {
 			return err
 		}

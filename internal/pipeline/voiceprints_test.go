@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/voiceprint"
 )
@@ -256,5 +257,81 @@ func TestVoiceprintsWaitForLibraryLock(t *testing.T) {
 	}
 	if n := e.count("SELECT count(*) FROM speaker_embeddings WHERE meeting_id = $1", args.MeetingID); n != 2 {
 		t.Errorf("放开以后照常存声音特征：%d", n)
+	}
+}
+
+// 转写完的事务已经在声纹库的锁里读到「打开」、正要存声音特征时，管理员关掉声纹：关掉要等这个事务做完才返回，
+// 关掉成功以后不会再有声音特征存进来。
+func TestVoiceprintsTurnOffWaitsForRunningSave(t *testing.T) {
+	e := newEnv(t)
+	e.enableVoiceprints(true)
+	e.engine.voices = map[int][]float32{0: voiceX, 1: voiceY}
+	args := e.upload(wav())
+	ctx := t.Context()
+	svc := service.New(e.pool, nil, e.w.settings, nil)
+
+	// 先放一条旧的声音特征并锁住这一行：转写完的事务拿到声纹库的锁、读完设置以后，删旧特征时卡在这里
+	if _, err := e.pool.Exec(ctx, "INSERT INTO speaker_embeddings (meeting_id, speaker, embedding, seconds) VALUES ($1, 0, '{1,0,0}', 3)", args.MeetingID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := tx.Exec(ctx, "SELECT 1 FROM speaker_embeddings WHERE meeting_id = $1 FOR UPDATE", args.MeetingID); err != nil {
+		t.Fatal(err)
+	}
+	worked := make(chan error, 1)
+	go func() { worked <- e.work(args) }()
+	e.waitUntil("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%DELETE FROM speaker_embeddings WHERE meeting_id%'", worked)
+
+	// 这时关掉：转写完的事务拿着声纹库的锁，关掉要排队
+	turnedOff := make(chan error, 1)
+	go func() {
+		_, err := svc.SaveVoiceprintSettings(context.Background(), false)
+		turnedOff <- err
+	}()
+	e.waitUntil("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 7368824 AND NOT granted", turnedOff)
+
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range []chan error{worked, turnedOff} {
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("放开以后应该都做完")
+		}
+	}
+	// 转写在关掉之前读到的是打开，存下的声音特征算关掉之前的（关掉不删已有的）；关掉以后设置是关着
+	if n := e.count("SELECT count(*) FROM speaker_embeddings WHERE meeting_id = $1", args.MeetingID); n != 2 {
+		t.Errorf("转写的事务在关掉之前做完，存了 %d 条", n)
+	}
+	if cfg, err := e.w.settings.Voiceprints(ctx); err != nil || cfg.Enabled {
+		t.Errorf("应该关掉了：%v %v", cfg, err)
+	}
+}
+
+// waitUntil 等到 sql 数出来的行数大于 0（比如有人在某把锁上排队）；done 先有结果说明本该排队的操作没排队就做完了。
+func (e *env) waitUntil(sql string, done <-chan error) {
+	e.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if e.count(sql) > 0 {
+			return
+		}
+		select {
+		case err := <-done:
+			e.t.Fatalf("该排队等着的操作没等就做完了：%v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("等了 10 秒也没等到：%s", sql)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

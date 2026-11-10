@@ -1,0 +1,205 @@
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { AppLink } from "../components/AppLink";
+import { api, errorMessage, queryClient, unwrap } from "../api/client";
+import type { Meeting } from "../api/client";
+import { Button, buttonClass, Chip, Icon, Input, Notice, Spinner } from "../components/ui";
+import type { Tone } from "../components/ui";
+import { dateTime, dayGroup, duration, SOURCE_LABEL, STAGE_LABEL } from "../lib/format";
+import { useTicker } from "../lib/useTicker";
+import { UploadDialog } from "./UploadDialog";
+
+/** 网页录音的会议多久没收到新的分片，就不再显示「录音中」（录音的网页可能关掉了、断网了，或者暂停着）。 */
+const RECORDING_STALE_MS = 90_000;
+
+/** 网页录音还在进行：最近一直有新的分片传上来。 */
+export function recordingLive(m: Meeting): boolean {
+  if (m.source !== "record" || m.status !== "uploading") return false;
+  const last = Date.parse(m.last_chunk_at ?? m.created_at);
+  return Date.now() - last < RECORDING_STALE_MS;
+}
+
+/** 会议在列表里显示的状态标签。 */
+export function meetingChip(m: Meeting): { tone: Tone; text: string } {
+  switch (m.status) {
+    case "uploading":
+      if (m.source === "record") return recordingLive(m) ? { tone: "info", text: "录音中" } : { tone: "mute", text: "录音未传完" };
+      return { tone: "mute", text: "上传未完成" };
+    case "queued":
+      return { tone: "mute", text: "排队中" };
+    case "processing": {
+      const pct = m.progress > 0 && m.progress < 1 ? ` ${Math.round(m.progress * 100)}%` : "";
+      return { tone: "info", text: `${STAGE_LABEL[m.stage]}${pct}` };
+    }
+    case "failed":
+      return { tone: "bad", text: "处理失败" };
+    case "done":
+      return m.minutes_version > 0 ? { tone: "ok", text: "已完成" } : { tone: "warn", text: "已转写，还没有纪要" };
+  }
+}
+
+const isActive = (m: Meeting) => m.status === "queued" || m.status === "processing";
+const isRecording = (m: Meeting) => m.source === "record" && m.status === "uploading";
+
+export function MeetingsPage() {
+  const [input, setInput] = useState("");
+  const [q, setQ] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [mine, setMine] = useState(false);
+
+  // 停止输入 300 毫秒后再搜，不用每敲一个字就请求一次
+  useEffect(() => {
+    const timer = setTimeout(() => setQ(input.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [input]);
+
+  const meetings = useQuery({
+    queryKey: ["meetings", q, mine],
+    queryFn: () => unwrap(api.GET("/api/meetings", { params: { query: { q: q || undefined, mine: mine || undefined } } })),
+    // 有会议在处理时每 3 秒刷新一次，让状态和进度跟上；有人在录音时每 15 秒刷新一次
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? [];
+      return items.some(isActive) ? 3000 : items.some(isRecording) ? 15_000 : false;
+    },
+    placeholderData: (previous) => previous,
+  });
+
+  // 有人在录音时定时重画：录音中断以后，标签要从「录音中」变成「录音未传完」，即使服务器返回的数据没变
+  useTicker(15_000, (meetings.data?.items ?? []).some(isRecording));
+
+  const retry = useMutation({
+    mutationFn: (id: string) => unwrap(api.POST("/api/meetings/{id}/retry", { params: { path: { id } } })),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["meetings"] }),
+  });
+
+  const items = meetings.data?.items ?? [];
+  const groups: { label: string; items: Meeting[] }[] = [];
+  for (const m of items) {
+    const label = dayGroup(m.created_at);
+    const last = groups[groups.length - 1];
+    if (last?.label === label) last.items.push(m);
+    else groups.push({ label, items: [m] });
+  }
+
+  return (
+    <div className="mx-auto flex max-w-5xl flex-col gap-5">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="flex flex-col gap-1.5">
+          <h1 className="text-[26px] font-bold">会议</h1>
+          <p className="text-sm text-muted">在网页上录音，或者上传录音文件，自动转写、区分说话人并生成纪要。团队里的人都能看到这里的会议。</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <label className="relative block w-72 max-w-full">
+            <span className="pointer-events-none absolute left-3 top-[11px] text-muted">
+              <Icon name="search" />
+            </span>
+            <Input type="search" className="pl-10" placeholder="搜索标题、纪要、转写原文" aria-label="搜索会议" value={input} onChange={(e) => setInput(e.target.value)} maxLength={100} />
+          </label>
+          <AppLink to="/record" className={buttonClass("primary")}>
+            <Icon name="mic" />
+            开始录音
+          </AppLink>
+          <Button onClick={() => setUploading(true)}>
+            <Icon name="upload" />
+            上传录音
+          </Button>
+        </div>
+      </div>
+
+      <div role="tablist" className="flex border-b border-line">
+        {(
+          [
+            [false, "全部"],
+            [true, "我创建的"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={label}
+            type="button"
+            role="tab"
+            aria-selected={mine === value}
+            onClick={() => setMine(value)}
+            className={`-mb-px mr-5 min-h-10 cursor-pointer border-b-2 px-1 text-sm ${
+              mine === value ? "border-ink font-semibold text-ink" : "border-transparent text-muted hover:text-ink"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {retry.isError && <Notice tone="bad">{errorMessage(retry.error)}</Notice>}
+      {meetings.isError && <Notice tone="bad">{errorMessage(meetings.error)}</Notice>}
+      {meetings.isPending && <Spinner label="正在加载会议…" />}
+
+      {meetings.isSuccess && q && (
+        <p className="text-[13px] text-muted">
+          在{mine ? "你创建的会议的" : ""}标题、纪要和转写原文里找到 {items.length} 场会议
+        </p>
+      )}
+
+      {meetings.isSuccess && items.length === 0 && (
+        <div className="rounded-2xl border border-dashed border-line-strong bg-white px-5 py-14 text-center text-sm leading-relaxed text-muted">
+          {q && mine ? (
+            <div className="flex flex-col items-center gap-4">
+              <span>你创建的会议里没有找到包含「{q}」的。别人创建的会议在「全部」里。</span>
+              <Button onClick={() => setMine(false)}>在全部会议里找</Button>
+            </div>
+          ) : q ? (
+            <>没有找到包含「{q}」的会议。试试换个关键词，或者搜会上有人说过的原话。</>
+          ) : mine ? (
+            <>你还没有创建过会议。别人创建的会议在「全部」里。</>
+          ) : (
+            <div className="flex flex-col items-center gap-4">
+              <span>还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。</span>
+              <span className="flex flex-wrap justify-center gap-2.5">
+                <AppLink to="/record" className={buttonClass("primary")}>
+                  <Icon name="mic" />
+                  开始录音
+                </AppLink>
+                <Button onClick={() => setUploading(true)}>
+                  <Icon name="upload" />
+                  上传录音
+                </Button>
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {groups.map((group) => (
+        <section key={group.label} className="flex flex-col gap-2.5">
+          <h2 className="text-[13px] font-semibold text-muted">{group.label}</h2>
+          {group.items.map((m) => {
+            const chip = meetingChip(m);
+            return (
+              <div key={m.id} className="flex flex-wrap items-start gap-x-5 gap-y-3 rounded-xl border border-line bg-white px-5 py-4 hover:border-line-strong">
+                <AppLink to={`/meetings/${m.id}`} className="group min-w-0 flex-[999_1_360px]">
+                  <div className="truncate text-base font-semibold group-hover:text-brand">{m.title}</div>
+                  <div className="mt-1.5 flex flex-wrap gap-x-3.5 gap-y-1 text-[13px] text-muted">
+                    <span>{dateTime(m.created_at)}</span>
+                    {m.duration_sec > 0 && <span>{duration(m.duration_sec)}</span>}
+                    <span>{SOURCE_LABEL[m.source]}</span>
+                    <span>{m.owner_name}</span>
+                  </div>
+                  {m.status === "failed" && <div className="mt-2 text-sm leading-relaxed text-bad">{m.error}</div>}
+                </AppLink>
+                <div className="flex flex-[1_1_160px] flex-col items-end gap-2">
+                  <Chip tone={chip.tone}>{chip.text}</Chip>
+                  {m.status === "failed" && m.can_edit && (
+                    <Button size="sm" disabled={retry.isPending} onClick={() => retry.mutate(m.id)}>
+                      <Icon name="retry" size={15} />
+                      重试
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      ))}
+
+      {uploading && <UploadDialog onClose={() => setUploading(false)} />}
+    </div>
+  );
+}

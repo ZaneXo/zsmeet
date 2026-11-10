@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+/* 颜色和原型保持一致。只用系统字体：部署在内网时不依赖外部字体服务。 */
+@theme {
+  --font-sans: Inter, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+
+  --color-canvas: #f6f6f4;
+  --color-subtle: #f1f1ee;
+  --color-line: #e4e4e0;
+  --color-line-strong: #d6d6d1;
+  --color-ink: #1b1b1a;
+  --color-ink-2: #3a3a37;
+  --color-muted: #5c5c57;
+
+  --color-brand: #2b59c3;
+  --color-brand-hover: #244ca8;
+  --color-brand-tint: #eaf0fc;
+  --color-brand-ink: #1e3f8f;
+
+  --color-ok: #1f6b44;
+  --color-ok-tint: #e6f4ec;
+  --color-warn: #7a4f00;
+  --color-warn-tint: #fff4db;
+  --color-bad: #b42318;
+  --color-bad-tint: #fdecea;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+/* 纪要正文（Markdown 渲染结果）的排版 */
+.prose-minutes {
+  font-size: 15px;
+  line-height: 1.8;
+  color: #2a2a28;
+}
+.prose-minutes h1,
+.prose-minutes h2 {
+  margin: 1.5em 0 0.5em;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-ink);
+}
+.prose-minutes h2:first-child,
+.prose-minutes h1:first-child {
+  margin-top: 0;
+}
+.prose-minutes h3 {
+  margin: 1.2em 0 0.4em;
+  font-size: 15px;
+  font-weight: 700;
+}
+.prose-minutes p {
+  margin: 0.5em 0;
+}
+.prose-minutes ul,
+.prose-minutes ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+.prose-minutes ul {
+  list-style: disc;
+}
+.prose-minutes ol {
+  list-style: decimal;
+}
+.prose-minutes li {
+  margin: 0.25em 0;
+}
+.prose-minutes table {
+  width: 100%;
+  margin: 0.8em 0;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.prose-minutes th,
+.prose-minutes td {
+  padding: 8px 10px;
+  border: 1px solid var(--color-line);
+  text-align: left;
+  vertical-align: top;
+}
+.prose-minutes th {
+  background: var(--color-canvas);
+  font-weight: 600;
+}
+.prose-minutes code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-subtle);
+  font-size: 0.9em;
+}
+.prose-minutes blockquote {
+  margin: 0.8em 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--color-line-strong);
+  color: var(--color-muted);
+}

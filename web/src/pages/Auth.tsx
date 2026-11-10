@@ -1,0 +1,88 @@
+import { useMutation } from "@tanstack/react-query";
+import { useState } from "react";
+import type { FormEvent, ReactNode } from "react";
+import { api, errorMessage, queryClient, unwrap } from "../api/client";
+import { Button, Card, Field, Input, Notice } from "../components/ui";
+
+export function AuthLayout({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
+  return (
+    <div className="flex min-h-full items-center justify-center px-4 py-10">
+      <div className="flex w-full max-w-sm flex-col gap-5">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <div className="flex size-11 items-center justify-center rounded-xl bg-ink text-lg font-bold text-white">记</div>
+          <h1 className="text-2xl font-bold">{title}</h1>
+          {subtitle && <p className="text-sm leading-relaxed text-muted">{subtitle}</p>}
+        </div>
+        <Card className="p-6">{children}</Card>
+      </div>
+    </div>
+  );
+}
+
+// 登录或初始化成功后重新读系统状态，App 会据此切到主界面
+const refreshStatus = () => queryClient.invalidateQueries({ queryKey: ["status"] });
+
+/** 第一次打开时的初始化向导：创建管理员账号。 */
+export function SetupPage() {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const setup = useMutation({
+    mutationFn: () => unwrap(api.POST("/api/setup", { body: { name, email, password } })),
+    onSuccess: refreshStatus,
+  });
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    setup.mutate();
+  };
+
+  return (
+    <AuthLayout title="欢迎使用 zsmeet" subtitle="这是第一次启动。先创建管理员账号，之后的团队配置都由管理员来填。">
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <Field label="姓名" htmlFor="setup-name">
+          <Input id="setup-name" value={name} onChange={(e) => setName(e.target.value)} required maxLength={50} autoComplete="name" autoFocus />
+        </Field>
+        <Field label="邮箱" htmlFor="setup-email" hint="用来登录">
+          <Input id="setup-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
+        </Field>
+        <Field label="密码" htmlFor="setup-password" hint="至少 8 位">
+          <Input id="setup-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+        </Field>
+        {setup.isError && <Notice tone="bad">{errorMessage(setup.error)}</Notice>}
+        <Button type="submit" variant="primary" disabled={setup.isPending}>
+          {setup.isPending ? "正在创建…" : "创建管理员并进入"}
+        </Button>
+      </form>
+    </AuthLayout>
+  );
+}
+
+export function LoginPage() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const login = useMutation({
+    mutationFn: () => unwrap(api.POST("/api/login", { body: { email, password } })),
+    onSuccess: refreshStatus,
+  });
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    login.mutate();
+  };
+
+  return (
+    <AuthLayout title="登录 zsmeet" subtitle="会议录音自动转写，生成纪要">
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <Field label="邮箱" htmlFor="login-email">
+          <Input id="login-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" autoFocus />
+        </Field>
+        <Field label="密码" htmlFor="login-password">
+          <Input id="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required autoComplete="current-password" />
+        </Field>
+        {login.isError && <Notice tone="bad">{errorMessage(login.error)}</Notice>}
+        <Button type="submit" variant="primary" disabled={login.isPending}>
+          {login.isPending ? "正在登录…" : "登录"}
+        </Button>
+      </form>
+    </AuthLayout>
+  );
+}

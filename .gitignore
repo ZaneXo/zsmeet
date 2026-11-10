@@ -1,0 +1,45 @@
+# 密码和密钥：部署时填的 deploy/.env，以及任何地方的 .env 文件。只提交 .env.example 这种模板
+.env
+.env.*
+!.env.example
+
+# 本地开发产生的数据库数据、录音和识别模型（make dev-* 都放在 .dev/ 下）
+/.dev/
+/data/
+/models/
+
+# 会议录音和音视频文件：这个产品里最敏感的数据，任何地方都不提交。
+# 测试真要用音频文件的话放进 testdata/ 目录（目前的测试都是在代码里现生成的）
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.webm
+*.mp4
+*.mov
+*.mkv
+*.amr
+*.wma
+!**/testdata/**
+
+# 前端依赖和构建结果（发布时由 Docker 或 make build 生成）
+/web/node_modules/
+/web/dist/
+
+# make build 的输出、Go 的测试产物
+/bin/
+*.test
+*.out
+/coverage*
+
+# 编辑器、操作系统和开发工具产生的文件
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+/.codegraph/
+/.playwright-mcp/
+*.log

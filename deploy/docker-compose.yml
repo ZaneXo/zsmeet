@@ -1,0 +1,82 @@
+# zsmeet 的完整部署：数据库、网页和接口、后台处理。
+#
+#   cp .env.example .env    # 填两个密码
+#   docker compose up -d
+#   打开 http://服务器地址:8080，按提示创建管理员
+#
+# 升级：docker compose pull && docker compose up -d（数据库会自动迁移）
+name: zsmeet
+
+x-zsmeet: &zsmeet
+  image: ${ZSMEET_IMAGE:-zsmeet:local}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    args:
+      GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+      NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+      APT_MIRROR: ${APT_MIRROR:-deb.debian.org}
+      VERSION: ${ZSMEET_VERSION:-dev}
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-env: &env
+  ZSMEET_DATABASE_URL: postgres://zsmeet:${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}@postgres:5432/zsmeet?sslmode=disable
+  ZSMEET_SECRET_KEY: ${ZSMEET_SECRET_KEY:?请在 .env 里设置 ZSMEET_SECRET_KEY}
+  ZSMEET_MODEL_MIRROR: ${ZSMEET_MODEL_MIRROR:-https://huggingface.co}
+  ZSMEET_SECURE_COOKIE: ${ZSMEET_SECURE_COOKIE:-false}
+  ZSMEET_CONCURRENCY: ${ZSMEET_CONCURRENCY:-2}
+  ZSMEET_ASR_THREADS: ${ZSMEET_ASR_THREADS:-4}
+  # 纪要里的会议时间按这个时区写
+  TZ: ${TZ:-Asia/Shanghai}
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zsmeet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: zsmeet
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zsmeet -d zsmeet"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # 网页和接口
+  api:
+    <<: *zsmeet
+    command: serve
+    environment: *env
+    ports:
+      - "${ZSMEET_PORT:-8080}:8080"
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ["CMD", "zsmeet", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # 后台处理：转写、区分说话人、写纪要。第一次启动会下载约 560 MB 的识别模型
+  worker:
+    <<: *zsmeet
+    command: worker
+    environment: *env
+    volumes:
+      # 录音存在本地磁盘上，所以 worker 要和 api 用同一个数据卷，也就是得在同一台机器上
+      - data:/data
+      - models:/models
+    # 给正在处理的会议留一点时间收尾；没做完的下次启动后继续
+    stop_grace_period: 40s
+
+volumes:
+  pgdata:
+  data:
+  models:

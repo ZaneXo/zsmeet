@@ -1,0 +1,14 @@
+.git
+.dev
+data
+models
+web/node_modules
+web/dist
+bin
+**/.env
+**/.env.*
+**/.DS_Store
+.idea
+.vscode
+.codegraph
+.playwright-mcp

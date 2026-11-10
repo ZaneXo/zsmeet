@@ -40,11 +40,20 @@ jobs:
           pnpm --version
           pnpm -C web install --frozen-lockfile
 
-      # 后台处理的测试要用 ffmpeg 转码
+      # 后台处理的测试要用 ffmpeg 转码。安装包（60 多 MB）缓存起来：Ubuntu 的镜像源有时很慢，下一次要十分钟
+      - name: 缓存 ffmpeg 的安装包
+        uses: actions/cache@v6
+        with:
+          path: ~/apt-archives
+          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04
+
       - name: 安装 ffmpeg
         run: |
+          mkdir -p ~/apt-archives/partial
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          sudo apt-get install -y --no-install-recommends -o Dir::Cache::archives="$HOME/apt-archives" ffmpeg
+          # apt 用 root 写进去的，改回来缓存才能存
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
 
       - name: 检查（格式、静态检查、生成的代码是不是最新的）
         run: make check

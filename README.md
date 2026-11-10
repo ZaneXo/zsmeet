@@ -221,6 +221,12 @@ Actions（`.github/workflows/release.yml`）会先跑一遍检查和测试，再
 
 第一次发布后如果别人拉镜像提示没有权限，说明镜像还是私有的：在仓库主页右边的 Packages 里打开 zsmeet，到 Package settings 把 Visibility 改成 Public（只用改一次）。
 
+### 代码审查
+
+PR 由 [CodeRabbit](https://www.coderabbit.ai) 自动做 AI 代码审查（公开仓库免费）：审查意见是中文的 PR 评论，PR 上还会挂一个叫 CodeRabbit 的检查。审查时看重什么、跳过哪些生成的文件，写在 `.coderabbit.yaml` 里。在 PR 的评论里 @coderabbitai 可以追问，评论 `@coderabbitai review` 让它重新审查。
+
+它是一个 GitHub App，不跑在 Actions 里：仓库管理员在 coderabbit.ai 用 GitHub 登录、把仓库加进去就生效，fork 的仓库要自己装。它只审查 PR，直接 push 到 main 的提交不审查。
+
 ## 路线图
 
 接下来：实时字幕、桌面录音器（录系统声音）、钉钉 / 企业微信 / Slack、飞书扫码登录、GPU 加速。

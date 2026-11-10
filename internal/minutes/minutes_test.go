@@ -2,6 +2,7 @@ package minutes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -30,8 +31,8 @@ func TestGenerateSinglePass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != "## 摘要\n定了一期范围。" {
-		t.Errorf("没有去掉外层代码块：%q", out)
+	if out.Content != "## 摘要\n定了一期范围。" || len(out.Terms) != 0 {
+		t.Errorf("没有去掉外层代码块：%+v", out)
 	}
 	if len(users) != 1 {
 		t.Fatalf("短会议应该只调用一次大模型，实际 %d 次", len(users))
@@ -69,8 +70,8 @@ func TestGenerateLongMeetingSplits(t *testing.T) {
 	if n != 5 {
 		t.Errorf("应该调用 5 次（4 段 + 汇总），实际 %d 次", n)
 	}
-	if out != "## 摘要\n汇总。" {
-		t.Errorf("输出不对：%q", out)
+	if out.Content != "## 摘要\n汇总。" {
+		t.Errorf("输出不对：%+v", out)
 	}
 }
 
@@ -147,5 +148,128 @@ func TestGenerateLongMeetingWithMarks(t *testing.T) {
 	}
 	if !strings.Contains(finalSystem, "6. 材料最后列出了") || !strings.Contains(finalSystem, "7. 用 Markdown 输出") || strings.Contains(finalSystem, "转写里带") {
 		t.Errorf("汇总时的要求应该指向列出的时间点，而不是转写里的标记行：\n%s", finalSystem)
+	}
+}
+
+// 大模型在纪要末尾附的术语表要取出来单独存，不能留在纪要正文里。
+func TestTermsAreSplitOff(t *testing.T) {
+	var system string
+	chat := func(_ context.Context, s, _ string) (string, error) {
+		system = s
+		return "## 摘要\n飞书集成放到下一版。\n\n```terms\n" +
+			`{"terms": [{"term": "飞书", "variants": ["非书", "飞书", " "]}, {"term": "王悦", "variants": []}, {"term": "飞书"}, {"term": ""}]}` +
+			"\n```\n", nil
+	}
+	out, err := Generate(t.Context(), chat, input(3), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Content != "## 摘要\n飞书集成放到下一版。" {
+		t.Errorf("术语表要从纪要正文里去掉：%q", out.Content)
+	}
+	got, _ := json.Marshal(out.Terms)
+	if string(got) != `[{"term":"飞书","variants":["非书"]},{"term":"王悦","variants":[]}]` {
+		t.Errorf("术语表要去重、去掉空的和与正确写法相同的听错写法：%s", got)
+	}
+	if !strings.Contains(system, "terms 代码块") {
+		t.Error("要让大模型输出术语表")
+	}
+
+	// 写坏了的术语表（不是 JSON、被截断）不影响纪要本身
+	for _, tail := range []string{"```terms\n不是 JSON\n```", "```terms\n{\"terms\": [{\"term\": \"飞"} {
+		chat := func(context.Context, string, string) (string, error) { return "## 摘要\n好。\n\n" + tail, nil }
+		out, err := Generate(t.Context(), chat, input(3), nil)
+		if err != nil || out.Content != "## 摘要\n好。" || len(out.Terms) != 0 || out.TermsFound {
+			t.Errorf("坏掉的术语表要丢掉，纪要照常，并且说明没拿到术语表：%+v %v", out, err)
+		}
+	}
+	// 明确说没有专有名词也算拿到了术语表（调用方可以放心地清空旧的）
+	chat = func(context.Context, string, string) (string, error) {
+		return "## 摘要\n好。\n\n```terms\n{\"terms\": []}\n```", nil
+	}
+	if out, err := Generate(t.Context(), chat, input(3), nil); err != nil || !out.TermsFound || len(out.Terms) != 0 {
+		t.Errorf("空的术语表：%+v %v", out, err)
+	}
+}
+
+// 只有一个字的写法、没有字的写法不进术语表：「爱」会让搜「AI」命中几乎所有会议。
+func TestTermsDropUselessSpellings(t *testing.T) {
+	chat := func(context.Context, string, string) (string, error) {
+		return "## 摘要\n好。\n\n```terms\n" +
+			`{"terms": [{"term": "AI", "variants": ["爱", "-", "A I", "埃爱"]}, {"term": "勾", "variants": ["沟"]}, {"term": "Go 语言", "variants": ["go语言", "勾语言", "用Go语言"]}]}` +
+			"\n```", nil
+	}
+	out, err := Generate(t.Context(), chat, input(3), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := json.Marshal(out.Terms)
+	if string(got) != `[{"term":"AI","variants":["埃爱"]},{"term":"Go 语言","variants":["勾语言"]}]` {
+		t.Errorf("一个字的、没有字的、只差空格大小写的、包含正确写法的写法都不要：%s", got)
+	}
+}
+
+// 长会议分段处理时，术语表从每一部分要（只有那时看得到转写里的听错写法），合在一起。
+func TestLongMeetingCollectsTermsFromParts(t *testing.T) {
+	part := 0
+	var finalSystem, finalUser string
+	chat := func(_ context.Context, system, user string) (string, error) {
+		if strings.Contains(system, "长会议转写的第") {
+			if !strings.Contains(system, "terms 代码块") {
+				t.Error("每一部分都要列术语表")
+			}
+			part++
+			switch part {
+			case 1:
+				return "- 要点一\n\n```terms\n{\"terms\": [{\"term\": \"飞书\", \"variants\": [\"非书\"]}]}\n```", nil
+			case 2:
+				return "- 要点二\n\n```terms\n{\"terms\": [{\"term\": \"飞书\", \"variants\": [\"飞叔\", \"非书\"]}, {\"term\": \"Go 语言\", \"variants\": [\"勾语言\"]}]}\n```", nil
+			}
+			return "- 要点", nil
+		}
+		finalSystem, finalUser = system, user
+		return "## 摘要\n汇总。", nil
+	}
+	out, err := Generate(t.Context(), chat, input(400), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := json.Marshal(out.Terms)
+	if string(got) != `[{"term":"飞书","variants":["非书","飞叔"]},{"term":"Go 语言","variants":["勾语言"]}]` || !out.TermsFound {
+		t.Errorf("各部分的术语表要合在一起：%s %v", got, out.TermsFound)
+	}
+	if strings.Contains(finalSystem, "terms 代码块") || strings.Contains(finalUser, "```terms") || !strings.Contains(finalUser, "- 要点二") {
+		t.Errorf("汇总时不再要术语表，各部分的术语表也不该混进要点里：\n%s\n%s", finalSystem, finalUser)
+	}
+}
+
+// 整篇包在 ```markdown 里、结尾的 ``` 被 terms 代码块吃掉了，也要把开头那行去掉。
+func TestUnwrapFenceWithoutClosingLine(t *testing.T) {
+	chat := func(context.Context, string, string) (string, error) {
+		return "```markdown\n## 摘要\n内容。\n\n```terms\n{\"terms\": []}\n```", nil
+	}
+	out, err := Generate(t.Context(), chat, input(3), nil)
+	if err != nil || out.Content != "## 摘要\n内容。" {
+		t.Errorf("开头的 ```markdown 要去掉：%q %v", out.Content, err)
+	}
+}
+
+func TestRenameSpeakers(t *testing.T) {
+	content := "- 说话人 1 提出一期只做网页端；说话人 2（王悦）同意。说话人 12 没来。说话人1也提到预算。"
+	got := RenameSpeakers(content, map[int][2]string{0: {"", "张敏"}, 1: {"", "王悦"}})
+	want := "- 张敏 提出一期只做网页端；王悦同意。说话人 12 没来。张敏也提到预算。"
+	if got != want {
+		t.Errorf("第一次起名字：\n得到 %s\n想要 %s", got, want)
+	}
+	// 再改一次名字：纪要里的旧名字也换掉；只有一个字的旧名字不换
+	if got := RenameSpeakers("张敏说好。", map[int][2]string{0: {"张敏", "张敏敏"}}); got != "张敏敏说好。" {
+		t.Errorf("旧名字要换成新名字：%s", got)
+	}
+	if got := RenameSpeakers("王悦说好。", map[int][2]string{1: {"王", "王悦悦"}}); got != "王悦说好。" {
+		t.Errorf("一个字的旧名字不换，免得误伤正文：%s", got)
+	}
+	// 去掉名字：纪要不动
+	if got := RenameSpeakers("张敏说好。", map[int][2]string{0: {"张敏", ""}}); got != "张敏说好。" {
+		t.Errorf("去掉名字时纪要不动：%s", got)
 	}
 }

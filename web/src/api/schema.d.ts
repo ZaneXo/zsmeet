@@ -164,7 +164,7 @@ export interface paths {
         };
         /**
          * 会议列表
-         * @description 按创建时间倒序。团队里所有人都能看到全部会议。
+         * @description 按创建时间倒序。团队里所有人都能看到全部会议。搜索时每场会议带上命中的句子和时间点（hits）。
          */
         get: operations["list-meetings"];
         put?: never;
@@ -190,7 +190,11 @@ export interface paths {
         get: operations["get-meeting"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * 删除会议（放进回收站）
+         * @description 创建者和管理员可以删。删除后 30 天内可以在回收站恢复，过期后连同录音一起彻底删除。
+         */
+        delete: operations["delete-meeting"];
         options?: never;
         head?: never;
         /** 修改会议标题 */
@@ -277,6 +281,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/meetings/{id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 导出纪要或转写
+         * @description 返回文件本身（作为下载）。开头是会议信息：时间、时长、创建者、说话人。还没有纪要或转写时返回 409。
+         */
+        get: operations["export-meeting"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/meetings/{id}/marks": {
         parameters: {
             query?: never;
@@ -341,6 +365,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/meetings/{id}/retranscribe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 重新转写
+         * @description 用现在的识别模型从录音重新转写，转完重新生成纪要（新版本，之前的版本保留）。录音已经不在、或者正在处理时返回 409。
+         */
+        post: operations["retranscribe-meeting"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/meetings/{id}/retry": {
         parameters: {
             query?: never;
@@ -355,6 +399,26 @@ export interface paths {
          * @description 已经有转写的话只重新生成纪要，否则从录音开始。
          */
         post: operations["retry-meeting"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/meetings/{id}/speakers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 给说话人起名字
+         * @description 转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。
+         */
+        put: operations["rename-speakers"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -560,6 +624,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 回收站
+         * @description 最近删的在前。管理员看到全部，其他人只看到自己创建的会议。
+         */
+        get: operations["list-trash"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trash/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 彻底删除
+         * @description 立即删掉回收站里的这场会议，连同录音、转写和纪要，不能恢复。
+         */
+        delete: operations["purge-meeting"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trash/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 从回收站恢复 */
+        post: operations["restore-meeting"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -710,7 +831,11 @@ export interface components {
             token: string;
         };
         ListMeetingsOutputBody: {
-            items: components["schemas"]["Meeting"][] | null;
+            /** @description 实际搜了哪几种写法：输入的词，加上会议术语表里它对应的写法（比如同一个词被听错的写法）。不是搜索时为空 */
+            expanded: string[];
+            items: components["schemas"]["MeetingListItem"][] | null;
+            /** @description 「错一个字」的近似匹配只检查了最近的一部分会议（完全命中的会议不受影响） */
+            partial: boolean;
         };
         LoginInputBody: {
             email: string;
@@ -753,6 +878,66 @@ export interface components {
              * @enum {string}
              */
             source: "record" | "upload" | "feishu";
+            /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
+            speakers: {
+                [key: string]: string;
+            };
+            /**
+             * @description 正在进行的处理步骤
+             * @enum {string}
+             */
+            stage: "" | "models" | "assemble" | "transcribe" | "diarize" | "minutes";
+            /** @enum {string} */
+            status: "uploading" | "queued" | "processing" | "done" | "failed";
+            /** @description 纪要模板的 ID */
+            template: string;
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        MeetingListItem: {
+            /** @description 当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口 */
+            can_edit: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: int64 */
+            duration_sec: number;
+            /** @description status 为 failed 时的失败原因，可以直接展示 */
+            error: string;
+            /** @description 录音还在不在（过了保留期会被删除） */
+            has_audio: boolean;
+            /** @description 搜索时命中的地方：先是转写里的句子（最相关的在前，错一个字的在最后），再是纪要里的行。不是搜索时为空 */
+            hits: components["schemas"]["SearchHit"][];
+            hotwords: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: date-time
+             * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次
+             */
+            last_chunk_at?: string;
+            /** @description 网页录音时标记的重点：录音开始后的秒数 */
+            marks: number[] | null;
+            /**
+             * Format: int64
+             * @description 当前纪要的版本号，0 表示还没有纪要
+             */
+            minutes_version: number;
+            owner_name: string;
+            /**
+             * Format: double
+             * @description 当前步骤的进度
+             */
+            progress: number;
+            /**
+             * @description 录音从哪来：网页录音、上传文件、飞书会议
+             * @enum {string}
+             */
+            source: "record" | "upload" | "feishu";
+            /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
+            speakers: {
+                [key: string]: string;
+            };
             /**
              * @description 正在进行的处理步骤
              * @enum {string}
@@ -825,6 +1010,12 @@ export interface components {
         RenameMeetingInputBody: {
             title: string;
         };
+        RenameSpeakersInputBody: {
+            /** @description 说话人编号（从 0 开始，写成字符串）→ 名字；名字给空字符串表示去掉名字。只改这里面列出的说话人 */
+            names: {
+                [key: string]: string;
+            };
+        };
         ResetLinkOutputBody: {
             /** Format: date-time */
             expires_at: string;
@@ -834,6 +1025,29 @@ export interface components {
         SaveMarksInputBody: {
             /** @description 全部标记（整份替换）：录音开始后的秒数，不算暂停的时间 */
             marks: number[] | null;
+        };
+        SearchHit: {
+            /** @description 只是错了一个字的近似命中（转写可能把这个词听错了一个字） */
+            fuzzy: boolean;
+            /** @description text 里命中的词，原样（大小写不变），用来高亮 */
+            matches: string[];
+            /**
+             * @description 在转写里还是纪要里
+             * @enum {string}
+             */
+            source: "transcript" | "minutes";
+            /**
+             * Format: int64
+             * @description 说话人编号，从 0 开始；纪要里的行是 -1
+             */
+            speaker: number;
+            /**
+             * Format: double
+             * @description 从录音开头算的秒数，点它从这附近开始播放；纪要里没写时间点的行是 -1
+             */
+            start: number;
+            /** @description 命中的那句话（或者纪要里的那一行） */
+            text: string;
         };
         Segment: {
             /**
@@ -878,6 +1092,80 @@ export interface components {
         };
         TranscriptOutputBody: {
             segments: components["schemas"]["Segment"][] | null;
+        };
+        TrashOutputBody: {
+            /**
+             * Format: int64
+             * @description 会议在回收站里放多少天后彻底删除
+             */
+            days: number;
+            items: components["schemas"]["TrashedMeeting"][];
+        };
+        TrashedMeeting: {
+            /** @description 当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口 */
+            can_edit: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: date-time
+             * @description 什么时候删的
+             */
+            deleted_at: string;
+            /** @description 谁删的 */
+            deleted_by_name: string;
+            /** Format: int64 */
+            duration_sec: number;
+            /** @description status 为 failed 时的失败原因，可以直接展示 */
+            error: string;
+            /** @description 录音还在不在（过了保留期会被删除） */
+            has_audio: boolean;
+            hotwords: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: date-time
+             * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次
+             */
+            last_chunk_at?: string;
+            /** @description 网页录音时标记的重点：录音开始后的秒数 */
+            marks: number[] | null;
+            /**
+             * Format: int64
+             * @description 当前纪要的版本号，0 表示还没有纪要
+             */
+            minutes_version: number;
+            owner_name: string;
+            /**
+             * Format: double
+             * @description 当前步骤的进度
+             */
+            progress: number;
+            /**
+             * Format: date-time
+             * @description 到这个时间会被彻底删除，连同录音
+             */
+            purge_at: string;
+            /**
+             * @description 录音从哪来：网页录音、上传文件、飞书会议
+             * @enum {string}
+             */
+            source: "record" | "upload" | "feishu";
+            /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
+            speakers: {
+                [key: string]: string;
+            };
+            /**
+             * @description 正在进行的处理步骤
+             * @enum {string}
+             */
+            stage: "" | "models" | "assemble" | "transcribe" | "diarize" | "minutes";
+            /** @enum {string} */
+            status: "uploading" | "queued" | "processing" | "done" | "failed";
+            /** @description 纪要模板的 ID */
+            template: string;
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
         };
         UpdateMemberInputBody: {
             /** @description true 停用，false 启用；不传表示不改 */
@@ -1254,6 +1542,35 @@ export interface operations {
             };
         };
     };
+    "delete-meeting": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "rename-meeting": {
         parameters: {
             query?: never;
@@ -1432,6 +1749,44 @@ export interface operations {
             };
         };
     };
+    "export-meeting": {
+        parameters: {
+            query?: {
+                /** @description 导出纪要（当前版本）还是转写 */
+                what?: "minutes" | "transcript";
+                /** @description Word、Markdown 或纯文本（纯文本只用于转写，纪要选它时给 Markdown） */
+                format?: "docx" | "md" | "txt";
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "Content-Disposition"?: string;
+                    "Content-Type"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string;
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "save-marks": {
         parameters: {
             query?: never;
@@ -1569,6 +1924,37 @@ export interface operations {
             };
         };
     };
+    "retranscribe-meeting": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Meeting"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "retry-meeting": {
         parameters: {
             query?: never;
@@ -1579,6 +1965,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Meeting"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "rename-speakers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameSpeakersInputBody"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -1959,6 +2380,95 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TemplatesOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "list-trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrashOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "purge-meeting": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "restore-meeting": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Meeting"];
                 };
             };
             /** @description Error */

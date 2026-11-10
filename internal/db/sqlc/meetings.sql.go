@@ -66,7 +66,7 @@ func (q *Queries) AddMinutesVersion(ctx context.Context, arg AddMinutesVersionPa
 const claimMeeting = `-- name: ClaimMeeting :one
 UPDATE meetings SET status = 'processing', heartbeat_at = now(), updated_at = now()
 WHERE id = $1 AND run_id = $2 AND status IN ('queued', 'processing')
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe
 `
 
 type ClaimMeetingParams struct {
@@ -102,14 +102,28 @@ func (q *Queries) ClaimMeeting(ctx context.Context, arg ClaimMeetingParams) (Mee
 		&i.UpdatedAt,
 		&i.LastChunkAt,
 		&i.Marks,
+		&i.Terms,
+		&i.DeletedAt,
+		&i.DeletedBy,
+		&i.Speakers,
+		&i.Retranscribe,
 	)
 	return i, err
+}
+
+const clearRetranscribe = `-- name: ClearRetranscribe :exec
+UPDATE meetings SET retranscribe = false WHERE id = $1
+`
+
+func (q *Queries) ClearRetranscribe(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearRetranscribe, id)
+	return err
 }
 
 const createMeeting = `-- name: CreateMeeting :one
 INSERT INTO meetings (owner_id, title, source, template, hotwords)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe
 `
 
 type CreateMeetingParams struct {
@@ -153,8 +167,45 @@ func (q *Queries) CreateMeeting(ctx context.Context, arg CreateMeetingParams) (M
 		&i.UpdatedAt,
 		&i.LastChunkAt,
 		&i.Marks,
+		&i.Terms,
+		&i.DeletedAt,
+		&i.DeletedBy,
+		&i.Speakers,
+		&i.Retranscribe,
 	)
 	return i, err
+}
+
+const currentMinutesFor = `-- name: CurrentMinutesFor :many
+SELECT mv.meeting_id, mv.content
+FROM meetings m JOIN minutes_versions mv ON mv.meeting_id = m.id AND mv.version = m.current_version
+WHERE m.id = ANY($1::uuid[])
+`
+
+type CurrentMinutesForRow struct {
+	MeetingID uuid.UUID
+	Content   string
+}
+
+// 一批会议当前版本的纪要，搜索时找命中的行用
+func (q *Queries) CurrentMinutesFor(ctx context.Context, ids []uuid.UUID) ([]CurrentMinutesForRow, error) {
+	rows, err := q.db.Query(ctx, currentMinutesFor, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CurrentMinutesForRow
+	for rows.Next() {
+		var i CurrentMinutesForRow
+		if err := rows.Scan(&i.MeetingID, &i.Content); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const deleteChunks = `-- name: DeleteChunks :exec
@@ -164,6 +215,34 @@ DELETE FROM upload_chunks WHERE meeting_id = $1
 func (q *Queries) DeleteChunks(ctx context.Context, meetingID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteChunks, meetingID)
 	return err
+}
+
+const expiredTrash = `-- name: ExpiredTrash :many
+SELECT id FROM meetings
+WHERE deleted_at < now() - make_interval(days => $1::int)
+ORDER BY deleted_at
+LIMIT 100
+`
+
+// 在回收站里放了超过 days 天的会议
+func (q *Queries) ExpiredTrash(ctx context.Context, days int32) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, expiredTrash, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const failMeeting = `-- name: FailMeeting :execrows
@@ -226,7 +305,7 @@ func (q *Queries) FinishMeeting(ctx context.Context, arg FinishMeetingParams) (i
 }
 
 const getMeeting = `-- name: GetMeeting :one
-SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, u.name AS owner_name
+SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, u.name AS owner_name
 FROM meetings m JOIN users u ON u.id = m.owner_id
 WHERE m.id = $1
 `
@@ -263,6 +342,11 @@ func (q *Queries) GetMeeting(ctx context.Context, id uuid.UUID) (GetMeetingRow, 
 		&i.Meeting.UpdatedAt,
 		&i.Meeting.LastChunkAt,
 		&i.Meeting.Marks,
+		&i.Meeting.Terms,
+		&i.Meeting.DeletedAt,
+		&i.Meeting.DeletedBy,
+		&i.Meeting.Speakers,
+		&i.Meeting.Retranscribe,
 		&i.OwnerName,
 	)
 	return i, err
@@ -351,21 +435,25 @@ func (q *Queries) ListChunks(ctx context.Context, meetingID uuid.UUID) ([]ListCh
 }
 
 const listMeetings = `-- name: ListMeetings :many
-SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, u.name AS owner_name
+SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, u.name AS owner_name
 FROM meetings m
 JOIN users u ON u.id = m.owner_id
 LEFT JOIN meeting_search s ON s.meeting_id = m.id
-WHERE ($1::uuid IS NULL OR m.owner_id = $1::uuid)
-  AND (cardinality($2::text[]) = 0
-       OR s.doc @@ (SELECT string_agg(quote_literal(t), ' & ') FROM unnest($2::text[]) AS t)::tsquery)
-ORDER BY m.created_at DESC
-LIMIT $3
+WHERE m.deleted_at IS NULL
+  AND ($1::uuid IS NULL OR m.owner_id = $1::uuid)
+  AND ($2::text IS NULL OR s.doc @@ ($2::text)::tsquery)
+  AND ($3::timestamptz IS NULL
+       OR (m.created_at, m.id) < ($3::timestamptz, $4::uuid))
+ORDER BY m.created_at DESC, m.id DESC
+LIMIT $5
 `
 
 type ListMeetingsParams struct {
-	Owner   *uuid.UUID
-	Terms   []string
-	MaxRows int32
+	Owner    *uuid.UUID
+	Query    *string
+	BeforeAt *time.Time
+	BeforeID *uuid.UUID
+	MaxRows  int32
 }
 
 type ListMeetingsRow struct {
@@ -374,10 +462,17 @@ type ListMeetingsRow struct {
 }
 
 // 一期可见范围固定为团队，visibility 先存着，二期按它过滤。
-// terms 是 Go 里分好的检索词，全部命中才算；空数组表示不筛选。
+// query 是 Go 里拼好的 tsquery（见 search.TSQuery），为空表示不筛选。
 // owner 不为空时只列这个人创建的。
+// before_at、before_id 用来翻页：只列排在这场会议后面的（搜索时一页一页取候选）。
 func (q *Queries) ListMeetings(ctx context.Context, arg ListMeetingsParams) ([]ListMeetingsRow, error) {
-	rows, err := q.db.Query(ctx, listMeetings, arg.Owner, arg.Terms, arg.MaxRows)
+	rows, err := q.db.Query(ctx, listMeetings,
+		arg.Owner,
+		arg.Query,
+		arg.BeforeAt,
+		arg.BeforeID,
+		arg.MaxRows,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -409,6 +504,11 @@ func (q *Queries) ListMeetings(ctx context.Context, arg ListMeetingsParams) ([]L
 			&i.Meeting.UpdatedAt,
 			&i.Meeting.LastChunkAt,
 			&i.Meeting.Marks,
+			&i.Meeting.Terms,
+			&i.Meeting.DeletedAt,
+			&i.Meeting.DeletedBy,
+			&i.Meeting.Speakers,
+			&i.Meeting.Retranscribe,
 			&i.OwnerName,
 		); err != nil {
 			return nil, err
@@ -462,8 +562,76 @@ func (q *Queries) ListMinutesVersions(ctx context.Context, meetingID uuid.UUID) 
 	return items, nil
 }
 
+const listTrash = `-- name: ListTrash :many
+SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, u.name AS owner_name, coalesce(d.name, '')::text AS deleted_by_name
+FROM meetings m
+JOIN users u ON u.id = m.owner_id
+LEFT JOIN users d ON d.id = m.deleted_by
+WHERE m.deleted_at IS NOT NULL
+  AND ($1::uuid IS NULL OR m.owner_id = $1::uuid)
+ORDER BY m.deleted_at DESC
+`
+
+type ListTrashRow struct {
+	Meeting       Meeting
+	OwnerName     string
+	DeletedByName string
+}
+
+// 回收站里的会议，最近删的在前。owner 不为空时只列这个人创建的
+func (q *Queries) ListTrash(ctx context.Context, owner *uuid.UUID) ([]ListTrashRow, error) {
+	rows, err := q.db.Query(ctx, listTrash, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTrashRow
+	for rows.Next() {
+		var i ListTrashRow
+		if err := rows.Scan(
+			&i.Meeting.ID,
+			&i.Meeting.OwnerID,
+			&i.Meeting.Title,
+			&i.Meeting.Source,
+			&i.Meeting.Status,
+			&i.Meeting.Stage,
+			&i.Meeting.Progress,
+			&i.Meeting.Error,
+			&i.Meeting.RunID,
+			&i.Meeting.RunBy,
+			&i.Meeting.HeartbeatAt,
+			&i.Meeting.Requeues,
+			&i.Meeting.Template,
+			&i.Meeting.Hotwords,
+			&i.Meeting.DurationSec,
+			&i.Meeting.AudioKey,
+			&i.Meeting.AudioDeletedAt,
+			&i.Meeting.Visibility,
+			&i.Meeting.CurrentVersion,
+			&i.Meeting.CreatedAt,
+			&i.Meeting.UpdatedAt,
+			&i.Meeting.LastChunkAt,
+			&i.Meeting.Marks,
+			&i.Meeting.Terms,
+			&i.Meeting.DeletedAt,
+			&i.Meeting.DeletedBy,
+			&i.Meeting.Speakers,
+			&i.Meeting.Retranscribe,
+			&i.OwnerName,
+			&i.DeletedByName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockMeeting = `-- name: LockMeeting :one
-SELECT id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks FROM meetings WHERE id = $1 FOR UPDATE
+SELECT id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe FROM meetings WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) LockMeeting(ctx context.Context, id uuid.UUID) (Meeting, error) {
@@ -493,8 +661,36 @@ func (q *Queries) LockMeeting(ctx context.Context, id uuid.UUID) (Meeting, error
 		&i.UpdatedAt,
 		&i.LastChunkAt,
 		&i.Marks,
+		&i.Terms,
+		&i.DeletedAt,
+		&i.DeletedBy,
+		&i.Speakers,
+		&i.Retranscribe,
 	)
 	return i, err
+}
+
+const markRetranscribe = `-- name: MarkRetranscribe :exec
+UPDATE meetings SET retranscribe = true WHERE id = $1
+`
+
+// 要求后台从录音重新识别。旧的转写先留着，新的存好时（同一个事务里）才清掉这个标记
+func (q *Queries) MarkRetranscribe(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, markRetranscribe, id)
+	return err
+}
+
+const purgeMeeting = `-- name: PurgeMeeting :one
+DELETE FROM meetings WHERE id = $1 AND deleted_at IS NOT NULL
+RETURNING audio_key
+`
+
+// 彻底删除回收站里的一场会议（转写、纪要、分片记录跟着级联删掉），返回录音文件的位置，由调用方删文件
+func (q *Queries) PurgeMeeting(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, purgeMeeting, id)
+	var audio_key string
+	err := row.Scan(&audio_key)
+	return audio_key, err
 }
 
 const queueMeeting = `-- name: QueueMeeting :one
@@ -504,7 +700,7 @@ SET status = 'queued', stage = '', progress = 0, error = '',
     template = coalesce($3, template),
     updated_at = now()
 WHERE id = $4 AND status = ANY($5::text[])
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe
 `
 
 type QueueMeetingParams struct {
@@ -549,12 +745,17 @@ func (q *Queries) QueueMeeting(ctx context.Context, arg QueueMeetingParams) (Mee
 		&i.UpdatedAt,
 		&i.LastChunkAt,
 		&i.Marks,
+		&i.Terms,
+		&i.DeletedAt,
+		&i.DeletedBy,
+		&i.Speakers,
+		&i.Retranscribe,
 	)
 	return i, err
 }
 
 const renameMeeting = `-- name: RenameMeeting :one
-UPDATE meetings SET title = $2, updated_at = now() WHERE id = $1 RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks
+UPDATE meetings SET title = $2, updated_at = now() WHERE id = $1 RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe
 `
 
 type RenameMeetingParams struct {
@@ -589,6 +790,11 @@ func (q *Queries) RenameMeeting(ctx context.Context, arg RenameMeetingParams) (M
 		&i.UpdatedAt,
 		&i.LastChunkAt,
 		&i.Marks,
+		&i.Terms,
+		&i.DeletedAt,
+		&i.DeletedBy,
+		&i.Speakers,
+		&i.Retranscribe,
 	)
 	return i, err
 }
@@ -632,6 +838,49 @@ func (q *Queries) RequeueStalled(ctx context.Context, arg RequeueStalledParams) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const restoreMeeting = `-- name: RestoreMeeting :one
+UPDATE meetings SET deleted_at = NULL, deleted_by = NULL
+WHERE id = $1 AND deleted_at IS NOT NULL
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe
+`
+
+// 从回收站恢复
+func (q *Queries) RestoreMeeting(ctx context.Context, id uuid.UUID) (Meeting, error) {
+	row := q.db.QueryRow(ctx, restoreMeeting, id)
+	var i Meeting
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Title,
+		&i.Source,
+		&i.Status,
+		&i.Stage,
+		&i.Progress,
+		&i.Error,
+		&i.RunID,
+		&i.RunBy,
+		&i.HeartbeatAt,
+		&i.Requeues,
+		&i.Template,
+		&i.Hotwords,
+		&i.DurationSec,
+		&i.AudioKey,
+		&i.AudioDeletedAt,
+		&i.Visibility,
+		&i.CurrentVersion,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastChunkAt,
+		&i.Marks,
+		&i.Terms,
+		&i.DeletedAt,
+		&i.DeletedBy,
+		&i.Speakers,
+		&i.Retranscribe,
+	)
+	return i, err
 }
 
 const saveTranscript = `-- name: SaveTranscript :exec
@@ -734,6 +983,71 @@ func (q *Queries) SetMeetingSearch(ctx context.Context, arg SetMeetingSearchPara
 	return err
 }
 
+const setMeetingSpeakers = `-- name: SetMeetingSpeakers :exec
+UPDATE meetings SET speakers = $2, updated_at = now() WHERE id = $1
+`
+
+type SetMeetingSpeakersParams struct {
+	ID       uuid.UUID
+	Speakers []byte
+}
+
+func (q *Queries) SetMeetingSpeakers(ctx context.Context, arg SetMeetingSpeakersParams) error {
+	_, err := q.db.Exec(ctx, setMeetingSpeakers, arg.ID, arg.Speakers)
+	return err
+}
+
+const setMeetingTerms = `-- name: SetMeetingTerms :exec
+UPDATE meetings SET terms = $2 WHERE id = $1
+`
+
+type SetMeetingTermsParams struct {
+	ID    uuid.UUID
+	Terms []byte
+}
+
+// 写完纪要后存下大模型给出的术语表
+func (q *Queries) SetMeetingTerms(ctx context.Context, arg SetMeetingTermsParams) error {
+	_, err := q.db.Exec(ctx, setMeetingTerms, arg.ID, arg.Terms)
+	return err
+}
+
+const termsMatching = `-- name: TermsMatching :many
+SELECT DISTINCT (t.value->>'term')::text AS term, (t.value->'variants')::jsonb AS variants
+FROM meetings m, jsonb_array_elements(m.terms) AS t
+WHERE m.deleted_at IS NULL
+  AND (regexp_replace(lower(t.value->>'term'), '\s+', '', 'g') = regexp_replace(lower($1::text), '\s+', '', 'g')
+   OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.value->'variants') AS v
+              WHERE regexp_replace(lower(v), '\s+', '', 'g') = regexp_replace(lower($1::text), '\s+', '', 'g')))
+`
+
+type TermsMatchingRow struct {
+	Term     string
+	Variants []byte
+}
+
+// 全部会议的术语表里，正确写法或者听错写法就是 q 的那些条目（不分大小写、不管空格：「Go 语言」和「Go语言」算一样）。
+// 搜索时用来扩展搜索词
+func (q *Queries) TermsMatching(ctx context.Context, q_ string) ([]TermsMatchingRow, error) {
+	rows, err := q.db.Query(ctx, termsMatching, q_)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TermsMatchingRow
+	for rows.Next() {
+		var i TermsMatchingRow
+		if err := rows.Scan(&i.Term, &i.Variants); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const touchChunkTime = `-- name: TouchChunkTime :exec
 UPDATE meetings SET last_chunk_at = now() WHERE id = $1
 `
@@ -741,4 +1055,82 @@ UPDATE meetings SET last_chunk_at = now() WHERE id = $1
 func (q *Queries) TouchChunkTime(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, touchChunkTime, id)
 	return err
+}
+
+const transcriptsFor = `-- name: TranscriptsFor :many
+SELECT meeting_id, segments FROM transcripts WHERE meeting_id = ANY($1::uuid[])
+`
+
+type TranscriptsForRow struct {
+	MeetingID uuid.UUID
+	Segments  []byte
+}
+
+// 一批会议的转写，搜索时找命中的句子用
+func (q *Queries) TranscriptsFor(ctx context.Context, ids []uuid.UUID) ([]TranscriptsForRow, error) {
+	rows, err := q.db.Query(ctx, transcriptsFor, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TranscriptsForRow
+	for rows.Next() {
+		var i TranscriptsForRow
+		if err := rows.Scan(&i.MeetingID, &i.Segments); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const trashMeeting = `-- name: TrashMeeting :one
+UPDATE meetings SET deleted_at = now(), deleted_by = $2
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe
+`
+
+type TrashMeetingParams struct {
+	ID        uuid.UUID
+	DeletedBy *uuid.UUID
+}
+
+// 放进回收站
+func (q *Queries) TrashMeeting(ctx context.Context, arg TrashMeetingParams) (Meeting, error) {
+	row := q.db.QueryRow(ctx, trashMeeting, arg.ID, arg.DeletedBy)
+	var i Meeting
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Title,
+		&i.Source,
+		&i.Status,
+		&i.Stage,
+		&i.Progress,
+		&i.Error,
+		&i.RunID,
+		&i.RunBy,
+		&i.HeartbeatAt,
+		&i.Requeues,
+		&i.Template,
+		&i.Hotwords,
+		&i.DurationSec,
+		&i.AudioKey,
+		&i.AudioDeletedAt,
+		&i.Visibility,
+		&i.CurrentVersion,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastChunkAt,
+		&i.Marks,
+		&i.Terms,
+		&i.DeletedAt,
+		&i.DeletedBy,
+		&i.Speakers,
+		&i.Retranscribe,
+	)
+	return i, err
 }

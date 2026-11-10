@@ -1,6 +1,7 @@
 package api
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -8,22 +9,27 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alexedwards/scs/v2/memstore"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/password"
 	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/search"
 	"github.com/ZaneXo/zsmeet/internal/secret"
 	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/storage"
 	"github.com/ZaneXo/zsmeet/internal/testdb"
+	"github.com/ZaneXo/zsmeet/internal/transcript"
 	"github.com/ZaneXo/zsmeet/web"
 )
 
@@ -36,7 +42,8 @@ type client struct {
 	http *http.Client
 	pool *pgxpool.Pool
 	// 直接调业务层，给那些不经过网页的操作用（服务器上的救急命令）
-	svc *service.Service
+	svc   *service.Service
+	store *storage.Local
 }
 
 // result 是一次请求的结果。Body 是解析后的 JSON（没有响应体时为空）。
@@ -68,7 +75,7 @@ func newServer(t *testing.T) *client {
 
 	server := httptest.NewServer(NewHandler(svc, sess, web.FS(), "test"))
 	t.Cleanup(server.Close)
-	c := &client{t: t, base: server.URL, pool: pool, svc: svc}
+	c := &client{t: t, base: server.URL, pool: pool, svc: svc, store: store}
 	return c.another()
 }
 
@@ -78,7 +85,7 @@ func (c *client) another() *client {
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	return &client{t: c.t, base: c.base, http: &http.Client{Jar: jar}, pool: c.pool, svc: c.svc}
+	return &client{t: c.t, base: c.base, http: &http.Client{Jar: jar}, pool: c.pool, svc: c.svc, store: c.store}
 }
 
 // do 发一个请求。body 是 []byte 时按二进制发，其他非 nil 值按 JSON 发。
@@ -623,4 +630,476 @@ func TestMarksSavedWhileRecording(t *testing.T) {
 		t.Errorf("收尾时没带标记，应该保留录音过程中存下的：%s", done.Raw)
 	}
 	c.want(c.do("PUT", base+"/marks", obj{"marks": []float64{1}}), 409)
+}
+
+// processed 把一场会议直接写成「处理完了」：有逐句的转写、当前纪要、术语表，并重建搜索索引。
+// 接口测试里不跑识别，用它造数据。
+func (c *client) processed(title string, segs []transcript.Segment, minutes string, terms string) string {
+	c.t.Helper()
+	id := c.want(c.do("POST", "/api/meetings", obj{"title": title, "source": "upload"}), 201).Body["id"].(string)
+	raw, err := json.Marshal(segs)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	ctx := c.t.Context()
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{"INSERT INTO transcripts (meeting_id, segments) VALUES ($1, $2)", []any{id, raw}},
+		{"INSERT INTO minutes_versions (meeting_id, version, content, source) VALUES ($1, 1, $2, 'auto')", []any{id, minutes}},
+		{"UPDATE meetings SET status = 'done', current_version = 1, terms = $2, audio_key = 'audio/' || id || '.m4a' WHERE id = $1", []any{id, terms}},
+	} {
+		if _, err := c.pool.Exec(ctx, stmt.sql, stmt.args...); err != nil {
+			c.t.Fatal(err)
+		}
+	}
+	if err := search.Reindex(ctx, sqlc.New(c.pool), uuid.MustParse(id)); err != nil {
+		c.t.Fatal(err)
+	}
+	return id
+}
+
+// 搜索：每场会议带上命中的句子和时间点；会议术语表里的听错写法一起搜；长词允许错一个字；
+// 索引粗筛进来、但逐句其实找不到的会议不要。
+func TestSearchHitsGlossaryAndFuzzy(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	// A 的术语表记着「飞书」被听成过「非书」
+	a := c.processed("产品周会", []transcript.Segment{
+		{Start: 3, End: 6, Speaker: 0, Text: "飞书集成放到下一个版本。"},
+	}, "## 结论\n- [00:03] 飞书集成放到下一个版本，由王悦负责调研。", `[{"term": "飞书", "variants": ["非书"]}]`)
+	// B 的转写里只有听错的「非书」，纪要里也没提
+	b := c.processed("技术评审", []transcript.Segment{
+		{Start: 1, End: 4, Speaker: 0, Text: "今天先过一下排期。"},
+		{Start: 12.5, End: 15, Speaker: 1, Text: "非书的接口文档我来看。"},
+	}, "## 摘要\n过了排期。", `[]`)
+	// C 里「网页录音」被识别错了一个字
+	cc := c.processed("站会", []transcript.Segment{{Start: 30, End: 33, Speaker: 0, Text: "网页录因的功能做完了。"}}, "## 摘要\n好。", `[]`)
+	// D 的「网页」和「录音」在相邻两句里，索引里连起来了，但没有一句话里真的有「网页录音」
+	c.processed("周报", []transcript.Segment{{Start: 1, Text: "我们看了网页"}, {Start: 2, Text: "录音设备的预算。"}}, "## 摘要\n好。", `[]`)
+
+	find := func(q string) result {
+		t.Helper()
+		return c.want(c.do("GET", "/api/meetings?q="+url.QueryEscape(q), nil), 200)
+	}
+	items := func(r result) map[string][]any {
+		out := map[string][]any{}
+		for _, it := range r.Body["items"].([]any) {
+			m := it.(map[string]any)
+			out[m["id"].(string)] = m["hits"].([]any)
+		}
+		return out
+	}
+
+	r := find("飞书")
+	if fmt.Sprint(r.Body["expanded"]) != "[飞书 非书]" {
+		t.Errorf("要用术语表扩展出「非书」：%s", r.Raw)
+	}
+	got := items(r)
+	if len(got) != 2 || got[a] == nil || got[b] == nil {
+		t.Fatalf("应该找到 A 和 B 两场：%s", r.Raw)
+	}
+	hit := got[b][0].(map[string]any)
+	if hit["start"] != 12.5 || fmt.Sprint(hit["matches"]) != "[非书]" || hit["source"] != "transcript" || hit["speaker"] != float64(1) || hit["fuzzy"] != false {
+		t.Errorf("B 里命中的是 12.5 秒那句里的「非书」：%v", hit)
+	}
+	if hits := got[a]; len(hits) != 2 || hits[1].(map[string]any)["source"] != "minutes" || hits[1].(map[string]any)["start"] != float64(3) {
+		t.Errorf("A 里转写和纪要各命中一处，纪要那行带着时间点：%v", hits)
+	}
+
+	got = items(find("网页录音"))
+	if len(got) != 1 || got[cc] == nil || fmt.Sprint(got[cc][0].(map[string]any)["matches"]) != "[网页录因]" || got[cc][0].(map[string]any)["fuzzy"] != true {
+		t.Errorf("只该找到错了一个字的 C（标成近似），D 是索引里的误命中：%v", got)
+	}
+	if r := find("！？"); len(r.Body["items"].([]any)) != 0 {
+		t.Errorf("全是标点什么也找不到：%s", r.Raw)
+	}
+	// 不搜索时没有命中信息
+	if r := c.want(c.do("GET", "/api/meetings", nil), 200); fmt.Sprint(r.Body["expanded"]) != "[]" {
+		t.Errorf("不搜索时 expanded 是空的：%s", r.Raw)
+	}
+}
+
+// 搜索时中文和英文之间有没有空格都一样，几个词用空格隔开时每个词都出现就算；术语表也按这个口径扩展。
+func TestSearchSpacesAndSeveralWords(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	goMeeting := c.processed("技术评审", []transcript.Segment{
+		{Start: 2, Text: "我们用Go语言写后端。"},
+		{Start: 6, Text: "勾语言的并发很好用。"},
+	}, "## 结论\n- [00:02] 后端用 Go 语言", `[{"term": "Go 语言", "variants": ["勾语言", "勾", "用Go语言"]}]`)
+	release := c.processed("发布会", []transcript.Segment{{Start: 1, Text: "明天部署。"}, {Start: 3, Text: "周五上线。"}}, "## 摘要\n好。", `[]`)
+
+	find := func(q string) result {
+		t.Helper()
+		return c.want(c.do("GET", "/api/meetings?q="+url.QueryEscape(q), nil), 200)
+	}
+	for _, q := range []string{"Go 语言", "Go语言", "go语言"} {
+		r := find(q)
+		items := r.Body["items"].([]any)
+		if len(items) != 1 || items[0].(map[string]any)["id"] != goMeeting || fmt.Sprint(r.Body["expanded"]) != "["+q+" 勾语言]" {
+			t.Errorf("搜「%s」要找到技术评审，并用术语表扩展出「勾语言」（「勾」只有一个字、「用Go语言」包含了要搜的词，都不用）：%s", q, r.Raw)
+			continue
+		}
+		hits := items[0].(map[string]any)["hits"].([]any)
+		if len(hits) != 3 || fmt.Sprint(hits[0].(map[string]any)["matches"]) != "[Go语言]" || fmt.Sprint(hits[1].(map[string]any)["matches"]) != "[勾语言]" {
+			t.Errorf("搜「%s」的命中不对：%v", q, hits)
+		}
+	}
+	r := find("部署 上线")
+	if items := r.Body["items"].([]any); len(items) != 1 || items[0].(map[string]any)["id"] != release || len(items[0].(map[string]any)["hits"].([]any)) != 2 {
+		t.Errorf("「部署」「上线」在不同的句子里也算搜到：%s", r.Raw)
+	}
+	if r := find("部署 下线"); len(r.Body["items"].([]any)) != 0 {
+		t.Errorf("少一个词就不算：%s", r.Raw)
+	}
+}
+
+// 搜索不会因为候选太多漏掉老会议：索引粗筛出的误命中再多，也要一页一页查下去。
+func TestSearchPagesThroughCandidates(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	old := c.processed("机房周会", []transcript.Segment{{Start: 4, Text: "下周开始数据中心迁移。"}}, "## 摘要\n好。", `[]`)
+	// 130 场更新的会议，「数据」「据中」「中心」都有，但没有一句话里真的说了「数据中心」
+	_, err := c.pool.Exec(t.Context(), `
+		WITH m AS (
+			INSERT INTO meetings (owner_id, title, source, status, created_at)
+			SELECT (SELECT id FROM users WHERE email = $1), '周会 ' || i, 'upload', 'done', now() + i * interval '1 second'
+			FROM generate_series(1, 130) AS i
+			RETURNING id
+		), t AS (
+			INSERT INTO transcripts (meeting_id, segments)
+			SELECT id, '[{"start":1,"end":2,"speaker":0,"text":"数据很多。"},{"start":3,"end":4,"speaker":0,"text":"据中方消息。"},{"start":5,"end":6,"speaker":0,"text":"中心在北京。"}]'::jsonb FROM m
+		)
+		INSERT INTO meeting_search (meeting_id, doc)
+		SELECT id, array_to_tsvector(ARRAY['数','据','中','心','数据','据中','中心']) FROM m`, admin["email"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.want(c.do("GET", "/api/meetings?limit=1&q="+url.QueryEscape("数据中心"), nil), 200)
+	if items := r.Body["items"].([]any); len(items) != 1 || items[0].(map[string]any)["id"] != old || r.Body["partial"] != false {
+		t.Errorf("应该翻过 130 个误命中找到老会议：%s", r.Raw)
+	}
+}
+
+// 重新转写：删掉旧的转写、重新入队；录音不在、正在处理、没有权限的都不行。
+func TestRetranscribe(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	other := c.addMember("member@example.com", "李航")
+	id := c.processed("产品周会", []transcript.Segment{{Start: 0, End: 2, Text: "旧的转写。"}}, "## 摘要\n好。", `[]`)
+	base := "/api/meetings/" + id
+
+	// 录音文件还没有：不能重新转写
+	if r := c.want(c.do("POST", base+"/retranscribe", nil), 409); !strings.Contains(r.Raw, "录音已经不在了") {
+		t.Errorf("录音文件不在时要说明：%s", r.Raw)
+	}
+	if err := os.MkdirAll(c.store.Path("audio"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.store.Path("audio/"+id+".m4a"), []byte("m4a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	other.want(other.do("POST", base+"/retranscribe", nil), 403)
+	r := c.want(c.do("POST", base+"/retranscribe", nil), 200)
+	if r.Body["status"] != "queued" {
+		t.Errorf("应该进入排队：%s", r.Raw)
+	}
+	if tr := c.want(c.do("GET", base+"/transcript", nil), 200); len(tr.Body["segments"].([]any)) != 1 {
+		t.Errorf("旧的转写要留到新的存好为止：%s", tr.Raw)
+	}
+	var flagged bool
+	if err := c.pool.QueryRow(t.Context(), "SELECT retranscribe FROM meetings WHERE id = $1", id).Scan(&flagged); err != nil || !flagged {
+		t.Errorf("要在会议上记下「重新识别」：%v %v", flagged, err)
+	}
+	var jobs int
+	if err := c.pool.QueryRow(t.Context(), "SELECT count(*) FROM river_job WHERE args->>'meeting_id' = $1", id).Scan(&jobs); err != nil || jobs != 1 {
+		t.Errorf("应该有一个后台任务：%d %v", jobs, err)
+	}
+	// 正在处理时不能再来一次
+	c.want(c.do("POST", base+"/retranscribe", nil), 409)
+
+	// 录音已经不在了
+	gone := c.processed("没录音的会", []transcript.Segment{{Text: "好。"}}, "## 摘要", `[]`)
+	if _, err := c.pool.Exec(t.Context(), "UPDATE meetings SET audio_deleted_at = now() WHERE id = $1", gone); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.want(c.do("POST", "/api/meetings/"+gone+"/retranscribe", nil), 409); !strings.Contains(r.Raw, "录音已经不在了") {
+		t.Errorf("要说明录音不在了：%s", r.Raw)
+	}
+}
+
+// loginFrom 用指定的 X-Forwarded-For 登录（模拟经过反向代理、来自某个外网 IP 的请求），返回状态码和响应。
+func (c *client) loginFrom(forwarded, email, pass string) result {
+	c.t.Helper()
+	raw, _ := json.Marshal(obj{"email": email, "password": pass})
+	req, err := http.NewRequest("POST", c.base+"/api/login", bytes.NewReader(raw))
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if forwarded != "" {
+		req.Header.Set("X-Forwarded-For", forwarded)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return result{Status: resp.StatusCode, Raw: string(body)}
+}
+
+// 登录限流：同一个邮箱错 5 次锁住（密码对了也不行），同一个 IP 错 20 次锁住；别人、别处不受影响。
+func TestLoginRateLimit(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	c.addMember("member@example.com", "李航")
+	email, good := admin["email"].(string), admin["password"].(string)
+	stranger := c.another()
+
+	for i := range 5 {
+		if r := stranger.loginFrom("", email, "wrong-pass-"+fmt.Sprint(i)); r.Status != 401 {
+			t.Fatalf("第 %d 次输错应该是 401：%d %s", i+1, r.Status, r.Raw)
+		}
+	}
+	locked := stranger.loginFrom("", email, good)
+	if locked.Status != 429 || !strings.Contains(locked.Raw, "分钟后再试") {
+		t.Fatalf("错满 5 次以后，密码对了也要先等一等：%d %s", locked.Status, locked.Raw)
+	}
+	// 同一个 IP 上别人的账号照常登录（这个 IP 才错了 5 次）
+	if r := stranger.loginFrom("", "member@example.com", "member-pass-123"); r.Status != 200 {
+		t.Errorf("别的账号不该受影响：%d %s", r.Status, r.Raw)
+	}
+
+	// 锁过期以后可以登录，登录成功后这个邮箱重新计数
+	if _, err := c.pool.Exec(t.Context(), "UPDATE login_failures SET locked_until = now() - interval '1 second', window_start = now() - interval '16 minutes' WHERE key = $1", "email:"+email); err != nil {
+		t.Fatal(err)
+	}
+	if r := stranger.loginFrom("", email, good); r.Status != 200 {
+		t.Fatalf("锁过期以后应该能登录：%d %s", r.Status, r.Raw)
+	}
+	var left int
+	if err := c.pool.QueryRow(t.Context(), "SELECT count(*) FROM login_failures WHERE key = $1", "email:"+email).Scan(&left); err != nil || left != 0 {
+		t.Errorf("登录成功后邮箱的计数要清掉：%d %v", left, err)
+	}
+
+	// 经过代理、来自同一个外网 IP 的请求，换着邮箱猜也会被锁
+	attacker := c.another()
+	for i := range 20 {
+		attacker.loginFrom("203.0.113.9", fmt.Sprintf("guess%d@example.com", i), "x-wrong-pass")
+	}
+	if r := attacker.loginFrom("203.0.113.9", "member@example.com", "member-pass-123"); r.Status != 429 {
+		t.Errorf("这个 IP 错了 20 次，应该被锁：%d %s", r.Status, r.Raw)
+	}
+	// 别的地方照常登录
+	if r := attacker.loginFrom("198.51.100.7", "member@example.com", "member-pass-123"); r.Status != 200 {
+		t.Errorf("别的 IP 不受影响：%d %s", r.Status, r.Raw)
+	}
+}
+
+func TestClientIP(t *testing.T) {
+	for _, tc := range []struct{ remote, forwarded, want string }{
+		{"203.0.113.9:5000", "1.2.3.4", "203.0.113.9"},              // 外网直连：不信 X-Forwarded-For
+		{"127.0.0.1:5000", "", "127.0.0.1"},                         // 本机直连
+		{"172.18.0.3:5000", "203.0.113.9, 10.0.0.2", "203.0.113.9"}, // 代理在内网：取最右边的外网地址
+		{"127.0.0.1:5000", "spoofed, 198.51.100.7", "198.51.100.7"}, // 认不出的跳过
+		{"10.0.0.5:5000", "192.168.1.20, 10.0.0.2", "192.168.1.20"}, // 全是内网地址：取最初发请求的人
+		{"[::1]:5000", "2001:db8::1", "2001:db8::1"},
+	} {
+		if got := clientIP(tc.remote, tc.forwarded); got != tc.want {
+			t.Errorf("clientIP(%q, %q) = %q，想要 %q", tc.remote, tc.forwarded, got, tc.want)
+		}
+	}
+}
+
+// 删除会议进回收站：看不到、搜不到；回收站里管理员看全部、成员看自己的；能恢复；
+// 彻底删除连录音文件一起删；放满 30 天的由后台清掉；删掉的会议的术语表不再用来扩展搜索。
+func TestTrash(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	member := c.addMember("member@example.com", "李航")
+	x := c.processed("产品周会", []transcript.Segment{{Start: 1, Text: "飞书集成放到下一个版本。"}}, "## 摘要\n好。", `[{"term": "飞书", "variants": ["非书"]}]`)
+	y := member.want(member.do("POST", "/api/meetings", obj{"title": "李航的会", "source": "upload"}), 201).Body["id"].(string)
+	// x 有一个录音文件
+	if err := os.MkdirAll(filepath.Join(c.store.Path("audio")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	audioFile := c.store.Path("audio/" + x + ".m4a")
+	if err := os.WriteFile(audioFile, []byte("m4a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	member.want(member.do("DELETE", "/api/meetings/"+x, nil), 403)
+	c.want(c.do("DELETE", "/api/meetings/"+x, nil), 204)
+	c.want(c.do("GET", "/api/meetings/"+x, nil), 404)
+	c.want(c.do("GET", "/api/meetings/"+x+"/transcript", nil), 404)
+	if r := c.want(c.do("GET", "/api/meetings?q="+url.QueryEscape("飞书"), nil), 200); len(r.Body["items"].([]any)) != 0 || fmt.Sprint(r.Body["expanded"]) != "[飞书]" {
+		t.Errorf("删掉的会议搜不到，它的术语表也不再用：%s", r.Raw)
+	}
+	member.want(member.do("DELETE", "/api/meetings/"+y, nil), 204)
+
+	trash := func(cl *client) []any {
+		t.Helper()
+		return cl.want(cl.do("GET", "/api/trash", nil), 200).Body["items"].([]any)
+	}
+	all := trash(c)
+	if len(all) != 2 {
+		t.Fatalf("管理员看得到回收站里的全部：%v", all)
+	}
+	first := all[0].(map[string]any) // 最近删的在前：李航删的 y
+	deletedAt, _ := time.Parse(time.RFC3339Nano, first["deleted_at"].(string))
+	purgeAt, _ := time.Parse(time.RFC3339Nano, first["purge_at"].(string))
+	if first["id"] != y || first["deleted_by_name"] != "李航" || purgeAt.Sub(deletedAt) != 30*24*time.Hour {
+		t.Errorf("回收站条目不对：%v", first)
+	}
+	if mine := trash(member); len(mine) != 1 || mine[0].(map[string]any)["id"] != y {
+		t.Errorf("成员只看得到自己创建的：%v", mine)
+	}
+	member.want(member.do("POST", "/api/trash/"+x+"/restore", nil), 403)
+
+	// 恢复
+	restored := c.want(c.do("POST", "/api/trash/"+x+"/restore", nil), 200)
+	if restored.Body["id"] != x {
+		t.Errorf("恢复后返回这场会议：%s", restored.Raw)
+	}
+	if r := c.want(c.do("GET", "/api/meetings?q="+url.QueryEscape("非书"), nil), 200); len(r.Body["items"].([]any)) != 1 {
+		t.Errorf("恢复以后又能搜到（「非书」由它的术语表扩展到「飞书」）：%s", r.Raw)
+	}
+	c.want(c.do("POST", "/api/trash/"+x+"/restore", nil), 404)
+	c.want(c.do("DELETE", "/api/trash/"+x, nil), 404) // 不在回收站里不能彻底删除
+
+	// 彻底删除：记录和录音文件都没了
+	c.want(c.do("DELETE", "/api/meetings/"+x, nil), 204)
+	c.want(c.do("DELETE", "/api/trash/"+x, nil), 204)
+	var n int
+	if err := c.pool.QueryRow(t.Context(), "SELECT count(*) FROM meetings WHERE id = $1", x).Scan(&n); err != nil || n != 0 {
+		t.Errorf("记录应该删掉：%d %v", n, err)
+	}
+	if _, err := os.Stat(audioFile); !os.IsNotExist(err) {
+		t.Errorf("录音文件应该删掉：%v", err)
+	}
+
+	// 放满 30 天的由后台清掉，没满的留着
+	if _, err := c.pool.Exec(t.Context(), "UPDATE meetings SET deleted_at = now() - interval '31 days' WHERE id = $1", y); err != nil {
+		t.Fatal(err)
+	}
+	z := c.processed("刚删的会", nil, "## 摘要", `[]`)
+	c.want(c.do("DELETE", "/api/meetings/"+z, nil), 204)
+	purged, err := service.PurgeExpired(t.Context(), sqlc.New(c.pool), c.store)
+	if err != nil || purged != 1 {
+		t.Errorf("应该清掉 1 场：%d %v", purged, err)
+	}
+	if left := trash(c); len(left) != 1 || left[0].(map[string]any)["id"] != z {
+		t.Errorf("只剩刚删的那场：%v", left)
+	}
+}
+
+// 给说话人起名字：会议里记下名字，当前纪要里的称呼换成名字（新版本）；没权限、名字太长、编号不对的都不行。
+func TestRenameSpeakers(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	member := c.addMember("member@example.com", "李航")
+	id := c.processed("产品周会", []transcript.Segment{
+		{Start: 0, End: 2, Speaker: 0, Text: "一期只做网页端。"},
+		{Start: 2, End: 4, Speaker: 1, Text: "同意。"},
+	}, "## 摘要\n- 说话人 1 提出一期只做网页端；说话人 2（王悦）同意。说话人 12 没来。", `[]`)
+	base := "/api/meetings/" + id
+
+	member.want(member.do("PUT", base+"/speakers", obj{"names": obj{"0": "张敏"}}), 403)
+	c.want(c.do("PUT", base+"/speakers", obj{"names": obj{"0": strings.Repeat("长", 21)}}), 422)
+	c.want(c.do("PUT", base+"/speakers", obj{"names": obj{"x": "张敏"}}), 422)
+
+	m := c.want(c.do("PUT", base+"/speakers", obj{"names": obj{"0": " 张敏 ", "1": "王悦"}}), 200)
+	if fmt.Sprint(m.Body["speakers"]) != "map[0:张敏 1:王悦]" || m.Body["minutes_version"] != float64(2) {
+		t.Fatalf("应该记下名字、纪要多一个版本：%s", m.Raw)
+	}
+	minutes := c.want(c.do("GET", base+"/minutes", nil), 200)
+	if minutes.Body["content"] != "## 摘要\n- 张敏 提出一期只做网页端；王悦同意。说话人 12 没来。" {
+		t.Errorf("纪要里的称呼要换成名字：%s", minutes.Raw)
+	}
+	if v := minutes.Body["versions"].([]any)[0].(map[string]any); v["source"] != "edit" || v["author"] != "张敏" {
+		t.Errorf("新版本记在改名的人名下：%v", v)
+	}
+
+	// 名字没变不再产生新版本；去掉名字只改会议，不动纪要
+	c.want(c.do("PUT", base+"/speakers", obj{"names": obj{"0": "张敏"}}), 200)
+	m = c.want(c.do("PUT", base+"/speakers", obj{"names": obj{"1": ""}}), 200)
+	if fmt.Sprint(m.Body["speakers"]) != "map[0:张敏]" || m.Body["minutes_version"] != float64(2) {
+		t.Errorf("去掉名字不该产生新的纪要版本：%s", m.Raw)
+	}
+}
+
+// 导出：纪要导出成 Word / Markdown，转写导出成纯文本；文件名是会议标题，说话人用起好的名字；
+// 团队里的人都能导出；没有纪要时 409，删掉的会议 404。
+func TestExport(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	member := c.addMember("member@example.com", "李航")
+	id := c.processed("产品周会", []transcript.Segment{
+		{Start: 0, End: 2, Speaker: 0, Text: "一期只做网页端。"},
+		{Start: 3, End: 5, Speaker: 1, Text: "同意。"},
+	}, "## 结论\n- [00:00] 一期只做网页端。", `[]`)
+	base := "/api/meetings/" + id
+	c.want(c.do("PUT", base+"/speakers", obj{"names": obj{"0": "张敏"}}), 200)
+
+	get := func(cl *client, query string) (*http.Response, []byte) {
+		t.Helper()
+		resp, err := cl.http.Get(c.base + base + "/export?" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp, body
+	}
+
+	resp, body := get(member, "what=minutes&format=docx")
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
+		t.Fatalf("应该导出 Word：%d %s %s", resp.StatusCode, resp.Header.Get("Content-Type"), body)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, `filename="zsmeet-export.docx"`) || !strings.Contains(cd, "filename*=UTF-8''"+url.PathEscape("产品周会-纪要.docx")) {
+		t.Errorf("文件名不对：%s", cd)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("不是合法的 Word 文件：%v", err)
+	}
+	var doc string
+	for _, f := range zr.File {
+		if f.Name == "word/document.xml" {
+			rc, _ := f.Open()
+			raw, _ := io.ReadAll(rc)
+			rc.Close()
+			doc = string(raw)
+		}
+	}
+	for _, want := range []string{"产品周会", "创建者：张敏", "说话人：张敏", "纪要版本：第 1 版", "一期只做网页端"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("Word 里缺少 %q", want)
+		}
+	}
+
+	if resp, body := get(c, "what=minutes&format=md"); resp.StatusCode != 200 || !strings.HasPrefix(string(body), "# 产品周会\n") || !strings.Contains(resp.Header.Get("Content-Type"), "text/markdown") {
+		t.Errorf("Markdown 导出不对：%d %s", resp.StatusCode, body)
+	}
+	if resp, body := get(c, "what=transcript&format=txt"); resp.StatusCode != 200 || !strings.Contains(string(body), "[00:00] 张敏：一期只做网页端。") || !strings.Contains(string(body), "[00:03] 说话人 2：同意。") {
+		t.Errorf("转写导出不对：%d %s", resp.StatusCode, body)
+	}
+	if resp, _ := get(c, "what=minutes&format=pdf"); resp.StatusCode != 422 {
+		t.Errorf("不认识的格式要报错：%d", resp.StatusCode)
+	}
+
+	// 还没有纪要
+	empty := c.want(c.do("POST", "/api/meetings", obj{"title": "空会议", "source": "upload"}), 201).Body["id"].(string)
+	if resp, err := c.http.Get(c.base + "/api/meetings/" + empty + "/export?what=minutes"); err != nil || resp.StatusCode != 409 {
+		t.Errorf("没有纪要时应该是 409：%v %v", resp.StatusCode, err)
+	}
+	// 删掉的会议
+	c.want(c.do("DELETE", base, nil), 204)
+	if resp, _ := get(c, "what=minutes"); resp.StatusCode != 404 {
+		t.Errorf("删掉的会议不能导出：%d", resp.StatusCode)
+	}
 }

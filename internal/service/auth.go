@@ -3,7 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
+	"math/rand/v2"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -67,12 +71,42 @@ func checkAccount(email, name, pass string) (string, string, error) {
 var errLogin = &Error{Unauthorized, "邮箱或密码不对"}
 
 // Login 校验邮箱和密码。邮箱不存在和密码不对返回同一个错误，不泄露哪些邮箱注册过。
-func (s *Service) Login(ctx context.Context, email, pass string) (sqlc.User, error) {
-	user, err := s.q.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(email)))
+// 登录限流：同一个邮箱 15 分钟里输错 5 次，或者同一个 IP 输错 20 次，就锁 15 分钟。
+// 锁着的时候密码对了也不让进，不然锁就没有意义了。
+const (
+	loginWindow       = 15 * time.Minute
+	maxEmailFailures  = 5
+	maxClientFailures = 20
+)
+
+// Login 用邮箱和密码登录。clientIP 是发请求的人的 IP（接口层取的），可以为空。
+func (s *Service) Login(ctx context.Context, email, pass, clientIP string) (sqlc.User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	emailKey := "email:" + email
+	keys := []string{emailKey}
+	if clientIP != "" {
+		keys = append(keys, "ip:"+clientIP)
+	}
+	locked, err := s.q.LoginLockedUntil(ctx, keys)
+	if err != nil {
+		return sqlc.User{}, err
+	}
+	if len(locked) > 0 && locked[0] != nil {
+		minutes := int(math.Ceil(time.Until(*locked[0]).Minutes()))
+		return sqlc.User{}, &Error{TooManyRequests, fmt.Sprintf("密码输错的次数太多，为了账号安全暂时不能登录，请 %d 分钟后再试", max(minutes, 1))}
+	}
+
+	failed := func() (sqlc.User, error) {
+		if err := s.recordLoginFailure(ctx, emailKey, clientIP); err != nil {
+			return sqlc.User{}, err
+		}
+		return sqlc.User{}, errLogin
+	}
+	user, err := s.q.GetUserByEmail(ctx, email)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// 邮箱不存在时也算一次哈希，让两种情况的响应时间差不多
 		password.Hash(pass)
-		return sqlc.User{}, errLogin
+		return failed()
 	}
 	if err != nil {
 		return sqlc.User{}, err
@@ -82,12 +116,33 @@ func (s *Service) Login(ctx context.Context, email, pass string) (sqlc.User, err
 		return sqlc.User{}, err
 	}
 	if !ok {
-		return sqlc.User{}, errLogin
+		return failed()
 	}
 	if user.Disabled {
 		return sqlc.User{}, errAccountDisabled
 	}
+	// 登录成功，这个邮箱重新计数。IP 的不清：拿一个自己知道密码的账号登录一下，不能把猜别人密码的次数也清掉
+	if err := s.q.ClearLoginFailures(ctx, emailKey); err != nil {
+		return sqlc.User{}, err
+	}
 	return user, nil
+}
+
+func (s *Service) recordLoginFailure(ctx context.Context, emailKey, clientIP string) error {
+	window := loginWindow.Seconds()
+	if err := s.q.RecordLoginFailure(ctx, sqlc.RecordLoginFailureParams{Key: emailKey, WindowSecs: window, MaxFailures: maxEmailFailures}); err != nil {
+		return err
+	}
+	if clientIP != "" {
+		if err := s.q.RecordLoginFailure(ctx, sqlc.RecordLoginFailureParams{Key: "ip:" + clientIP, WindowSecs: window, MaxFailures: maxClientFailures}); err != nil {
+			return err
+		}
+	}
+	// 偶尔顺手清掉早就过期的记录，免得表越来越大
+	if rand.IntN(50) == 0 {
+		return s.q.DeleteStaleLoginFailures(ctx)
+	}
+	return nil
 }
 
 // SessionUser 返回会话对应的用户。epoch 是登录时记在会话里的 users.session_epoch。

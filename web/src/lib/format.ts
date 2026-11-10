@@ -62,8 +62,10 @@ export const VERSION_SOURCE_LABEL = {
   regenerate: "重新生成",
 } as const;
 
-export function speakerName(speaker: number): string {
-  return speaker < 0 ? "说话人" : `说话人 ${speaker + 1}`;
+/** 说话人的名字：起过名字就用名字，没起过是「说话人 N」。names 的键是说话人编号（字符串）。 */
+export function speakerName(speaker: number, names?: Record<string, string>): string {
+  if (speaker < 0) return "说话人";
+  return names?.[String(speaker)] || `说话人 ${speaker + 1}`;
 }
 
 // 蓝、橙、绿、紫……相邻的说话人在色相和明度上都拉开，色弱也分得出
@@ -78,4 +80,54 @@ export function fileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+/** 一段文字里的一截：mark 为 true 的是命中的词，要高亮。 */
+export type Piece = { text: string; mark: boolean };
+
+/**
+ * 截取第一个命中的词前后的一小段，长句子不至于把命中的字挤到看不见的地方，截掉的地方用省略号；
+ * 再把这一段切成高亮和不高亮的几截（matches 里的词出现的地方都高亮）。
+ */
+export function snippet(text: string, matches: string[], radius = 28): Piece[] {
+  // 长的词先比，免得「Go 语言」里的「Go」先被单独切出去
+  const words = matches.filter(Boolean).sort((a, b) => b.length - a.length);
+  const positions = words.map((w) => text.indexOf(w)).filter((i) => i >= 0);
+  let view = text;
+  if (positions.length > 0) {
+    const at = Math.min(...positions);
+    const before = Array.from(text.slice(0, at));
+    const after = Array.from(text.slice(at));
+    view =
+      (before.length > radius ? "…" + before.slice(-radius).join("") : before.join("")) +
+      (after.length > radius * 3 ? after.slice(0, radius * 3).join("") + "…" : after.join(""));
+  }
+  return pieces(view, words);
+}
+
+/** 把 text 切成几截，words 里的词出现的地方标成高亮。 */
+export function pieces(text: string, words: string[]): Piece[] {
+  const out: Piece[] = [];
+  let plain = "";
+  for (let i = 0; i < text.length; ) {
+    const word = words.find((w) => w && text.startsWith(w, i));
+    if (word) {
+      if (plain) out.push({ text: plain, mark: false });
+      out.push({ text: word, mark: true });
+      plain = "";
+      i += word.length;
+    } else {
+      plain += text[i];
+      i++;
+    }
+  }
+  if (plain) out.push({ text: plain, mark: false });
+  return out;
+}
+
+/** 两句接在一起时中间要不要空一格：英文的两句之间要，中文直接接上（和后端 transcript.joinText 一致）。 */
+export function needsSpace(before: string, after: string): boolean {
+  const last = before.at(-1) ?? "";
+  const next = after[0] ?? "";
+  return last !== "" && next !== "" && last < "\x80" && next < "\x80" && last !== " " && next !== " ";
 }

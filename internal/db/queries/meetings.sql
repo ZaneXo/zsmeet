@@ -13,16 +13,19 @@ SELECT * FROM meetings WHERE id = $1 FOR UPDATE;
 
 -- name: ListMeetings :many
 -- 一期可见范围固定为团队，visibility 先存着，二期按它过滤。
--- terms 是 Go 里分好的检索词，全部命中才算；空数组表示不筛选。
+-- query 是 Go 里拼好的 tsquery（见 search.TSQuery），为空表示不筛选。
 -- owner 不为空时只列这个人创建的。
+-- before_at、before_id 用来翻页：只列排在这场会议后面的（搜索时一页一页取候选）。
 SELECT sqlc.embed(m), u.name AS owner_name
 FROM meetings m
 JOIN users u ON u.id = m.owner_id
 LEFT JOIN meeting_search s ON s.meeting_id = m.id
-WHERE (sqlc.narg('owner')::uuid IS NULL OR m.owner_id = sqlc.narg('owner')::uuid)
-  AND (cardinality(sqlc.arg('terms')::text[]) = 0
-       OR s.doc @@ (SELECT string_agg(quote_literal(t), ' & ') FROM unnest(sqlc.arg('terms')::text[]) AS t)::tsquery)
-ORDER BY m.created_at DESC
+WHERE m.deleted_at IS NULL
+  AND (sqlc.narg('owner')::uuid IS NULL OR m.owner_id = sqlc.narg('owner')::uuid)
+  AND (sqlc.narg('query')::text IS NULL OR s.doc @@ (sqlc.narg('query')::text)::tsquery)
+  AND (sqlc.narg('before_at')::timestamptz IS NULL
+       OR (m.created_at, m.id) < (sqlc.narg('before_at')::timestamptz, sqlc.narg('before_id')::uuid))
+ORDER BY m.created_at DESC, m.id DESC
 LIMIT sqlc.arg('max_rows');
 
 -- name: SetMeetingSearch :exec
@@ -132,3 +135,71 @@ SELECT mv.version, mv.source, mv.template, mv.created_at, coalesce(u.name, '') A
 FROM minutes_versions mv LEFT JOIN users u ON u.id = mv.author_id
 WHERE mv.meeting_id = $1
 ORDER BY mv.version DESC;
+
+-- name: SetMeetingTerms :exec
+-- 写完纪要后存下大模型给出的术语表
+UPDATE meetings SET terms = $2 WHERE id = $1;
+
+-- name: TermsMatching :many
+-- 全部会议的术语表里，正确写法或者听错写法就是 q 的那些条目（不分大小写、不管空格：「Go 语言」和「Go语言」算一样）。
+-- 搜索时用来扩展搜索词
+SELECT DISTINCT (t.value->>'term')::text AS term, (t.value->'variants')::jsonb AS variants
+FROM meetings m, jsonb_array_elements(m.terms) AS t
+WHERE m.deleted_at IS NULL
+  AND (regexp_replace(lower(t.value->>'term'), '\s+', '', 'g') = regexp_replace(lower(sqlc.arg('q')::text), '\s+', '', 'g')
+   OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.value->'variants') AS v
+              WHERE regexp_replace(lower(v), '\s+', '', 'g') = regexp_replace(lower(sqlc.arg('q')::text), '\s+', '', 'g')));
+
+-- name: TranscriptsFor :many
+-- 一批会议的转写，搜索时找命中的句子用
+SELECT meeting_id, segments FROM transcripts WHERE meeting_id = ANY(sqlc.arg('ids')::uuid[]);
+
+-- name: CurrentMinutesFor :many
+-- 一批会议当前版本的纪要，搜索时找命中的行用
+SELECT mv.meeting_id, mv.content
+FROM meetings m JOIN minutes_versions mv ON mv.meeting_id = m.id AND mv.version = m.current_version
+WHERE m.id = ANY(sqlc.arg('ids')::uuid[]);
+
+-- name: MarkRetranscribe :exec
+-- 要求后台从录音重新识别。旧的转写先留着，新的存好时（同一个事务里）才清掉这个标记
+UPDATE meetings SET retranscribe = true WHERE id = $1;
+
+-- name: ClearRetranscribe :exec
+UPDATE meetings SET retranscribe = false WHERE id = $1;
+
+-- name: TrashMeeting :one
+-- 放进回收站
+UPDATE meetings SET deleted_at = now(), deleted_by = $2
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING *;
+
+-- name: RestoreMeeting :one
+-- 从回收站恢复
+UPDATE meetings SET deleted_at = NULL, deleted_by = NULL
+WHERE id = $1 AND deleted_at IS NOT NULL
+RETURNING *;
+
+-- name: PurgeMeeting :one
+-- 彻底删除回收站里的一场会议（转写、纪要、分片记录跟着级联删掉），返回录音文件的位置，由调用方删文件
+DELETE FROM meetings WHERE id = $1 AND deleted_at IS NOT NULL
+RETURNING audio_key;
+
+-- name: ListTrash :many
+-- 回收站里的会议，最近删的在前。owner 不为空时只列这个人创建的
+SELECT sqlc.embed(m), u.name AS owner_name, coalesce(d.name, '')::text AS deleted_by_name
+FROM meetings m
+JOIN users u ON u.id = m.owner_id
+LEFT JOIN users d ON d.id = m.deleted_by
+WHERE m.deleted_at IS NOT NULL
+  AND (sqlc.narg('owner')::uuid IS NULL OR m.owner_id = sqlc.narg('owner')::uuid)
+ORDER BY m.deleted_at DESC;
+
+-- name: ExpiredTrash :many
+-- 在回收站里放了超过 days 天的会议
+SELECT id FROM meetings
+WHERE deleted_at < now() - make_interval(days => sqlc.arg('days')::int)
+ORDER BY deleted_at
+LIMIT 100;
+
+-- name: SetMeetingSpeakers :exec
+UPDATE meetings SET speakers = $2, updated_at = now() WHERE id = $1;

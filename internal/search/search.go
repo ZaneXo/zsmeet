@@ -83,6 +83,23 @@ func DocTerms(texts ...string) []string {
 				}
 			}
 		})
+		// 两段中文之间只隔着空格时（「产品 周会」），跨过空格的两个字也记下来，搜「产品周会」也能找到。
+		// 换行不算：转写一句一行，跨句的字连不成词。查询里的空格是分隔符，不这样处理
+		var prev rune
+		gap := false
+		for _, r := range text {
+			switch {
+			case isCJK(r):
+				if prev != 0 && gap {
+					add(string([]rune{prev, r}))
+				}
+				prev, gap = r, false
+			case unicode.IsSpace(r) && r != '\n' && r != '\r':
+				gap = prev != 0
+			default:
+				prev, gap = 0, false
+			}
+		}
 	}
 	return out
 }

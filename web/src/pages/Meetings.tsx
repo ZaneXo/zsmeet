@@ -2,11 +2,12 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
-import type { Meeting } from "../api/client";
+import type { Meeting, MeetingListItem, SearchHit } from "../api/client";
 import { Button, buttonClass, Chip, Icon, Input, Notice, Spinner } from "../components/ui";
 import type { Tone } from "../components/ui";
-import { dateTime, dayGroup, duration, SOURCE_LABEL, STAGE_LABEL } from "../lib/format";
+import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName, STAGE_LABEL } from "../lib/format";
 import { useTicker } from "../lib/useTicker";
+import { TrashList } from "./Trash";
 import { UploadDialog } from "./UploadDialog";
 
 /** 网页录音的会议多久没收到新的分片，就不再显示「录音中」（录音的网页可能关掉了、断网了，或者暂停着）。 */
@@ -46,6 +47,8 @@ export function MeetingsPage() {
   const [q, setQ] = useState("");
   const [uploading, setUploading] = useState(false);
   const [mine, setMine] = useState(false);
+  // 看的是回收站，不是会议列表
+  const [trash, setTrash] = useState(false);
 
   // 停止输入 300 毫秒后再搜，不用每敲一个字就请求一次
   useEffect(() => {
@@ -55,6 +58,7 @@ export function MeetingsPage() {
 
   const meetings = useQuery({
     queryKey: ["meetings", q, mine],
+    enabled: !trash,
     queryFn: () => unwrap(api.GET("/api/meetings", { params: { query: { q: q || undefined, mine: mine || undefined } } })),
     // 有会议在处理时每 3 秒刷新一次，让状态和进度跟上；有人在录音时每 15 秒刷新一次
     refetchInterval: (query) => {
@@ -73,7 +77,9 @@ export function MeetingsPage() {
   });
 
   const items = meetings.data?.items ?? [];
-  const groups: { label: string; items: Meeting[] }[] = [];
+  // 除了输入的词，还搜了哪些写法（第一个就是输入的词）
+  const expanded = (meetings.data?.expanded ?? []).slice(1);
+  const groups: { label: string; items: MeetingListItem[] }[] = [];
   for (const m of items) {
     const label = dayGroup(m.created_at);
     const last = groups[groups.length - 1];
@@ -117,24 +123,47 @@ export function MeetingsPage() {
             key={label}
             type="button"
             role="tab"
-            aria-selected={mine === value}
-            onClick={() => setMine(value)}
+            aria-selected={!trash && mine === value}
+            onClick={() => {
+              setMine(value);
+              setTrash(false);
+            }}
             className={`-mb-px mr-5 min-h-10 cursor-pointer border-b-2 px-1 text-sm ${
-              mine === value ? "border-ink font-semibold text-ink" : "border-transparent text-muted hover:text-ink"
+              !trash && mine === value ? "border-ink font-semibold text-ink" : "border-transparent text-muted hover:text-ink"
             }`}
           >
             {label}
           </button>
         ))}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={trash}
+          onClick={() => setTrash(true)}
+          className={`-mb-px ml-auto min-h-10 cursor-pointer border-b-2 px-1 text-sm ${
+            trash ? "border-ink font-semibold text-ink" : "border-transparent text-muted hover:text-ink"
+          }`}
+        >
+          回收站
+        </button>
       </div>
+
+      {trash ? (
+        <TrashList />
+      ) : (
+        <>
 
       {retry.isError && <Notice tone="bad">{errorMessage(retry.error)}</Notice>}
       {meetings.isError && <Notice tone="bad">{errorMessage(meetings.error)}</Notice>}
       {meetings.isPending && <Spinner label="正在加载会议…" />}
 
       {meetings.isSuccess && q && (
-        <p className="text-[13px] text-muted">
-          在{mine ? "你创建的会议的" : ""}标题、纪要和转写原文里找到 {items.length} 场会议
+        <p className="text-[13px] leading-relaxed text-muted">
+          在{mine ? "你创建的会议的" : ""}标题、纪要和转写原文里找到 {items.length} 场会议。
+          {expanded.length > 0 && <>同时搜了{expanded.map((e) => `「${e}」`).join("")}：会议的术语表里记着它们是同一个词的不同写法（转写有时会听错）。</>}
+          {items.some((m) => m.hits.length > 0) && "点下面的句子，从会上说这句话的地方开始听。"}
+          {items.some((m) => m.hits.some((h) => h.fuzzy)) && "标着「近似」的是错了一个字的写法，可能是转写听错了，也可能是别的词。"}
+          {meetings.data?.partial && "「错一个字」的近似匹配只查了最近的一部分会议。"}
         </p>
       )}
 
@@ -193,13 +222,54 @@ export function MeetingsPage() {
                     </Button>
                   )}
                 </div>
+                {m.hits.length > 0 && <Hits meetingId={m.id} hits={m.hits} names={m.speakers} />}
               </div>
             );
           })}
         </section>
       ))}
 
+        </>
+      )}
+
       {uploading && <UploadDialog onClose={() => setUploading(false)} />}
     </div>
+  );
+}
+
+/** 搜索时一场会议里命中的句子：时间、谁说的、那句话（命中的字高亮）。点了从那附近开始播放。 */
+function Hits({ meetingId, hits, names }: { meetingId: string; hits: SearchHit[]; names: Record<string, string> }) {
+  return (
+    <ul className="-mx-2 flex basis-full flex-col gap-0.5 border-t border-line pt-2.5">
+      {hits.map((h, i) => {
+        const parts = snippet(h.text, h.matches);
+        return (
+          // 同一场会议的命中顺序固定，用下标当 key 没问题
+          <li key={i}>
+            <AppLink
+              // 转写里的句子时间带一位小数（取整的话可能落在上一句里）；纪要里的时间点只到秒
+              to={h.start < 0 ? `/meetings/${meetingId}` : `/meetings/${meetingId}?t=${h.source === "transcript" ? h.start.toFixed(1) : Math.floor(h.start)}`}
+              className="flex gap-3 rounded-lg px-2 py-1.5 text-[13px] leading-relaxed hover:bg-canvas"
+            >
+              <span className="w-11 shrink-0 tabular-nums text-brand">{h.start >= 0 ? clock(h.start) : ""}</span>
+              <span className="w-14 shrink-0 truncate text-muted">{h.source === "minutes" ? "纪要" : speakerName(h.speaker, names)}</span>
+              <span className="min-w-0 text-ink-2">
+                {parts.map((p, j) =>
+                  // 片段的顺序固定，用下标当 key 没问题
+                  p.mark ? (
+                    <mark key={j} className="rounded-sm bg-[#ffe58a] px-px text-ink">
+                      {p.text}
+                    </mark>
+                  ) : (
+                    <span key={j}>{p.text}</span>
+                  ),
+                )}
+                {h.fuzzy && <span className="ml-1.5 rounded bg-canvas px-1 py-px text-[11px] text-muted">近似</span>}
+              </span>
+            </AppLink>
+          </li>
+        );
+      })}
+    </ul>
   );
 }

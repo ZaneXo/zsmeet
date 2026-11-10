@@ -242,7 +242,8 @@ func TestWorkTranscribesAndWritesMinutes(t *testing.T) {
 
 	// 转写和纪要里的词都要能搜到
 	for _, word := range []string{"录音器", "摘要", "周会"} {
-		rows, err := e.q.ListMeetings(t.Context(), sqlc.ListMeetingsParams{Terms: search.QueryTerms(word), MaxRows: 10})
+		query := search.TSQuery([]string{word})
+		rows, err := e.q.ListMeetings(t.Context(), sqlc.ListMeetingsParams{Query: &query, MaxRows: 10})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -433,5 +434,56 @@ func TestMarksReachMinutesPrompt(t *testing.T) {
 	prompt := e.lastPrompt.Load()
 	if prompt == nil || !strings.Contains(*prompt, "【★ 00:01 标记为重点】") {
 		t.Errorf("提示词里没有标记的重点：%v", prompt)
+	}
+}
+
+// 重新转写：旧的转写在新的存好之前一直留着；识别失败时旧的转写和纪要都还在，标记也留着（重试时还会重新识别）。
+func TestRetranscribeKeepsOldTranscriptUntilReplaced(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	id := args.MeetingID
+	ctx := t.Context()
+	setOld := func() {
+		t.Helper()
+		if _, err := e.pool.Exec(ctx, `UPDATE transcripts SET segments = '[{"start":0,"end":1,"speaker":0,"text":"旧的转写。"}]' WHERE meeting_id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.q.MarkRetranscribe(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text := func() string {
+		t.Helper()
+		raw, err := e.q.GetTranscript(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+
+	// 成功：重新识别，新的转写替换旧的，标记清掉
+	setOld()
+	if err := e.work(e.enqueue(id, "done")); err != nil {
+		t.Fatal(err)
+	}
+	if m := e.meeting(id); m.Status != "done" || m.Retranscribe || e.engine.transcribed.Load() != 2 || !strings.Contains(text(), "一期只做网页端") {
+		t.Fatalf("应该重新识别并替换旧的转写：状态 %s，标记 %v，识别 %d 次，转写 %s", m.Status, m.Retranscribe, e.engine.transcribed.Load(), text())
+	}
+
+	// 失败（录音文件没了）：旧的转写还在，标记也还在
+	setOld()
+	m := e.meeting(id)
+	if err := os.Remove(e.w.store.Path(m.AudioKey)); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(e.enqueue(id, "done")); err == nil {
+		t.Fatal("录音没了，重新识别应该失败")
+	}
+	if m := e.meeting(id); m.Status != "failed" || !m.Retranscribe || !strings.Contains(text(), "旧的转写") || m.CurrentVersion == 0 {
+		t.Errorf("失败时旧的转写和纪要都要留着：状态 %s，标记 %v，版本 %d，转写 %s", m.Status, m.Retranscribe, m.CurrentVersion, text())
 	}
 }

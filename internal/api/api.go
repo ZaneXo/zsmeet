@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -81,7 +82,7 @@ func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionMana
 
 	h := &Handlers{svc: svc, sess: sess}
 	h.api = humago.New(mux, cfg)
-	h.api.UseMiddleware(h.authenticate)
+	h.api.UseMiddleware(rememberClientIP, h.authenticate)
 	h.Register(h.api)
 	return h
 }
@@ -100,6 +101,40 @@ func NewHandler(svc *service.Service, sess *scs.SessionManager, web fs.FS, versi
 	mux.HandleFunc("GET /api/meetings/{id}/audio", h.audio)
 	mux.Handle("/", spa(web))
 	return securityHeaders(sess.LoadAndSave(mux))
+}
+
+type clientIPKey struct{}
+
+// rememberClientIP 把发请求的人的 IP 放进 context，登录限流用。
+func rememberClientIP(ctx huma.Context, next func(huma.Context)) {
+	next(huma.WithValue(ctx, clientIPKey{}, clientIP(ctx.RemoteAddr(), ctx.Header("X-Forwarded-For"))))
+}
+
+// clientIP 找出发请求的人的 IP。zsmeet 前面通常有一层反向代理（配 HTTPS 用），这时连过来的是代理：
+// 只有当对方是本机或内网地址（代理一般就在这里）时，才采用代理在 X-Forwarded-For 里记下的地址，
+// 从右往左取第一个外网地址（右边是离我们最近的代理加的）。直接从外网连过来的请求不信这个头，谁都能伪造。
+func clientIP(remoteAddr, forwarded string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	peer := net.ParseIP(host)
+	if peer == nil {
+		return host
+	}
+	if (peer.IsLoopback() || peer.IsPrivate()) && strings.TrimSpace(forwarded) != "" {
+		parts := strings.Split(forwarded, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			if ip := net.ParseIP(strings.TrimSpace(parts[i])); ip != nil && !ip.IsLoopback() && !ip.IsPrivate() {
+				return ip.String()
+			}
+		}
+		// 全是内网地址（比如公司内网直接访问）：取最左边那个，也就是最初发请求的人
+		if ip := net.ParseIP(strings.TrimSpace(parts[0])); ip != nil {
+			return ip.String()
+		}
+	}
+	return peer.String()
 }
 
 // authenticate 给需要登录的接口查出当前用户，放进 context。
@@ -151,6 +186,8 @@ func status(err error) (int, string) {
 			return http.StatusForbidden, e.Msg
 		case service.Unauthorized:
 			return http.StatusUnauthorized, e.Msg
+		case service.TooManyRequests:
+			return http.StatusTooManyRequests, e.Msg
 		}
 	}
 	if !errors.Is(err, context.Canceled) {

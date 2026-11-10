@@ -18,6 +18,13 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, getMeetingOp, h.GetMeeting)
 	huma.Register(api, renameMeetingOp, h.RenameMeeting)
 	huma.Register(api, retryMeetingOp, h.RetryMeeting)
+	huma.Register(api, retranscribeOp, h.Retranscribe)
+	huma.Register(api, renameSpeakersOp, h.RenameSpeakers)
+	huma.Register(api, exportOp, h.Export)
+	huma.Register(api, deleteMeetingOp, h.DeleteMeeting)
+	huma.Register(api, listTrashOp, h.ListTrash)
+	huma.Register(api, restoreMeetingOp, h.RestoreMeeting)
+	huma.Register(api, purgeMeetingOp, h.PurgeMeeting)
 	sse.Register(api, meetingEventsOp, map[string]any{"meeting": Meeting{}}, h.MeetingEvents)
 
 	huma.Register(api, putChunkOp, h.PutChunk)

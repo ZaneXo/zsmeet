@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
@@ -37,10 +38,11 @@ type Meeting struct {
 	DurationSec int    `json:"duration_sec"`
 	HasAudio    bool   `json:"has_audio" doc:"录音还在不在（过了保留期会被删除）"`
 	// 0 表示还没有纪要
-	MinutesVersion int        `json:"minutes_version" doc:"当前纪要的版本号，0 表示还没有纪要"`
-	CanEdit        bool       `json:"can_edit" doc:"当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口"`
-	Marks          []float64  `json:"marks" doc:"网页录音时标记的重点：录音开始后的秒数"`
-	LastChunkAt    *time.Time `json:"last_chunk_at,omitempty" doc:"最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次"`
+	MinutesVersion int               `json:"minutes_version" doc:"当前纪要的版本号，0 表示还没有纪要"`
+	CanEdit        bool              `json:"can_edit" doc:"当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口"`
+	Marks          []float64         `json:"marks" doc:"网页录音时标记的重点：录音开始后的秒数"`
+	Speakers       map[string]string `json:"speakers" nullable:"false" doc:"给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」"`
+	LastChunkAt    *time.Time        `json:"last_chunk_at,omitempty" doc:"最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次"`
 
 	OwnerName string    `json:"owner_name"`
 	CreatedAt time.Time `json:"created_at"`
@@ -49,6 +51,10 @@ type Meeting struct {
 
 // toMeeting 把会议转成接口的样子。viewer 是当前登录的人，can_edit 是对他而言的。
 func toMeeting(m service.Meeting, viewer sqlc.User) Meeting {
+	speakers := map[string]string{}
+	for idx, name := range transcript.ParseNames(m.Speakers) {
+		speakers[strconv.Itoa(idx)] = name
+	}
 	marks := make([]float64, len(m.Marks))
 	for i, t := range m.Marks {
 		marks[i] = float64(t)
@@ -68,6 +74,7 @@ func toMeeting(m service.Meeting, viewer sqlc.User) Meeting {
 		MinutesVersion: int(m.CurrentVersion),
 		CanEdit:        service.CanModify(viewer, m.Meeting),
 		Marks:          marks,
+		Speakers:       speakers,
 		LastChunkAt:    m.LastChunkAt,
 		OwnerName:      m.OwnerName,
 		CreatedAt:      m.CreatedAt,

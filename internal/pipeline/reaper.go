@@ -11,13 +11,17 @@ import (
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/storage"
 )
 
 // reaper 每分钟巡检一次：会议显示「处理中」但心跳已经停了，说明处理它的 worker 挂了
 // （被杀掉、内存不够、机器重启）。这种会议换一个 run_id 重新入队；反复挂掉的判为失败。
+// 同时彻底删除回收站里放满 30 天的会议。
 type reaper struct {
 	river.WorkerDefaults[queue.ReapArgs]
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	store *storage.Local
 }
 
 func (*reaper) Timeout(*river.Job[queue.ReapArgs]) time.Duration { return time.Minute }
@@ -34,7 +38,12 @@ func (p *reaper) Work(ctx context.Context, _ *river.Job[queue.ReapArgs]) error {
 	if failed > 0 || requeued > 0 {
 		slog.Warn("巡检发现处理中断的会议", "requeued", requeued, "failed", failed)
 	}
-	return nil
+	// 顺手清理回收站里放满 30 天的会议（连同录音文件）
+	purged, err := service.PurgeExpired(ctx, sqlc.New(p.pool), p.store)
+	if purged > 0 {
+		slog.Info("彻底删除了回收站里过期的会议", "count", purged)
+	}
+	return err
 }
 
 // requeueStalled 处理心跳停了的会议：重新入队过太多次的判为失败，其余的换一个 run_id 重新入队。

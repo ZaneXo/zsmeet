@@ -7,9 +7,19 @@ package sqlc
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+const clearLoginFailures = `-- name: ClearLoginFailures :exec
+DELETE FROM login_failures WHERE key = $1
+`
+
+func (q *Queries) ClearLoginFailures(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, clearLoginFailures, key)
+	return err
+}
 
 const countUsers = `-- name: CountUsers :one
 SELECT count(*) FROM users
@@ -54,6 +64,17 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.SessionEpoch,
 	)
 	return i, err
+}
+
+const deleteStaleLoginFailures = `-- name: DeleteStaleLoginFailures :exec
+DELETE FROM login_failures
+WHERE window_start < now() - interval '1 day' AND (locked_until IS NULL OR locked_until < now())
+`
+
+// 一天前就不再计数、也没有锁着的记录清掉
+func (q *Queries) DeleteStaleLoginFailures(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, deleteStaleLoginFailures)
+	return err
 }
 
 const getSetting = `-- name: GetSetting :one
@@ -107,6 +128,33 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 	return i, err
 }
 
+const loginLockedUntil = `-- name: LoginLockedUntil :many
+SELECT locked_until FROM login_failures
+WHERE key = ANY($1::text[]) AND locked_until > now()
+ORDER BY locked_until DESC
+`
+
+// 这几个 key 里还锁着的，锁到什么时候（最晚的排第一）
+func (q *Queries) LoginLockedUntil(ctx context.Context, keys []string) ([]*time.Time, error) {
+	rows, err := q.db.Query(ctx, loginLockedUntil, keys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*time.Time
+	for rows.Next() {
+		var locked_until *time.Time
+		if err := rows.Scan(&locked_until); err != nil {
+			return nil, err
+		}
+		items = append(items, locked_until)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const putSetting = `-- name: PutSetting :exec
 INSERT INTO settings (key, value) VALUES ($1, $2)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
@@ -119,5 +167,30 @@ type PutSettingParams struct {
 
 func (q *Queries) PutSetting(ctx context.Context, arg PutSettingParams) error {
 	_, err := q.db.Exec(ctx, putSetting, arg.Key, arg.Value)
+	return err
+}
+
+const recordLoginFailure = `-- name: RecordLoginFailure :exec
+INSERT INTO login_failures (key, failures, window_start) VALUES ($1, 1, now())
+ON CONFLICT (key) DO UPDATE SET
+    failures     = CASE WHEN login_failures.window_start < now() - make_interval(secs => $2::float8)
+                        THEN 1 ELSE login_failures.failures + 1 END,
+    window_start = CASE WHEN login_failures.window_start < now() - make_interval(secs => $2::float8)
+                        THEN now() ELSE login_failures.window_start END,
+    locked_until = CASE WHEN login_failures.window_start >= now() - make_interval(secs => $2::float8)
+                         AND login_failures.failures + 1 >= $3::int
+                        THEN now() + make_interval(secs => $2::float8)
+                        ELSE login_failures.locked_until END
+`
+
+type RecordLoginFailureParams struct {
+	Key         string
+	WindowSecs  float64
+	MaxFailures int32
+}
+
+// 记一次登录失败。上一次计数已经超出时间窗口就从 1 重新数；数到上限就锁住一段时间
+func (q *Queries) RecordLoginFailure(ctx context.Context, arg RecordLoginFailureParams) error {
+	_, err := q.db.Exec(ctx, recordLoginFailure, arg.Key, arg.WindowSecs, arg.MaxFailures)
 	return err
 }

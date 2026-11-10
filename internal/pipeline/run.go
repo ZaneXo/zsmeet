@@ -47,8 +47,9 @@ func (r *run) process(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// 已经有转写（重新生成纪要，或者上次是写纪要那一步失败的）就不再重新识别
-	if segs == nil {
+	// 已经有转写（重新生成纪要，或者上次是写纪要那一步失败的）就不再重新识别；
+	// 要求重新转写时照样识别，旧的转写在新的存好之前一直留着
+	if segs == nil || r.m.Retranscribe {
 		if segs, err = r.transcribe(ctx); err != nil {
 			return err
 		}
@@ -197,7 +198,7 @@ func (r *run) transcribe(ctx context.Context) ([]transcript.Segment, error) {
 		return nil, err
 	}
 	transcript.AssignSpeakers(segs, turns)
-	segs = transcript.Merge(segs, 0.8, 160, marks(r.m.Marks))
+	// 按句存：搜索命中、点击跳转、播放高亮都精确到句。页面上显示时再合成段落
 
 	raw, err := json.Marshal(segs)
 	if err != nil {
@@ -205,6 +206,9 @@ func (r *run) transcribe(ctx context.Context) ([]transcript.Segment, error) {
 	}
 	err = r.inTx(ctx, func(q *sqlc.Queries, _ sqlc.Meeting) error {
 		if err := q.SaveTranscript(ctx, sqlc.SaveTranscriptParams{MeetingID: id, Segments: raw}); err != nil {
+			return err
+		}
+		if err := q.ClearRetranscribe(ctx, id); err != nil {
 			return err
 		}
 		return search.Reindex(ctx, q, id)
@@ -271,13 +275,15 @@ func (r *run) writeMinutes(ctx context.Context, segs []transcript.Segment) error
 	chat := func(ctx context.Context, system, user string) (string, error) {
 		return llm.Chat(ctx, cfg, system, user)
 	}
-	content, err := minutes.Generate(ctx, chat, minutes.Input{
+	result, err := minutes.Generate(ctx, chat, minutes.Input{
 		Title:    r.m.Title,
 		Date:     r.m.CreatedAt.Local(),
 		Hotwords: r.m.Hotwords,
 		Template: tpl,
-		Segments: segs,
+		// 交给大模型时合成段落，省字数；不跨过录音时标记重点的时间点合并
+		Segments: transcript.Merge(segs, 0.8, 160, marks(r.m.Marks)),
 		Marks:    marks(r.m.Marks),
+		Speakers: transcript.ParseNames(r.m.Speakers),
 	}, func(done, total int) {
 		r.report(ctx, StageMinutes, float64(done)/float64(total))
 	})
@@ -292,10 +298,24 @@ func (r *run) writeMinutes(ctx context.Context, segs []transcript.Segment) error
 			source, author = "regenerate", m.RunBy
 		}
 		_, err := q.AddMinutesVersion(ctx, sqlc.AddMinutesVersionParams{
-			MeetingID: id, Content: content, Source: source, Template: tpl.ID, AuthorID: author,
+			MeetingID: id, Content: result.Content, Source: source, Template: tpl.ID, AuthorID: author,
 		})
 		if err != nil {
 			return err
+		}
+		// 术语表跟着最新一次生成走；手动编辑纪要不改它。大模型这次没给（或者写坏了）就留着原来的，
+		// 免得一次没写好就把攒下的听错写法清掉
+		if result.TermsFound {
+			terms, err := json.Marshal(result.Terms)
+			if err != nil {
+				return err
+			}
+			if result.Terms == nil {
+				terms = []byte("[]")
+			}
+			if err := q.SetMeetingTerms(ctx, sqlc.SetMeetingTermsParams{ID: id, Terms: terms}); err != nil {
+				return err
+			}
 		}
 		if err := search.Reindex(ctx, q, id); err != nil {
 			return err

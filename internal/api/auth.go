@@ -91,7 +91,8 @@ var loginOp = huma.Operation{
 }
 
 func (h *Handlers) Login(ctx context.Context, in *LoginInput) (*UserOutput, error) {
-	user, err := h.svc.Login(ctx, in.Body.Email, in.Body.Password)
+	ip, _ := ctx.Value(clientIPKey{}).(string)
+	user, err := h.svc.Login(ctx, in.Body.Email, in.Body.Password, ip)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

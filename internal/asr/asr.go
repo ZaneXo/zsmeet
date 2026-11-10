@@ -1,4 +1,4 @@
-// Package asr 用 sherpa-onnx 做语音识别：切出有人说话的片段、识别成文字、加标点、区分说话人。
+// Package asr 用 sherpa-onnx 做语音识别：切出有人说话的片段、识别成带标点和时间的句子、区分说话人。
 // 全部在本机 CPU 上跑，不调用外部服务。
 package asr
 
@@ -19,33 +19,29 @@ import (
 // 它的方法不能并发调用，由调用方排队。
 type Engine struct {
 	recognizer *sherpa.OfflineRecognizer
-	punct      *sherpa.OfflinePunctuation
 	diarizer   *sherpa.OfflineSpeakerDiarization
 	vad        sherpa.VadModelConfig
 }
 
-// Load 加载模型。threads 是识别用的 CPU 线程数。
-func Load(p models.Paths, threads int) (*Engine, error) {
+// Load 加载模型。threads 是识别用的 CPU 线程数，language 是识别的语言（见 config.Config.ASRLanguage）。
+func Load(p models.Paths, threads int, language string) (*Engine, error) {
 	e := &Engine{}
 
 	rc := sherpa.OfflineRecognizerConfig{}
 	rc.FeatConfig.SampleRate = audio.SampleRate
 	rc.FeatConfig.FeatureDim = 80
-	rc.ModelConfig.Paraformer.Model = p.Paraformer()
+	// SenseVoice 自己会加标点、把数字写成阿拉伯数字（use ITN），并给出每个字的时间，
+	// 所以不再需要单独的标点模型，句子也能按标点切得很准
+	rc.ModelConfig.SenseVoice.Model = p.SenseVoice()
+	// 固定成中文时，夹在中文里的英文照样认得出来；auto 会把很短的「嗯」「哦」认成日文
+	rc.ModelConfig.SenseVoice.Language = language
+	rc.ModelConfig.SenseVoice.UseInverseTextNormalization = 1
 	rc.ModelConfig.Tokens = p.Tokens()
 	rc.ModelConfig.NumThreads = threads
 	rc.ModelConfig.Provider = "cpu"
 	rc.DecodingMethod = "greedy_search"
 	if e.recognizer = sherpa.NewOfflineRecognizer(&rc); e.recognizer == nil {
 		return nil, errors.New("识别模型加载失败")
-	}
-
-	pc := sherpa.OfflinePunctuationConfig{}
-	pc.Model.CtTransformer = p.Punct()
-	pc.Model.NumThreads = min(threads, 2)
-	pc.Model.Provider = "cpu"
-	if e.punct = sherpa.NewOfflinePunctuation(&pc); e.punct == nil {
-		return nil, errors.New("标点模型加载失败")
 	}
 
 	dc := sherpa.OfflineSpeakerDiarizationConfig{}
@@ -98,15 +94,8 @@ func (e *Engine) Transcribe(ctx context.Context, samples []float32, progress fun
 		for !vad.IsEmpty() {
 			speech := vad.Front()
 			vad.Pop()
-			if text := e.recognize(speech.Samples); text != "" {
-				start := float64(speech.Start) / audio.SampleRate
-				segs = append(segs, transcript.Segment{
-					Start:   start,
-					End:     start + float64(len(speech.Samples))/audio.SampleRate,
-					Speaker: -1,
-					Text:    text,
-				})
-			}
+			start := float64(speech.Start) / audio.SampleRate
+			segs = append(segs, e.recognize(speech.Samples, start, start+float64(len(speech.Samples))/audio.SampleRate)...)
 		}
 	}
 
@@ -127,20 +116,25 @@ func (e *Engine) Transcribe(ctx context.Context, samples []float32, progress fun
 	return segs, nil
 }
 
-// recognize 识别一个片段并加标点。
-func (e *Engine) recognize(samples []float32) string {
+// recognize 识别一小段录音（start 到 end 秒），按标点切成句子，每句带开始和结束时间。
+// 模型没给出每个字的时间时（正常不会发生），整段算一句。
+func (e *Engine) recognize(samples []float32, start, end float64) []transcript.Segment {
 	stream := sherpa.NewOfflineStream(e.recognizer)
 	defer sherpa.DeleteOfflineStream(stream)
 	stream.AcceptWaveform(audio.SampleRate, samples)
 	e.recognizer.Decode(stream)
-	text := strings.TrimSpace(stream.GetResult().Text)
-	if text == "" {
-		return ""
+	result := stream.GetResult()
+	if len(result.Tokens) > 0 && len(result.Timestamps) == len(result.Tokens) {
+		tokens := make([]transcript.Token, len(result.Tokens))
+		for i, text := range result.Tokens {
+			tokens[i] = transcript.Token{Text: text, Start: float64(result.Timestamps[i])}
+		}
+		return transcript.Sentences(tokens, start, end)
 	}
-	if withPunct := strings.TrimSpace(e.punct.AddPunct(text)); withPunct != "" {
-		return withPunct
+	if text := strings.TrimSpace(result.Text); text != "" {
+		return []transcript.Segment{{Start: start, End: end, Speaker: -1, Text: text}}
 	}
-	return text
+	return nil
 }
 
 // Diarize 找出每个人说话的时间段。这一步是一次不能中断的长计算。

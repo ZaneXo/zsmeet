@@ -3,9 +3,15 @@ package minutes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
@@ -74,6 +80,8 @@ type Input struct {
 	Segments []transcript.Segment
 	// 录音时标记的重点（录音开始后的秒数，从小到大）
 	Marks []float64
+	// 给说话人起的名字，转写里直接用名字
+	Speakers transcript.Names
 }
 
 // ChatFunc 发一轮对话给大模型。
@@ -105,7 +113,7 @@ const markSummaryRule = "\n6. 材料最后列出了开会的人特意标记为�
 // lines 把转写排成一行一段，标记的重点标在标记时正在说的那一段末尾（转写合并时已经在标记处断开，
 // 所以那一段的最后一两句就是标记时刚说的话）。比第一段还早的标记算在第一段上。
 func lines(in Input) []string {
-	out := transcript.Lines(in.Segments)
+	out := transcript.Lines(in.Segments, in.Speakers)
 	for _, t := range in.Marks {
 		i := 0
 		for j, seg := range in.Segments {
@@ -128,8 +136,102 @@ func hotwordRule(hotwords string) string {
 	return "以下专有名词如果被识别成了近音字，请纠正过来：" + hotwords + "。"
 }
 
+// Result 是写好的纪要，加上会上专有名词的术语表。
+type Result struct {
+	Content string
+	Terms   []Term
+	// 大模型给出了术语表（哪怕是空的）。没给、或者写坏了解析不出来时是 false，
+	// 这时调用方应该保留这场会议原来的术语表，不要用空的覆盖
+	TermsFound bool
+}
+
+// Term 是一个专有名词的正确写法，和它在转写里被听错的写法。搜索时用它扩展搜索词：
+// 搜「飞书」时，连转写里被听成「非书」的地方也能找到。
+type Term struct {
+	Term     string   `json:"term"`
+	Variants []string `json:"variants"`
+}
+
+// 最多记多少个专有名词
+const maxTerms = 30
+
+// termsRule 是要求大模型列出术语表的那条要求。n 是编号，after 是代码块跟在什么后面（「纪要正文」「要点」）。
+func termsRule(n int, after string) string {
+	return fmt.Sprintf("\n%d. %s后面另起一行，输出一个 terms 代码块（以 ```terms 开头、``` 结尾），里面是合法的 JSON：", n, after) +
+		`{"terms": [{"term": "正确写法", "variants": ["转写里出现过的听错写法"]}]}。` +
+		"列出会上提到的人名、产品、项目和专有名词，正确写法优先用热词里的；variants 只写转写里真的出现过的听错写法，没有就写空数组；" +
+		`最多 30 个，一个都没有就写 {"terms": []}。` + after + "一律用正确写法。"
+}
+
+var termsBlock = regexp.MustCompile("(?s)```terms[^\n]*\n(.*?)(?:\n```[ \t]*(?:\n|$)|$)")
+
+// splitTerms 把大模型输出末尾的 terms 代码块取出来，返回去掉它以后的纪要、解析出的术语表，
+// 以及有没有解析出术语表（{"terms": []} 也算）。代码块写坏了（不是合法 JSON、被截断）就当没有，纪要照常用。
+func splitTerms(out string) (string, []Term, bool) {
+	var terms []Term
+	found := false
+	for _, m := range termsBlock.FindAllStringSubmatch(out, -1) {
+		var parsed struct {
+			Terms []Term `json:"terms"`
+		}
+		if json.Unmarshal([]byte(m[1]), &parsed) != nil {
+			continue
+		}
+		found = true
+		terms = mergeTerms(terms, parsed.Terms)
+	}
+	return strings.TrimSpace(termsBlock.ReplaceAllString(out, "")), terms, found
+}
+
+// mergeTerms 把 more 并进 terms：同一个词（不分大小写、不管空格）的听错写法合在一起，
+// 去掉没用的写法（见 UsefulTerm），最多 maxTerms 个。
+func mergeTerms(terms, more []Term) []Term {
+	index := map[string]int{}
+	for i, t := range terms {
+		index[termKey(t.Term)] = i
+	}
+	for _, t := range more {
+		t.Term = strings.TrimSpace(t.Term)
+		if !UsefulTerm(t.Term) {
+			continue
+		}
+		key := termKey(t.Term)
+		i, ok := index[key]
+		if !ok {
+			if len(terms) >= maxTerms {
+				continue
+			}
+			i = len(terms)
+			index[key] = i
+			// 存进数据库时是 []，不是 null
+			terms = append(terms, Term{Term: t.Term, Variants: []string{}})
+		}
+		for _, v := range t.Variants {
+			v = strings.TrimSpace(v)
+			// 包含正确写法的（「这识别模型」）不算听错：搜正确写法时本来就能找到它
+			if !UsefulTerm(v) || strings.Contains(termKey(v), key) || slices.ContainsFunc(terms[i].Variants, func(x string) bool { return termKey(x) == termKey(v) }) {
+				continue
+			}
+			terms[i].Variants = append(terms[i].Variants, v)
+		}
+	}
+	return terms
+}
+
+// termKey 是判断两个写法是不是同一个时用的：转小写、去掉所有空白（「Go 语言」和「go语言」算一个）。
+func termKey(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), "")
+}
+
+// UsefulTerm 判断一个写法能不能放进术语表、拿来扩展搜索：至少两个字，而且有字母或汉字。
+// 只有一个字的听错写法（「AI」听成「爱」）会让搜索命中几乎所有会议（可爱、爱好……），只有标点、数字的也没有意义。
+func UsefulTerm(s string) bool {
+	s = strings.TrimSpace(s)
+	return utf8.RuneCountInString(s) >= 2 && strings.IndexFunc(s, unicode.IsLetter) >= 0
+}
+
 // Generate 生成纪要（Markdown）。progress 在每完成一次大模型调用后回调。
-func Generate(ctx context.Context, chat ChatFunc, in Input, progress func(done, total int)) (string, error) {
+func Generate(ctx context.Context, chat ChatFunc, in Input, progress func(done, total int)) (Result, error) {
 	parts := split(lines(in), maxCharsPerCall)
 	// 有标记的重点时多一条要求，最后那条「用 Markdown 输出」的编号跟着往后挪
 	extra, last := "", 6
@@ -150,16 +252,21 @@ func Generate(ctx context.Context, chat ChatFunc, in Input, progress func(done, 
 	}
 
 	material := "会议转写：\n" + strings.Join(parts[0], "\n")
+	var terms []Term
+	termsFound := false
 	if len(parts) > 1 {
+		// 术语表在每一部分里要：最后汇总那一次只看得到要点，要点里听错的字已经纠正了，看不到转写里的听错写法
 		notes := make([]string, len(parts))
 		for i, part := range parts {
 			system := fmt.Sprintf("你是一名专业的会议记录员。下面是一场长会议转写的第 %d 部分（共 %d 部分）。"+
-				"请提取这一部分的要点：讨论了什么、得出了什么结论、谁要做什么。用 Markdown 列表输出，不要输出别的话。\n\n"+rules+extra,
-				i+1, len(parts), hotwordRule(in.Hotwords))
+				"请提取这一部分的要点：讨论了什么、得出了什么结论、谁要做什么。用 Markdown 列表输出，除了最后的 terms 代码块，不要输出别的话。\n\n"+rules+extra,
+				i+1, len(parts), hotwordRule(in.Hotwords)) + termsRule(last, "要点")
 			note, err := chat(ctx, system, strings.Join(part, "\n"))
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
+			note, partTerms, ok := splitTerms(note)
+			terms, termsFound = mergeTerms(terms, partTerms), termsFound || ok
 			notes[i] = fmt.Sprintf("### 第 %d 部分\n%s", i+1, note)
 			step()
 		}
@@ -174,17 +281,24 @@ func Generate(ctx context.Context, chat ChatFunc, in Input, progress func(done, 
 		}
 	}
 
-	system := "你是一名专业的会议记录员，根据会议内容写一份会议纪要。\n\n" +
-		fmt.Sprintf(rules, hotwordRule(in.Hotwords)) + extra +
-		fmt.Sprintf("\n%d. 用 Markdown 输出，用二级标题（##）分节，不要一级标题，不要输出纪要以外的话，不要用代码块包裹。", last)
+	system := "你是一名专业的会议记录员，根据会议内容写一份会议纪要。\n\n" + fmt.Sprintf(rules, hotwordRule(in.Hotwords)) + extra
+	if len(parts) == 1 {
+		system += fmt.Sprintf("\n%d. 用 Markdown 输出，用二级标题（##）分节，不要一级标题。除了最后的 terms 代码块，不要输出纪要以外的话，正文不要用代码块包裹。", last) +
+			termsRule(last+1, "纪要正文")
+	} else {
+		// 分段处理时术语表已经从各部分拿到了，汇总这一次看不到转写，不再要
+		system += fmt.Sprintf("\n%d. 用 Markdown 输出，用二级标题（##）分节，不要一级标题。不要输出纪要以外的话，正文不要用代码块包裹。", last)
+	}
 	user := fmt.Sprintf("会议标题：%s\n会议时间：%s\n\n纪要按下面的结构写：\n%s\n\n%s",
 		in.Title, in.Date.Format("2006-01-02 15:04"), in.Template.Guide, material)
 	out, err := chat(ctx, system, user)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	step()
-	return unwrapFence(out), nil
+	content, finalTerms, ok := splitTerms(out)
+	terms, termsFound = mergeTerms(finalTerms, terms), termsFound || ok
+	return Result{Content: unwrapFence(content), Terms: terms, TermsFound: termsFound}, nil
 }
 
 // split 把转写按行分成若干段，每段不超过 limit 个字。单行超长时独占一段。
@@ -208,14 +322,52 @@ func split(lines []string, limit int) [][]string {
 }
 
 // unwrapFence 去掉模型有时会加在整篇外面的 ```markdown 代码块。
+// 结尾那行 ``` 漏了（或者被后面的 terms 代码块吃掉了）、只剩开头一行 ```markdown 时也去掉。
 func unwrapFence(s string) string {
 	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") || !strings.HasSuffix(s, "```") || strings.Count(s, "```") != 2 {
+	if !strings.HasPrefix(s, "```") {
 		return s
 	}
-	s = strings.TrimSuffix(s, "```")
-	if _, body, ok := strings.Cut(s, "\n"); ok {
-		return strings.TrimSpace(body)
+	first, body, ok := strings.Cut(s, "\n")
+	if !ok {
+		return s
+	}
+	switch strings.Count(s, "```") {
+	case 2:
+		if strings.HasSuffix(s, "```") {
+			return strings.TrimSpace(strings.TrimSuffix(body, "```"))
+		}
+	case 1:
+		if lang := strings.TrimSpace(strings.TrimPrefix(first, "```")); lang == "" || lang == "markdown" || lang == "md" {
+			return strings.TrimSpace(body)
+		}
 	}
 	return s
+}
+
+// 纪要里对说话人的称呼：「说话人 3」，后面可能跟着括号里的名字「说话人 3（张敏）」
+var speakerRef = regexp.MustCompile(`说话人 ?(\d+)(（[^）\n]{0,20}）|\([^)\n]{0,20}\))?`)
+
+// RenameSpeakers 把纪要里的「说话人 N」（连同后面括号里的名字）换成起的名字。
+// renamed 是这次改的：编号 → [以前的名字, 新名字]。以前就起过名字的，纪要里的旧名字也换成新的；
+// 但只有一个字的旧名字不换，免得把正文里的同一个字也换掉。返回换完的纪要。
+func RenameSpeakers(content string, renamed map[int][2]string) string {
+	content = speakerRef.ReplaceAllStringFunc(content, func(ref string) string {
+		m := speakerRef.FindStringSubmatch(ref)
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			return ref
+		}
+		if names, ok := renamed[n-1]; ok && names[1] != "" {
+			return names[1]
+		}
+		return ref
+	})
+	for _, names := range renamed {
+		old, now := names[0], names[1]
+		if now != "" && old != now && utf8.RuneCountInString(old) >= 2 {
+			content = strings.ReplaceAll(content, old, now)
+		}
+	}
+	return content
 }

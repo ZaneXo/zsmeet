@@ -2,8 +2,11 @@
 package transcript
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Segment 是转写里的一段话。时间单位是秒。
@@ -67,6 +70,19 @@ func renumber(segs []Segment) {
 	}
 }
 
+// joinText 把两句接在一起。英文的两句之间要留一个空格，中文直接接上。
+func joinText(a, b string) string {
+	if a == "" || b == "" {
+		return a + b
+	}
+	last, _ := utf8.DecodeLastRuneInString(a)
+	next, _ := utf8.DecodeRuneInString(b)
+	if last < utf8.RuneSelf && next < utf8.RuneSelf && last != ' ' && next != ' ' {
+		return a + " " + b
+	}
+	return a + b
+}
+
 // markedBetween：from 到 to 之间（含 from、不含 to）有没有标记。
 func markedBetween(marks []float64, from, to float64) bool {
 	for _, t := range marks {
@@ -88,7 +104,7 @@ func Merge(segs []Segment, maxGap float64, maxChars int, breaks []float64) []Seg
 			last := &out[n-1]
 			if last.Speaker == s.Speaker && s.Start-last.End <= maxGap &&
 				len([]rune(last.Text))+len([]rune(s.Text)) <= maxChars && !markedBetween(breaks, last.Start, s.Start) {
-				last.Text += s.Text
+				last.Text = joinText(last.Text, s.Text)
 				last.End = s.End
 				continue
 			}
@@ -115,11 +131,37 @@ func SpeakerName(speaker int) string {
 	return fmt.Sprintf("说话人 %d", speaker+1)
 }
 
+// Names 是给说话人起的名字，键是说话人编号（从 0 开始）。
+type Names map[int]string
+
+// ParseNames 读数据库里存的名字（{"0": "张敏"}）。读不出来就当没起名字。
+func ParseNames(raw []byte) Names {
+	var stored map[string]string
+	if json.Unmarshal(raw, &stored) != nil {
+		return Names{}
+	}
+	names := make(Names, len(stored))
+	for k, v := range stored {
+		if n, err := strconv.Atoi(k); err == nil && v != "" {
+			names[n] = v
+		}
+	}
+	return names
+}
+
+// Of 返回说话人的名字，没起名字时是「说话人 N」。
+func (n Names) Of(speaker int) string {
+	if name := n[speaker]; name != "" {
+		return name
+	}
+	return SpeakerName(speaker)
+}
+
 // Lines 把转写写成一行一段的文本：`[mm:ss] 说话人 1：内容`。给大模型和导出用。
-func Lines(segs []Segment) []string {
+func Lines(segs []Segment, names Names) []string {
 	lines := make([]string, len(segs))
 	for i, s := range segs {
-		lines[i] = fmt.Sprintf("[%s] %s：%s", Clock(s.Start), SpeakerName(s.Speaker), s.Text)
+		lines[i] = fmt.Sprintf("[%s] %s：%s", Clock(s.Start), names.Of(s.Speaker), s.Text)
 	}
 	return lines
 }

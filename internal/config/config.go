@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 )
 
@@ -29,6 +30,9 @@ type Config struct {
 	Concurrency int
 	// 识别用几个 CPU 线程
 	ASRThreads int
+	// 识别的语言：zh（默认，中文会议里夹着英文也能认）、en、ja、ko、yue，或者 auto（每一小段自动判断）。
+	// auto 会把很短的「嗯」「哦」认成日文，中文团队不要用
+	ASRLanguage string
 	// 只通过 HTTPS 访问时设为 true，Cookie 会带 Secure
 	SecureCookie bool
 }
@@ -43,11 +47,15 @@ func Load() (Config, error) {
 		ModelMirror:  cmp.Or(os.Getenv("ZSMEET_MODEL_MIRROR"), "https://huggingface.co"),
 		Concurrency:  envInt("ZSMEET_CONCURRENCY", 2),
 		ASRThreads:   envInt("ZSMEET_ASR_THREADS", min(runtime.NumCPU(), 4)),
+		ASRLanguage:  cmp.Or(os.Getenv("ZSMEET_ASR_LANGUAGE"), "zh"),
 		SecureCookie: os.Getenv("ZSMEET_SECURE_COOKIE") == "true",
 	}
 	var errs []error
 	if c.DatabaseURL == "" {
 		errs = append(errs, errors.New("缺少 ZSMEET_DATABASE_URL"))
+	}
+	if !slices.Contains([]string{"zh", "en", "ja", "ko", "yue", "auto"}, c.ASRLanguage) {
+		errs = append(errs, errors.New("ZSMEET_ASR_LANGUAGE 只能是 zh、en、ja、ko、yue 或 auto"))
 	}
 	if len(c.SecretKey) < 16 {
 		errs = append(errs, errors.New("ZSMEET_SECRET_KEY 至少 16 个字符，可以用 `openssl rand -hex 32` 生成"))

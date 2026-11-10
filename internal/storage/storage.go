@@ -3,6 +3,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -60,9 +61,23 @@ func AudioKey(meeting uuid.UUID) string {
 	return filepath.Join("audio", meeting.String()+".m4a")
 }
 
+// Remove 删掉一个已经存好的文件（比如录音）。文件本来就不在也算成功。
+func (s *Local) Remove(key string) error {
+	if err := os.Remove(s.Path(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // Path 把存储里的名字变成本地路径。
 func (s *Local) Path(key string) string {
 	return filepath.Join(s.root, key)
+}
+
+// Exists 判断存储里有没有这个文件。
+func (s *Local) Exists(key string) bool {
+	_, err := os.Stat(s.Path(key))
+	return err == nil
 }
 
 // TempDir 给 worker 处理一场会议用的临时目录，用完调用方删掉。

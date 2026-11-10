@@ -29,7 +29,7 @@ func TestEngineOnRealAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := Load(models.Paths{Dir: dir}, 4)
+	engine, err := Load(models.Paths{Dir: dir}, 4, "zh")
 	if err != nil {
 		t.Fatal(err)
 	}

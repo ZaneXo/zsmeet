@@ -49,6 +49,8 @@ const (
 	Conflict
 	Forbidden
 	Unauthorized
+	// TooManyRequests：太频繁了（比如登录失败次数太多），过一会儿再试
+	TooManyRequests
 )
 
 // Error 是可以原样展示给用户的业务错误。其他类型的 error 都算内部错误。

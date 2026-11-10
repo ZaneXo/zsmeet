@@ -418,18 +418,31 @@
       "ListMeetingsOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "expanded": {
+            "description": "实际搜了哪几种写法：输入的词，加上会议术语表里它对应的写法（比如同一个词被听错的写法）。不是搜索时为空",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "items": {
             "items": {
-              "$ref": "#/components/schemas/Meeting"
+              "$ref": "#/components/schemas/MeetingListItem"
             },
             "type": [
               "array",
               "null"
             ]
+          },
+          "partial": {
+            "description": "「错一个字」的近似匹配只检查了最近的一部分会议（完全命中的会议不受影响）",
+            "type": "boolean"
           }
         },
         "required": [
-          "items"
+          "items",
+          "expanded",
+          "partial"
         ],
         "type": "object"
       },
@@ -519,6 +532,13 @@
             ],
             "type": "string"
           },
+          "speakers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」",
+            "type": "object"
+          },
           "stage": {
             "description": "正在进行的处理步骤",
             "enum": [
@@ -568,6 +588,148 @@
           "minutes_version",
           "can_edit",
           "marks",
+          "speakers",
+          "owner_name",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "MeetingListItem": {
+        "additionalProperties": false,
+        "properties": {
+          "can_edit": {
+            "description": "当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "duration_sec": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "description": "status 为 failed 时的失败原因，可以直接展示",
+            "type": "string"
+          },
+          "has_audio": {
+            "description": "录音还在不在（过了保留期会被删除）",
+            "type": "boolean"
+          },
+          "hits": {
+            "description": "搜索时命中的地方：先是转写里的句子（最相关的在前，错一个字的在最后），再是纪要里的行。不是搜索时为空",
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            },
+            "type": "array"
+          },
+          "hotwords": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "last_chunk_at": {
+            "description": "最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次",
+            "format": "date-time",
+            "type": "string"
+          },
+          "marks": {
+            "description": "网页录音时标记的重点：录音开始后的秒数",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "minutes_version": {
+            "description": "当前纪要的版本号，0 表示还没有纪要",
+            "format": "int64",
+            "type": "integer"
+          },
+          "owner_name": {
+            "type": "string"
+          },
+          "progress": {
+            "description": "当前步骤的进度",
+            "format": "double",
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "source": {
+            "description": "录音从哪来：网页录音、上传文件、飞书会议",
+            "enum": [
+              "record",
+              "upload",
+              "feishu"
+            ],
+            "type": "string"
+          },
+          "speakers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」",
+            "type": "object"
+          },
+          "stage": {
+            "description": "正在进行的处理步骤",
+            "enum": [
+              "",
+              "models",
+              "assemble",
+              "transcribe",
+              "diarize",
+              "minutes"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "uploading",
+              "queued",
+              "processing",
+              "done",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "template": {
+            "description": "纪要模板的 ID",
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hits",
+          "id",
+          "title",
+          "source",
+          "status",
+          "stage",
+          "progress",
+          "error",
+          "template",
+          "hotwords",
+          "duration_sec",
+          "has_audio",
+          "minutes_version",
+          "can_edit",
+          "marks",
+          "speakers",
           "owner_name",
           "created_at",
           "updated_at"
@@ -763,6 +925,22 @@
         ],
         "type": "object"
       },
+      "RenameSpeakersInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "说话人编号（从 0 开始，写成字符串）→ 名字；名字给空字符串表示去掉名字。只改这里面列出的说话人",
+            "type": "object"
+          }
+        },
+        "required": [
+          "names"
+        ],
+        "type": "object"
+      },
       "ResetLinkOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -799,6 +977,53 @@
         },
         "required": [
           "marks"
+        ],
+        "type": "object"
+      },
+      "SearchHit": {
+        "additionalProperties": false,
+        "properties": {
+          "fuzzy": {
+            "description": "只是错了一个字的近似命中（转写可能把这个词听错了一个字）",
+            "type": "boolean"
+          },
+          "matches": {
+            "description": "text 里命中的词，原样（大小写不变），用来高亮",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source": {
+            "description": "在转写里还是纪要里",
+            "enum": [
+              "transcript",
+              "minutes"
+            ],
+            "type": "string"
+          },
+          "speaker": {
+            "description": "说话人编号，从 0 开始；纪要里的行是 -1",
+            "format": "int64",
+            "type": "integer"
+          },
+          "start": {
+            "description": "从录音开头算的秒数，点它从这附近开始播放；纪要里没写时间点的行是 -1",
+            "format": "double",
+            "type": "number"
+          },
+          "text": {
+            "description": "命中的那句话（或者纪要里的那一行）",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "speaker",
+          "text",
+          "matches",
+          "source",
+          "fuzzy"
         ],
         "type": "object"
       },
@@ -932,6 +1157,177 @@
         },
         "required": [
           "segments"
+        ],
+        "type": "object"
+      },
+      "TrashOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "days": {
+            "description": "会议在回收站里放多少天后彻底删除",
+            "format": "int64",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TrashedMeeting"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "days"
+        ],
+        "type": "object"
+      },
+      "TrashedMeeting": {
+        "additionalProperties": false,
+        "properties": {
+          "can_edit": {
+            "description": "当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "deleted_at": {
+            "description": "什么时候删的",
+            "format": "date-time",
+            "type": "string"
+          },
+          "deleted_by_name": {
+            "description": "谁删的",
+            "type": "string"
+          },
+          "duration_sec": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "description": "status 为 failed 时的失败原因，可以直接展示",
+            "type": "string"
+          },
+          "has_audio": {
+            "description": "录音还在不在（过了保留期会被删除）",
+            "type": "boolean"
+          },
+          "hotwords": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "last_chunk_at": {
+            "description": "最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次",
+            "format": "date-time",
+            "type": "string"
+          },
+          "marks": {
+            "description": "网页录音时标记的重点：录音开始后的秒数",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "minutes_version": {
+            "description": "当前纪要的版本号，0 表示还没有纪要",
+            "format": "int64",
+            "type": "integer"
+          },
+          "owner_name": {
+            "type": "string"
+          },
+          "progress": {
+            "description": "当前步骤的进度",
+            "format": "double",
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "purge_at": {
+            "description": "到这个时间会被彻底删除，连同录音",
+            "format": "date-time",
+            "type": "string"
+          },
+          "source": {
+            "description": "录音从哪来：网页录音、上传文件、飞书会议",
+            "enum": [
+              "record",
+              "upload",
+              "feishu"
+            ],
+            "type": "string"
+          },
+          "speakers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」",
+            "type": "object"
+          },
+          "stage": {
+            "description": "正在进行的处理步骤",
+            "enum": [
+              "",
+              "models",
+              "assemble",
+              "transcribe",
+              "diarize",
+              "minutes"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "uploading",
+              "queued",
+              "processing",
+              "done",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "template": {
+            "description": "纪要模板的 ID",
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deleted_at",
+          "deleted_by_name",
+          "purge_at",
+          "id",
+          "title",
+          "source",
+          "status",
+          "stage",
+          "progress",
+          "error",
+          "template",
+          "hotwords",
+          "duration_sec",
+          "has_audio",
+          "minutes_version",
+          "can_edit",
+          "marks",
+          "speakers",
+          "owner_name",
+          "created_at",
+          "updated_at"
         ],
         "type": "object"
       },
@@ -1330,7 +1726,7 @@
     },
     "/api/meetings": {
       "get": {
-        "description": "按创建时间倒序。团队里所有人都能看到全部会议。",
+        "description": "按创建时间倒序。团队里所有人都能看到全部会议。搜索时每场会议带上命中的句子和时间点（hits）。",
         "operationId": "list-meetings",
         "parameters": [
           {
@@ -1446,6 +1842,45 @@
       }
     },
     "/api/meetings/{id}": {
+      "delete": {
+        "description": "创建者和管理员可以删。删除后 30 天内可以在回收站恢复，过期后连同录音一起彻底删除。",
+        "operationId": "delete-meeting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "删除会议（放进回收站）",
+        "tags": [
+          "会议"
+        ]
+      },
       "get": {
         "operationId": "get-meeting",
         "parameters": [
@@ -1806,6 +2241,98 @@
         ]
       }
     },
+    "/api/meetings/{id}/export": {
+      "get": {
+        "description": "返回文件本身（作为下载）。开头是会议信息：时间、时长、创建者、说话人。还没有纪要或转写时返回 409。",
+        "operationId": "export-meeting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "导出纪要（当前版本）还是转写",
+            "explode": false,
+            "in": "query",
+            "name": "what",
+            "schema": {
+              "default": "minutes",
+              "description": "导出纪要（当前版本）还是转写",
+              "enum": [
+                "minutes",
+                "transcript"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Word、Markdown 或纯文本（纯文本只用于转写，纪要选它时给 Markdown）",
+            "explode": false,
+            "in": "query",
+            "name": "format",
+            "schema": {
+              "default": "docx",
+              "description": "Word、Markdown 或纯文本（纯文本只用于转写，纪要选它时给 Markdown）",
+              "enum": [
+                "docx",
+                "md",
+                "txt"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "contentEncoding": "base64",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "导出纪要或转写",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
     "/api/meetings/{id}/marks": {
       "put": {
         "description": "网页录音过程中每标记一次就调用一次，整份替换。会议交给后台处理以后再调用返回 409。",
@@ -2031,6 +2558,54 @@
         ]
       }
     },
+    "/api/meetings/{id}/retranscribe": {
+      "post": {
+        "description": "用现在的识别模型从录音重新转写，转完重新生成纪要（新版本，之前的版本保留）。录音已经不在、或者正在处理时返回 409。",
+        "operationId": "retranscribe-meeting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Meeting"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "重新转写",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
     "/api/meetings/{id}/retry": {
       "post": {
         "description": "已经有转写的话只重新生成纪要，否则从录音开始。",
@@ -2074,6 +2649,64 @@
           }
         ],
         "summary": "重试处理失败的会议",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
+    "/api/meetings/{id}/speakers": {
+      "put": {
+        "description": "转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。",
+        "operationId": "rename-speakers",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameSpeakersInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Meeting"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "给说话人起名字",
         "tags": [
           "会议"
         ]
@@ -2597,6 +3230,131 @@
           }
         ],
         "summary": "可选的纪要模板",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
+    "/api/trash": {
+      "get": {
+        "description": "最近删的在前。管理员看到全部，其他人只看到自己创建的会议。",
+        "operationId": "list-trash",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrashOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "回收站",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
+    "/api/trash/{id}": {
+      "delete": {
+        "description": "立即删掉回收站里的这场会议，连同录音、转写和纪要，不能恢复。",
+        "operationId": "purge-meeting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "彻底删除",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
+    "/api/trash/{id}/restore": {
+      "post": {
+        "operationId": "restore-meeting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Meeting"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "从回收站恢复",
         "tags": [
           "会议"
         ]

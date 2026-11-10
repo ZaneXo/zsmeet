@@ -4,6 +4,8 @@ import type { components, paths } from "./schema";
 
 // schema.d.ts 是从后端的接口文档自动生成的（make gen），不要手改。
 export type Meeting = components["schemas"]["Meeting"];
+export type MeetingListItem = components["schemas"]["MeetingListItem"];
+export type SearchHit = components["schemas"]["SearchHit"];
 export type User = components["schemas"]["User"];
 export type Segment = components["schemas"]["Segment"];
 export type Minutes = components["schemas"]["Minutes"];

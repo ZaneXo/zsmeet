@@ -74,3 +74,10 @@ func TestMergeBreaksAtMarks(t *testing.T) {
 		t.Errorf("应该在 9.5 秒正在说的那句后面断开：%+v", got)
 	}
 }
+
+func TestMergeJoinsEnglishWithSpace(t *testing.T) {
+	segs := []Segment{{Start: 0, End: 1, Text: "Hello."}, {Start: 1.1, End: 2, Text: "How are you?"}, {Start: 2.1, End: 3, Text: "好的。"}}
+	if got := Merge(segs, 1, 100, nil); len(got) != 1 || got[0].Text != "Hello. How are you?好的。" {
+		t.Errorf("英文句子之间要有空格，中文直接接上：%+v", got)
+	}
+}

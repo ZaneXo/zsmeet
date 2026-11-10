@@ -78,11 +78,11 @@ func newWorker(pool *pgxpool.Pool, cfg config.Config, store *storage.Local, st *
 		},
 		newEngine: func() (recognizer, error) {
 			started := time.Now()
-			engine, err := asr.Load(models.Paths{Dir: cfg.ModelsDir}, cfg.ASRThreads)
+			engine, err := asr.Load(models.Paths{Dir: cfg.ModelsDir}, cfg.ASRThreads, cfg.ASRLanguage)
 			if err != nil {
 				return nil, err
 			}
-			slog.Info("识别模型已加载", "took", time.Since(started).Round(time.Millisecond), "threads", cfg.ASRThreads)
+			slog.Info("识别模型已加载", "took", time.Since(started).Round(time.Millisecond), "threads", cfg.ASRThreads, "language", cfg.ASRLanguage)
 			return engine, nil
 		},
 	}
@@ -94,7 +94,7 @@ func Start(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, store *st
 
 	workers := river.NewWorkers()
 	river.AddWorker(workers, w)
-	river.AddWorker(workers, &reaper{pool: pool})
+	river.AddWorker(workers, &reaper{pool: pool, store: w.store})
 
 	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{

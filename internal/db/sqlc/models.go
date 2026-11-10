@@ -23,6 +23,13 @@ type AccountLink struct {
 	UsedAt    *time.Time
 }
 
+type LoginFailure struct {
+	Key         string
+	Failures    int32
+	WindowStart time.Time
+	LockedUntil *time.Time
+}
+
 type Meeting struct {
 	ID             uuid.UUID
 	OwnerID        uuid.UUID
@@ -47,6 +54,11 @@ type Meeting struct {
 	UpdatedAt      time.Time
 	LastChunkAt    *time.Time
 	Marks          []float32
+	Terms          []byte
+	DeletedAt      *time.Time
+	DeletedBy      *uuid.UUID
+	Speakers       []byte
+	Retranscribe   bool
 }
 
 type MeetingSearch struct {

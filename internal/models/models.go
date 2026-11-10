@@ -33,23 +33,18 @@ type file struct {
 }
 
 var files = []file{
+	// SenseVoice：识别文字，自带标点，数字写成阿拉伯数字，每个字（连标点）都给出时间
 	{
-		name:   "paraformer-zh.int8.onnx",
-		path:   "csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09/resolve/main/model.int8.onnx",
-		size:   227_330_205,
-		sha256: "90bc03034ae1bef9575f8cc798cd1519c8be8aa9e8b458a033e32017ff4d584c",
+		name:   "sense-voice.int8.onnx",
+		path:   "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
+		size:   239_233_841,
+		sha256: "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
 	},
 	{
-		name:   "paraformer-zh.tokens.txt",
-		path:   "csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09/resolve/main/tokens.txt",
-		size:   75_354,
-		sha256: "6c0e3b35cece259829e6cb5b8d90d13db88f61ea3a2953d11898e4b2bfd7a2e2",
-	},
-	{
-		name:   "punct-zh-en.onnx",
-		path:   "csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12/resolve/main/model.onnx",
-		size:   294_372_519,
-		sha256: "e93593a6dbd69a07f8734ef269dbe861a379755f8d1c8354719432116f2c44bd",
+		name:   "sense-voice.tokens.txt",
+		path:   "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt",
+		size:   315_894,
+		sha256: "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
 	},
 	{
 		name:   "silero-vad.onnx",
@@ -74,12 +69,15 @@ var files = []file{
 // Paths 给出各个模型文件的位置。
 type Paths struct{ Dir string }
 
-func (p Paths) Paraformer() string   { return filepath.Join(p.Dir, files[0].name) }
+func (p Paths) SenseVoice() string   { return filepath.Join(p.Dir, files[0].name) }
 func (p Paths) Tokens() string       { return filepath.Join(p.Dir, files[1].name) }
-func (p Paths) Punct() string        { return filepath.Join(p.Dir, files[2].name) }
-func (p Paths) VAD() string          { return filepath.Join(p.Dir, files[3].name) }
-func (p Paths) Segmentation() string { return filepath.Join(p.Dir, files[4].name) }
-func (p Paths) Embedding() string    { return filepath.Join(p.Dir, files[5].name) }
+func (p Paths) VAD() string          { return filepath.Join(p.Dir, files[2].name) }
+func (p Paths) Segmentation() string { return filepath.Join(p.Dir, files[3].name) }
+func (p Paths) Embedding() string    { return filepath.Join(p.Dir, files[4].name) }
+
+// 以前的版本用过、现在不用了的模型文件（识别换成 SenseVoice 以前的 Paraformer 和标点模型）。
+// 检查模型时顺手删掉，腾出约 500 MB。只删这几个写死的名字，目录里别的东西不碰
+var obsolete = []string{"paraformer-zh.int8.onnx", "paraformer-zh.tokens.txt", "punct-zh-en.onnx"}
 
 const (
 	official = "https://huggingface.co"
@@ -165,6 +163,11 @@ func fetchMissing(ctx context.Context, dir, mirror string, progress func(done, t
 }
 
 func fetchMissingFrom(ctx context.Context, dir string, hosts []string, progress func(done, total int64)) error {
+	for _, name := range obsolete {
+		if err := os.Remove(filepath.Join(dir, name)); err == nil {
+			slog.Info("删掉了不再使用的旧模型", "file", name)
+		}
+	}
 	var missing []file
 	var total int64
 	for _, f := range files {

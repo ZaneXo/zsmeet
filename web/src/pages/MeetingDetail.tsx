@@ -1,13 +1,13 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { useParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Meeting, Segment, User } from "../api/client";
 import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings";
 import { Button, buttonClass, Card, Chip, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
-import { clock, dateTime, duration, SOURCE_LABEL, STAGE_LABEL } from "../lib/format";
+import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
 import { meetingChip, recordingLive } from "./Meetings";
@@ -59,7 +59,14 @@ export function MeetingDetailPage({ user, llmReady, isAdmin }: { user: User; llm
     void queryClient.invalidateQueries({ queryKey: ["meetings"] });
   }, [id, step]);
 
-  const [tab, setTab] = useState<"minutes" | "transcript">("minutes");
+  // 从搜索结果点过来时带着 ?t=秒数：打开转写、定位到那一句，从那附近开始播放
+  const [params] = useSearchParams();
+  const jump = jumpTarget(params.get("t"));
+  const jumpSec = jump?.sec;
+  const [tab, setTab] = useState<"minutes" | "transcript">(jump === undefined ? "minutes" : "transcript");
+  useEffect(() => {
+    if (jumpSec !== undefined) setTab("transcript");
+  }, [jumpSec]);
   const audio = useRef<HTMLAudioElement>(null);
   const [now, setNow] = useState(0);
   const seek = useCallback((sec: number) => {
@@ -68,6 +75,23 @@ export function MeetingDetailPage({ user, llmReady, isAdmin }: { user: User; llm
     el.currentTime = sec;
     void el.play();
   }, []);
+
+  // 跳到搜索命中的地方：从那句前 3 秒开始播放，免得开头半句听不到。浏览器不让自动播放时就停在那里，等用户点播放
+  const hasAudio = meeting.data?.has_audio;
+  useEffect(() => {
+    const el = audio.current;
+    if (jumpSec === undefined || !el) return;
+    const go = () => {
+      el.currentTime = Math.max(0, jumpSec - 3);
+      void el.play().catch(() => {});
+    };
+    if (el.readyState >= 1) {
+      go();
+      return;
+    }
+    el.addEventListener("loadedmetadata", go, { once: true });
+    return () => el.removeEventListener("loadedmetadata", go);
+  }, [jumpSec, hasAudio]);
 
   if (meeting.isPending) return <Spinner label="正在加载会议…" />;
   if (meeting.isError || !m) {
@@ -96,7 +120,11 @@ export function MeetingDetailPage({ user, llmReady, isAdmin }: { user: User; llm
             <span>创建者 {m.owner_name}</span>
           </div>
         </div>
-        <Chip tone={chip.tone}>{chip.text}</Chip>
+        <span className="flex items-center gap-2">
+          <Chip tone={chip.tone}>{chip.text}</Chip>
+          <ExportMenu meeting={m} hasTranscript={hasTranscript} />
+          {m.can_edit && <DeleteMeeting meeting={m} />}
+        </span>
       </div>
 
       {m.status !== "done" && <ProcessingPanel meeting={m} user={user} minutesOnly={hasTranscript} />}
@@ -117,33 +145,48 @@ export function MeetingDetailPage({ user, llmReady, isAdmin }: { user: User; llm
 
       {(m.marks ?? []).length > 0 && <MarksCard marks={m.marks ?? []} segments={segments} canSeek={m.has_audio} onSeek={seek} />}
 
-      {(m.status === "done" || hasTranscript) && (
+      {/* 重新转写、重新生成期间（或者失败了）已有的纪要和转写照样能看 */}
+      {(m.status === "done" || hasTranscript || m.minutes_version > 0) && (
         <Card>
-          <div role="tablist" className="flex border-b border-line px-6">
-            {(
-              [
-                ["minutes", "纪要"],
-                ["transcript", hasTranscript ? `转写 · ${segments.length} 段` : "转写"],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                role="tab"
-                aria-selected={tab === key}
-                onClick={() => setTab(key)}
-                className={`-mb-px mr-6 min-h-11 cursor-pointer border-b-2 px-1 text-[15px] ${
-                  tab === key ? "border-ink font-semibold text-ink" : "border-transparent text-muted hover:text-ink"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center justify-between gap-x-4 border-b border-line px-6">
+            <div role="tablist" className="flex">
+              {(
+                [
+                  ["minutes", "纪要"],
+                  ["transcript", "转写"],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === key}
+                  onClick={() => setTab(key)}
+                  className={`-mb-px mr-6 min-h-11 cursor-pointer border-b-2 px-1 text-[15px] ${
+                    tab === key ? "border-ink font-semibold text-ink" : "border-transparent text-muted hover:text-ink"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {tab === "transcript" && m.can_edit && m.has_audio && <Retranscribe meeting={m} />}
           </div>
           {tab === "minutes" ? (
             <MinutesPane meeting={m} hasTranscript={hasTranscript} llmReady={llmReady} isAdmin={isAdmin} canSeek={m.has_audio} onSeek={seek} />
           ) : (
-            <TranscriptPane segments={segments} loading={transcript.isPending} now={now} canSeek={m.has_audio} onSeek={seek} />
+            <>
+              {hasTranscript && <Speakers meeting={m} segments={segments} />}
+              <TranscriptPane
+                segments={segments}
+                loading={transcript.isPending}
+                now={now}
+                canSeek={m.has_audio}
+                onSeek={seek}
+                focus={jump && jump.sec + jump.slack}
+                names={m.speakers}
+              />
+            </>
           )}
         </Card>
       )}
@@ -296,7 +339,7 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
             <b className="font-semibold">下载识别模型</b>
             <span className="text-[13px] tabular-nums text-muted">{Math.round(m.progress * 100)}%</span>
           </div>
-          <span className="text-[13px] text-muted">只在第一次处理会议时下载，约 560 MB，之后不用再等</span>
+          <span className="text-[13px] text-muted">只在第一次处理会议时下载，约 280 MB，之后不用再等</span>
           <ProgressBar value={m.progress} />
         </div>
       )}
@@ -470,5 +513,211 @@ function MarksCard({ marks, segments, canSeek, onSeek }: { marks: number[]; segm
         })}
       </ol>
     </Card>
+  );
+}
+
+
+/**
+ * 网址里 ?t= 的秒数；没有或者不是合法的数字时返回 undefined。
+ * slack 是定位句子时的余量：转写里的句子时间带小数，是准的；纪要里的时间点只到秒，
+ * 那句话可能晚不到一秒才开始，所以多给一秒。
+ */
+function jumpTarget(raw: string | null): { sec: number; slack: number } | undefined {
+  if (raw === null || raw.trim() === "") return undefined;
+  const sec = Number(raw);
+  if (!Number.isFinite(sec) || sec < 0) return undefined;
+  return { sec, slack: raw.includes(".") ? 0.05 : 0.99 };
+}
+
+/** 用现在的识别模型重新转写（换模型以前转写的会议，用它得到逐句的时间）。先确认一次。 */
+function Retranscribe({ meeting: m }: { meeting: Meeting }) {
+  const [confirming, setConfirming] = useState(false);
+  const run = useMutation({
+    mutationFn: () => unwrap(api.POST("/api/meetings/{id}/retranscribe", { params: { path: { id: m.id } } })),
+    onSuccess: (updated) => {
+      setConfirming(false);
+      queryClient.setQueryData(["meeting", m.id], updated);
+      void queryClient.invalidateQueries({ queryKey: ["meetings"] });
+    },
+  });
+  const busy = m.status !== "done" && m.status !== "failed";
+  if (!confirming) {
+    return (
+      <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(true)}>
+        <Icon name="retry" size={15} />
+        重新转写
+      </Button>
+    );
+  }
+  return (
+    <div className="flex basis-full flex-col gap-2.5 py-3 text-sm">
+      <span className="leading-relaxed text-ink-2">
+        用现在的识别模型从录音重新转写，转完会重新生成一版纪要（之前的版本都保留）。长会议要几分钟，转完之前看到的还是原来的转写；重新转写失败时原来的转写和纪要也都还在。
+      </span>
+      {run.isError && <Notice tone="bad">{errorMessage(run.error)}</Notice>}
+      <span className="flex gap-2">
+        <Button size="sm" variant="primary" disabled={run.isPending} onClick={() => run.mutate()}>
+          确定重新转写
+        </Button>
+        <Button size="sm" onClick={() => setConfirming(false)}>
+          取消
+        </Button>
+      </span>
+    </div>
+  );
+}
+
+/** 删除会议：放进回收站，30 天内可以恢复。先确认一次。 */
+function DeleteMeeting({ meeting: m }: { meeting: Meeting }) {
+  const navigate = useNavigate();
+  const [confirming, setConfirming] = useState(false);
+  const remove = useMutation({
+    mutationFn: () => unwrap(api.DELETE("/api/meetings/{id}", { params: { path: { id: m.id } } })),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["meetings"] });
+      void queryClient.invalidateQueries({ queryKey: ["trash"] });
+      queryClient.removeQueries({ queryKey: ["meeting", m.id] });
+      navigate("/");
+    },
+  });
+  if (!confirming) {
+    return (
+      <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+        删除
+      </Button>
+    );
+  }
+  return (
+    <span className="flex flex-wrap items-center gap-2 rounded-lg bg-bad-tint/60 px-3 py-1.5 text-[13px]">
+      <span className="text-ink-2">放进回收站？30 天内可以恢复。</span>
+      <Button size="sm" variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()}>
+        确定删除
+      </Button>
+      <Button size="sm" onClick={() => setConfirming(false)}>
+        取消
+      </Button>
+      {remove.isError && <span className="basis-full text-bad">{errorMessage(remove.error)}</span>}
+    </span>
+  );
+}
+
+/**
+ * 说话人：每人一个色块、名字和说话时长的占比。创建者和管理员可以改名，
+ * 改完转写和搜索结果马上用新名字，纪要里的「说话人 N」也换成名字（作为新版本）。
+ */
+function Speakers({ meeting: m, segments }: { meeting: Meeting; segments: Segment[] }) {
+  const [editing, setEditing] = useState<number | null>(null);
+  const [draft, setDraft] = useState("");
+  const rename = useMutation({
+    mutationFn: (names: Record<string, string>) =>
+      unwrap(api.PUT("/api/meetings/{id}/speakers", { params: { path: { id: m.id } }, body: { names } })),
+    onSuccess: (updated) => {
+      setEditing(null);
+      queryClient.setQueryData(["meeting", m.id], updated);
+      void queryClient.invalidateQueries({ queryKey: ["minutes", m.id] });
+      void queryClient.invalidateQueries({ queryKey: ["meetings"] });
+    },
+  });
+
+  const talk = new Map<number, number>();
+  let total = 0;
+  for (const s of segments) {
+    if (s.speaker < 0) continue;
+    const len = Math.max(0, s.end - s.start);
+    talk.set(s.speaker, (talk.get(s.speaker) ?? 0) + len);
+    total += len;
+  }
+  const speakers = [...talk.keys()].sort((a, b) => a - b);
+  if (speakers.length === 0) return null;
+
+  return (
+    <div className="flex flex-col gap-2 border-b border-line px-6 py-3.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-[13px] font-semibold text-ink-2">说话人</span>
+        {speakers.map((sp) =>
+          editing === sp ? (
+            <form
+              key={sp}
+              className="flex items-center gap-1.5"
+              onSubmit={(e) => {
+                e.preventDefault();
+                rename.mutate({ [String(sp)]: draft });
+              }}
+            >
+              <Input
+                autoFocus
+                className="w-32"
+                maxLength={20}
+                value={draft}
+                placeholder={speakerName(sp)}
+                aria-label={`给${speakerName(sp)}起名字`}
+                onChange={(e) => setDraft(e.target.value)}
+              />
+              <Button size="sm" type="submit" variant="primary" disabled={rename.isPending}>
+                保存
+              </Button>
+              <Button size="sm" onClick={() => setEditing(null)}>
+                取消
+              </Button>
+            </form>
+          ) : (
+            <span key={sp} className="flex items-center gap-1.5 rounded-full bg-canvas px-3 py-1 text-[13px]">
+              <span className="size-2 rounded-full" style={{ background: speakerColor(sp) }} aria-hidden="true" />
+              <span className="font-medium">{speakerName(sp, m.speakers)}</span>
+              <span className="text-muted">{total > 0 ? Math.round(((talk.get(sp) ?? 0) / total) * 100) : 0}%</span>
+              {m.can_edit && (
+                <button
+                  type="button"
+                  className="cursor-pointer text-brand hover:text-brand-hover"
+                  onClick={() => {
+                    setDraft(m.speakers[String(sp)] ?? "");
+                    setEditing(sp);
+                    rename.reset();
+                  }}
+                >
+                  改名
+                </button>
+              )}
+            </span>
+          ),
+        )}
+      </div>
+      {rename.isError && <Notice tone="bad">{errorMessage(rename.error)}</Notice>}
+      {m.can_edit && editing !== null && (
+        <span className="text-xs text-muted">改完以后，转写和搜索结果马上用新名字；当前纪要里的「{speakerName(editing)}」也会换成新名字，作为一个新版本保存。留空表示去掉名字。</span>
+      )}
+    </div>
+  );
+}
+
+/** 导出：纪要导出成 Word 或 Markdown，转写导出成 Word 或纯文本。直接下载，不离开这个页面。 */
+function ExportMenu({ meeting: m, hasTranscript }: { meeting: Meeting; hasTranscript: boolean }) {
+  const options: [string, string, string][] = [];
+  if (m.minutes_version > 0) {
+    options.push(["minutes", "docx", "纪要 · Word"], ["minutes", "md", "纪要 · Markdown"]);
+  }
+  if (hasTranscript) {
+    options.push(["transcript", "docx", "转写 · Word"], ["transcript", "txt", "转写 · 纯文本"]);
+  }
+  if (options.length === 0) return null;
+  return (
+    <details className="relative">
+      <summary className={`${buttonClass("ghost", "sm")} list-none [&::-webkit-details-marker]:hidden`}>
+        <Icon name="download" size={15} />
+        导出
+      </summary>
+      <div className="absolute right-0 z-10 mt-1 flex min-w-36 flex-col rounded-xl border border-line bg-white p-1 shadow-lg">
+        {options.map(([what, format, label]) => (
+          <a
+            key={label}
+            href={`/api/meetings/${m.id}/export?what=${what}&format=${format}`}
+            download
+            className="rounded-lg px-3 py-2 text-[13px] text-ink-2 hover:bg-canvas hover:text-ink"
+          >
+            {label}
+          </a>
+        ))}
+      </div>
+    </details>
   );
 }

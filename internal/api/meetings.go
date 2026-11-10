@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -53,9 +54,27 @@ type ListMeetingsInput struct {
 	Limit int    `query:"limit" default:"100" minimum:"1" maximum:"200"`
 }
 
+// SearchHit 是搜索时一场会议里命中的地方：转写里的一句话，或者纪要里的一行。
+type SearchHit struct {
+	Start   float64  `json:"start" doc:"从录音开头算的秒数，点它从这附近开始播放；纪要里没写时间点的行是 -1"`
+	Speaker int      `json:"speaker" doc:"说话人编号，从 0 开始；纪要里的行是 -1"`
+	Text    string   `json:"text" doc:"命中的那句话（或者纪要里的那一行）"`
+	Matches []string `json:"matches" nullable:"false" doc:"text 里命中的词，原样（大小写不变），用来高亮"`
+	Source  string   `json:"source" enum:"transcript,minutes" doc:"在转写里还是纪要里"`
+	Fuzzy   bool     `json:"fuzzy" doc:"只是错了一个字的近似命中（转写可能把这个词听错了一个字）"`
+}
+
+// MeetingListItem 是列表里的一场会议，搜索时带上命中的地方。
+type MeetingListItem struct {
+	Meeting
+	Hits []SearchHit `json:"hits" nullable:"false" doc:"搜索时命中的地方：先是转写里的句子（最相关的在前，错一个字的在最后），再是纪要里的行。不是搜索时为空"`
+}
+
 type ListMeetingsOutput struct {
 	Body struct {
-		Items []Meeting `json:"items"`
+		Items    []MeetingListItem `json:"items"`
+		Expanded []string          `json:"expanded" nullable:"false" doc:"实际搜了哪几种写法：输入的词，加上会议术语表里它对应的写法（比如同一个词被听错的写法）。不是搜索时为空"`
+		Partial  bool              `json:"partial" doc:"「错一个字」的近似匹配只检查了最近的一部分会议（完全命中的会议不受影响）"`
 	}
 }
 
@@ -64,7 +83,7 @@ var listMeetingsOp = huma.Operation{
 	Method:      http.MethodGet,
 	Path:        "/api/meetings",
 	Summary:     "会议列表",
-	Description: "按创建时间倒序。团队里所有人都能看到全部会议。",
+	Description: "按创建时间倒序。团队里所有人都能看到全部会议。搜索时每场会议带上命中的句子和时间点（hits）。",
 	Tags:        []string{"会议"},
 	Security:    loggedIn,
 }
@@ -75,15 +94,24 @@ func (h *Handlers) ListMeetings(ctx context.Context, in *ListMeetingsInput) (*Li
 	if in.Mine {
 		owner = &viewer.ID
 	}
-	items, err := h.svc.ListMeetings(ctx, in.Q, owner, in.Limit)
+	list, err := h.svc.ListMeetings(ctx, in.Q, owner, in.Limit)
 	if err != nil {
 		return nil, toHTTP(err)
 	}
 	out := &ListMeetingsOutput{}
-	out.Body.Items = make([]Meeting, len(items))
-	for i, m := range items {
-		out.Body.Items[i] = toMeeting(m, viewer)
+	out.Body.Items = make([]MeetingListItem, len(list.Items))
+	for i, m := range list.Items {
+		hits := make([]SearchHit, len(m.Hits))
+		for j, h := range m.Hits {
+			hits[j] = SearchHit(h)
+		}
+		out.Body.Items[i] = MeetingListItem{Meeting: toMeeting(m, viewer), Hits: hits}
 	}
+	out.Body.Expanded = list.Spellings
+	if out.Body.Expanded == nil {
+		out.Body.Expanded = []string{}
+	}
+	out.Body.Partial = list.Partial
 	return out, nil
 }
 
@@ -368,6 +396,65 @@ func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Se
 		case <-ticker.C:
 		}
 	}
+}
+
+var retranscribeOp = huma.Operation{
+	OperationID: "retranscribe-meeting",
+	Method:      http.MethodPost,
+	Path:        "/api/meetings/{id}/retranscribe",
+	Summary:     "重新转写",
+	Description: "用现在的识别模型从录音重新转写，转完重新生成纪要（新版本，之前的版本保留）。录音已经不在、或者正在处理时返回 409。",
+	Tags:        []string{"会议"},
+	Security:    loggedIn,
+}
+
+func (h *Handlers) Retranscribe(ctx context.Context, in *MeetingID) (*MeetingOutput, error) {
+	id, err := parseID(in.ID)
+	if err != nil {
+		return nil, err
+	}
+	m, err := h.svc.Retranscribe(ctx, currentUser(ctx), id)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+}
+
+type RenameSpeakersInput struct {
+	MeetingID
+	Body struct {
+		Names map[string]string `json:"names" doc:"说话人编号（从 0 开始，写成字符串）→ 名字；名字给空字符串表示去掉名字。只改这里面列出的说话人"`
+	}
+}
+
+var renameSpeakersOp = huma.Operation{
+	OperationID: "rename-speakers",
+	Method:      http.MethodPut,
+	Path:        "/api/meetings/{id}/speakers",
+	Summary:     "给说话人起名字",
+	Description: "转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。",
+	Tags:        []string{"会议"},
+	Security:    loggedIn,
+}
+
+func (h *Handlers) RenameSpeakers(ctx context.Context, in *RenameSpeakersInput) (*MeetingOutput, error) {
+	id, err := parseID(in.ID)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[int]string, len(in.Body.Names))
+	for key, name := range in.Body.Names {
+		idx, err := strconv.Atoi(key)
+		if err != nil {
+			return nil, huma.Error422UnprocessableEntity("说话人编号要是数字：" + key)
+		}
+		names[idx] = name
+	}
+	m, err := h.svc.RenameSpeakers(ctx, currentUser(ctx), id, names)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
 }
 
 // ---- 转写 ----

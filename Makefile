@@ -62,8 +62,11 @@ check: ## 提交前检查：代码格式、静态检查、生成的前端类型�
 	@files="$$(gofmt -l cmd internal tools web/embed.go web/placeholder.go)"; \
 		if [ -n "$$files" ]; then echo "这些文件需要 gofmt："; echo "$$files"; exit 1; fi
 	go vet ./...
-	pnpm -C web gen:api >/dev/null
-	@git diff --quiet -- web/src/api/schema.d.ts || \
+	@# 重新生成到一个被忽略的缓存位置，和现有的文件逐字节比较。不看 git 的状态：还没 git add 的正确改动不该报错
+	@mkdir -p web/node_modules/.cache
+	@# 生成器自己出错时（没装依赖、openapi.json 写坏了）把它的报错原样显示出来，不要说成「不是最新的」
+	@pnpm -C web exec openapi-typescript openapi.json -o node_modules/.cache/schema.check.d.ts >/dev/null
+	@cmp -s web/node_modules/.cache/schema.check.d.ts web/src/api/schema.d.ts || \
 		{ echo "web/src/api/schema.d.ts 不是最新的，请运行 make gen 后一起提交"; exit 1; }
 	@if grep -rnE 'import \{[^}]*[{ ,]Link[ ,}][^}]*\} from "react-router"' web/src | grep -v '^web/src/components/AppLink.tsx:'; then \
 		echo "上面这些地方直接用了 react-router 的 Link，站内链接请改用 web/src/components/AppLink.tsx 里的 AppLink"; exit 1; fi

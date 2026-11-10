@@ -1,11 +1,22 @@
 {
   "rules": [
     {
-      "id": "user-facing-chinese-no-secrets",
-      "description": "给用户看的文字（报错、提示、界面文案）要写成能照着处理的中文，不把内部报错直接抛给用户。日志、报错和接口返回里不能带出密钥：大模型的 API Key、飞书的 App Secret、ZSMEET_SECRET_KEY 等。",
+      "id": "user-facing-chinese",
+      "description": "给用户看的文字（报错、提示、界面文案）要写成能照着处理的中文，不把内部报错直接抛给用户。",
       "files": [
         "**/*.go",
         "web/src/**/*.{ts,tsx}"
+      ],
+      "scope": [
+        "pr",
+        "ide"
+      ]
+    },
+    {
+      "id": "no-secrets-exposed",
+      "description": "任何地方都不能带出密钥，包括日志、报错、接口返回、工作流的输出和构建产物：大模型的 API Key、飞书的 App Secret、ZSMEET_SECRET_KEY、数据库密码、GitHub 的令牌等，编码、截断或者派生以后的也算。不能把真实的密钥提交进仓库，示例配置里只放空值或者明显是假的值。",
+      "files": [
+        "**/*"
       ],
       "scope": [
         "pr",

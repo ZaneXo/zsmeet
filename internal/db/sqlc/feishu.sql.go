@@ -15,7 +15,7 @@ import (
 const createImportedMeeting = `-- name: CreateImportedMeeting :one
 INSERT INTO meetings (owner_id, title, source, status, run_id, template, created_at)
 VALUES ($1, $2, 'feishu', 'queued', $3, 'general', $4)
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers
 `
 
 type CreateImportedMeetingParams struct {
@@ -63,6 +63,7 @@ func (q *Queries) CreateImportedMeeting(ctx context.Context, arg CreateImportedM
 		&i.DeletedBy,
 		&i.Speakers,
 		&i.Retranscribe,
+		&i.AutoSpeakers,
 	)
 	return i, err
 }

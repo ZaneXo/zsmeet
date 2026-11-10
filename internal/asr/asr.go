@@ -3,9 +3,11 @@
 package asr
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
@@ -13,6 +15,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/audio"
 	"github.com/ZaneXo/zsmeet/internal/models"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/voiceprint"
 )
 
 // Engine 持有加载好的模型。加载一次要几秒、占几百 MB 内存，所以整个进程共用一个。
@@ -21,6 +24,10 @@ type Engine struct {
 	recognizer *sherpa.OfflineRecognizer
 	diarizer   *sherpa.OfflineSpeakerDiarization
 	vad        sherpa.VadModelConfig
+
+	// 算声纹用的模型和区分说话人的是同一个文件。管理员打开了声纹才用到，第一次用时才加载
+	embedding sherpa.SpeakerEmbeddingExtractorConfig
+	extractor *sherpa.SpeakerEmbeddingExtractor
 }
 
 // Load 加载模型。threads 是识别用的 CPU 线程数，language 是识别的语言（见 config.Config.ASRLanguage）。
@@ -64,6 +71,8 @@ func Load(p models.Paths, threads int, language string) (*Engine, error) {
 	if rate := e.diarizer.SampleRate(); rate != audio.SampleRate {
 		return nil, fmt.Errorf("说话人模型要求采样率 %d，和识别用的 %d 不一致", rate, audio.SampleRate)
 	}
+
+	e.embedding = sherpa.SpeakerEmbeddingExtractorConfig{Model: p.Embedding(), NumThreads: threads, Provider: "cpu"}
 
 	e.vad.SileroVad.Model = p.VAD()
 	e.vad.SileroVad.Threshold = 0.5
@@ -148,4 +157,86 @@ func (e *Engine) Diarize(samples []float32) []transcript.Turn {
 		turns[i] = transcript.Turn{Start: float64(r.Start), End: float64(r.End), Speaker: r.Speaker}
 	}
 	return turns
+}
+
+// 算一个人的声纹时用他最长的几段话，加起来最多这么多秒：再多也不会更准，只是更慢
+const maxVoiceSeconds = 30
+
+// 一场会议里说话加起来不到这么多秒的人不算声纹：太短的话算出来的不可靠，容易认错
+const minVoiceSeconds = 2
+
+// Embed 给每位说话人算一个声音特征（声纹），turns 的编号就是返回值的键。
+// 说话太少的人没有。算出来的向量已经归一化。
+func (e *Engine) Embed(samples []float32, turns []transcript.Turn) (map[int]voiceprint.Voice, error) {
+	picked := pickTurns(turns, len(samples))
+	if len(picked) == 0 {
+		return nil, nil
+	}
+	if e.extractor == nil {
+		if e.extractor = sherpa.NewSpeakerEmbeddingExtractor(&e.embedding); e.extractor == nil {
+			return nil, errors.New("声纹模型加载失败")
+		}
+	}
+	out := make(map[int]voiceprint.Voice, len(picked))
+	for speaker, spans := range picked {
+		stream := e.extractor.CreateStream()
+		used := 0
+		for _, sp := range spans {
+			stream.AcceptWaveform(audio.SampleRate, samples[sp[0]:sp[1]])
+			used += sp[1] - sp[0]
+		}
+		stream.InputFinished()
+		var v []float32
+		if e.extractor.IsReady(stream) {
+			v = voiceprint.Normalize(e.extractor.Compute(stream))
+		}
+		sherpa.DeleteOnlineStream(stream)
+		if v != nil {
+			out[speaker] = voiceprint.Voice{Embedding: v, Seconds: float64(used) / audio.SampleRate}
+		}
+	}
+	return out, nil
+}
+
+// pickTurns 给每位说话人挑出用来算声纹的几段（采样下标的起止，不含止）：从最长的一段开始挑，
+// 加起来到 maxVoiceSeconds 秒为止，最后一段截短。说话加起来不到 minVoiceSeconds 秒的人不要。
+// total 是录音的采样数，超出录音的部分截掉。
+func pickTurns(turns []transcript.Turn, total int) map[int][][2]int {
+	bySpeaker := map[int][][2]int{}
+	for _, t := range turns {
+		if t.Speaker < 0 {
+			continue
+		}
+		from := min(max(int(t.Start*audio.SampleRate), 0), total)
+		to := min(max(int(t.End*audio.SampleRate), from), total)
+		if to > from {
+			bySpeaker[t.Speaker] = append(bySpeaker[t.Speaker], [2]int{from, to})
+		}
+	}
+	out := map[int][][2]int{}
+	for speaker, spans := range bySpeaker {
+		sum := 0
+		for _, sp := range spans {
+			sum += sp[1] - sp[0]
+		}
+		if sum < minVoiceSeconds*audio.SampleRate {
+			continue
+		}
+		// 最长的在前；一样长的按时间先后，保证结果稳定
+		slices.SortFunc(spans, func(a, b [2]int) int {
+			return cmp.Or(cmp.Compare(b[1]-b[0], a[1]-a[0]), cmp.Compare(a[0], b[0]))
+		})
+		left := maxVoiceSeconds * audio.SampleRate
+		var chosen [][2]int
+		for _, sp := range spans {
+			if left <= 0 {
+				break
+			}
+			n := min(sp[1]-sp[0], left)
+			chosen = append(chosen, [2]int{sp[0], sp[0] + n})
+			left -= n
+		}
+		out[speaker] = chosen
+	}
+	return out
 }

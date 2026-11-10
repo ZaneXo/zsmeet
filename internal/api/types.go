@@ -46,6 +46,7 @@ type Meeting struct {
 	CanManage      bool              `json:"can_manage" doc:"当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以"`
 	Marks          []float64         `json:"marks" doc:"网页录音时标记的重点：录音开始后的秒数"`
 	Speakers       map[string]string `json:"speakers" nullable:"false" doc:"给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」"`
+	AutoSpeakers   []int             `json:"auto_speakers" nullable:"false" doc:"哪几位说话人（编号）的名字是按声音认出、自动起的（声纹）。有人改过名、或者照原样保存过以后就不在里面了"`
 	LastChunkAt    *time.Time        `json:"last_chunk_at,omitempty" doc:"最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次"`
 
 	OwnerID   string    `json:"owner_id" format:"uuid"`
@@ -57,8 +58,15 @@ type Meeting struct {
 // toMeeting 把会议转成接口的样子。can_edit、can_manage 是对取出这场会议的人而言的（见 service.Access）。
 func toMeeting(m service.Meeting) Meeting {
 	speakers := map[string]string{}
-	for idx, name := range transcript.ParseNames(m.Speakers) {
+	names := transcript.ParseNames(m.Speakers)
+	for idx, name := range names {
 		speakers[strconv.Itoa(idx)] = name
+	}
+	auto := []int{}
+	for _, idx := range m.AutoSpeakers {
+		if names[int(idx)] != "" {
+			auto = append(auto, int(idx))
+		}
 	}
 	marks := make([]float64, len(m.Marks))
 	for i, t := range m.Marks {
@@ -83,6 +91,7 @@ func toMeeting(m service.Meeting) Meeting {
 		CanManage:      m.Access.Manage,
 		Marks:          marks,
 		Speakers:       speakers,
+		AutoSpeakers:   auto,
 		LastChunkAt:    m.LastChunkAt,
 		OwnerID:        m.OwnerID.String(),
 		OwnerName:      m.OwnerName,

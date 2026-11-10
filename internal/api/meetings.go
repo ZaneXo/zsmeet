@@ -531,9 +531,10 @@ var renameSpeakersOp = huma.Operation{
 	Method:      http.MethodPut,
 	Path:        "/api/meetings/{id}/speakers",
 	Summary:     "给说话人起名字",
-	Description: "转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。",
-	Tags:        []string{"会议"},
-	Security:    loggedIn,
+	Description: "转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。" +
+		"管理员打开了声纹时，名字连同这位说话人的声音特征记进声纹库，之后的会议按声音认出他；按声音认出的名字照原样提交一次算确认。",
+	Tags:     []string{"会议"},
+	Security: loggedIn,
 }
 
 func (h *Handlers) RenameSpeakers(ctx context.Context, in *RenameSpeakersInput) (*MeetingOutput, error) {

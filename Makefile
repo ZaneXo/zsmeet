@@ -56,6 +56,7 @@ api: ## 生成新接口的骨架：make api NAME=DeleteMeeting METHOD=DELETE ROU
 test: dev-db ## 跑全部测试（需要 Docker 和 ffmpeg）
 	ZSMEET_TEST_DATABASE_URL='$(TEST_DB_URL)' go test ./...
 	pnpm -C web typecheck
+	pnpm -C web test
 
 .PHONY: check
 check: ## 提交前检查：代码格式、静态检查、生成的前端类型是否最新

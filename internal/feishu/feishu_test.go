@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -321,5 +323,66 @@ func TestSummaryAndTodos(t *testing.T) {
 	}
 	if got := Todos("## 待办\n- 无\n"); len(got) != 0 {
 		t.Errorf("「无」不算待办：%q", got)
+	}
+}
+
+// 用飞书登录：授权页的地址按平台选；授权码换出用户信息；PKCE、授权码只能用一次这些都要对得上，失败时说人话。
+func TestLoginUser(t *testing.T) {
+	for _, tc := range []struct{ domain, override, want string }{
+		{"feishu", "", "https://accounts.feishu.cn/open-apis/authen/v1/authorize?"},
+		{"lark", "", "https://accounts.larksuite.com/open-apis/authen/v1/authorize?"},
+		{"lark", "http://feishu.internal/", "http://feishu.internal/open-apis/authen/v1/authorize?"},
+	} {
+		if got := AuthorizeURL(tc.domain, tc.override, "cli_x", "https://meet.example.com/cb", "st", "ch"); !strings.HasPrefix(got, tc.want) ||
+			!strings.Contains(got, "redirect_uri=https%3A%2F%2Fmeet.example.com%2Fcb") || !strings.Contains(got, "code_challenge_method=S256") {
+			t.Errorf("%s %s：%s", tc.domain, tc.override, got)
+		}
+	}
+
+	c, fs := newClient(t)
+	fs.LoginAs = &feishutest.LoginUser{OpenID: "ou_1", UnionID: "on_1", Name: "李航", Email: "li@example.com", EnterpriseEmail: "li@corp.example.com"}
+	authorize := func(verifier string) string {
+		t.Helper()
+		hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		resp, err := hc.Get(AuthorizeURL("feishu", fs.URL, feishutest.AppID, "https://meet.example.com/cb", "st", PKCEChallenge(verifier)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		u, err := url.Parse(resp.Header.Get("Location"))
+		if err != nil || u.Query().Get("state") != "st" || u.Query().Get("code") == "" {
+			t.Fatalf("授权页要带着授权码和 state 跳回来：%s", resp.Header.Get("Location"))
+		}
+		return u.Query().Get("code")
+	}
+
+	verifier := strings.Repeat("v", 43)
+	code := authorize(verifier)
+	u, err := c.LoginUser(t.Context(), code, "https://meet.example.com/cb", verifier)
+	if err != nil || u != (LoginUser{Name: "李航", OpenID: "ou_1", UnionID: "on_1", Email: "li@example.com", EnterpriseEmail: "li@corp.example.com", TenantKey: "tenant_test"}) {
+		t.Fatalf("用户信息：%+v %v", u, err)
+	}
+	// 授权码只能用一次
+	if _, err := c.LoginUser(t.Context(), code, "https://meet.example.com/cb", verifier); err == nil || !strings.Contains(err.Error(), "重新点「用飞书登录」") {
+		t.Errorf("授权码用过了：%v", err)
+	}
+	// code_verifier 不对（授权码被别人截走了）
+	if _, err := c.LoginUser(t.Context(), authorize(verifier), "https://meet.example.com/cb", strings.Repeat("x", 43)); !errors.As(err, new(*OAuthError)) {
+		t.Errorf("PKCE 对不上：%v", err)
+	}
+	// 重定向 URL 和打开授权页时的不一样
+	if _, err := c.LoginUser(t.Context(), authorize(verifier), "https://other.example.com/cb", verifier); err == nil || !strings.Contains(err.Error(), "重定向 URL") {
+		t.Errorf("重定向 URL 对不上：%v", err)
+	}
+	// App Secret 不对
+	wrong := New(fs.URL, feishutest.AppID, "wrong")
+	if _, err := wrong.LoginUser(t.Context(), authorize(verifier), "https://meet.example.com/cb", verifier); err == nil || !strings.Contains(err.Error(), "App Secret") {
+		t.Errorf("凭证不对：%v", err)
+	}
+	// 没开通的错误码：带上飞书的说明，但不带授权码
+	fs.FailToken = 20999
+	code = authorize(verifier)
+	if _, err := c.LoginUser(t.Context(), code, "https://meet.example.com/cb", verifier); err == nil || !strings.Contains(err.Error(), "20999") || strings.Contains(err.Error(), code) {
+		t.Errorf("其他错误：%v", err)
 	}
 }

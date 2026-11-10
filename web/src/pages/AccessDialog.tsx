@@ -26,7 +26,20 @@ function options(isOwner: boolean, ownerName: string): { value: Visibility; labe
 }
 
 /** 会议页上的「谁能看」：创建者和管理员可以改可见范围、指定谁能看、谁能编辑。 */
-export function AccessDialog({ meeting: m, isOwner, feishu, onClose }: { meeting: Meeting; isOwner: boolean; feishu: boolean; onClose: () => void }) {
+export function AccessDialog({
+  meeting: m,
+  isOwner,
+  feishu,
+  groups = false,
+  onClose,
+}: {
+  meeting: Meeting;
+  isOwner: boolean;
+  feishu: boolean;
+  // 管理员加了钉钉、企业微信、Slack 的群机器人
+  groups?: boolean;
+  onClose: () => void;
+}) {
   // 每次打开都重新取：表单拿它当初始值、保存时整份替换，用缓存里的旧名单会把别人刚改的覆盖掉
   const access = useQuery({
     queryKey: ["meeting-access", m.id],
@@ -42,7 +55,7 @@ export function AccessDialog({ meeting: m, isOwner, feishu, onClose }: { meeting
       ) : access.isError || people.isError ? (
         <Notice tone="bad">{errorMessage(access.error ?? people.error)}</Notice>
       ) : (
-        <AccessForm meeting={m} isOwner={isOwner} feishu={feishu} initial={access.data} people={people.data.items} onClose={onClose} />
+        <AccessForm meeting={m} isOwner={isOwner} feishu={feishu} groups={groups} initial={access.data} people={people.data.items} onClose={onClose} />
       )}
     </Modal>
   );
@@ -52,6 +65,7 @@ function AccessForm({
   meeting: m,
   isOwner,
   feishu,
+  groups,
   initial,
   people,
   onClose,
@@ -59,6 +73,7 @@ function AccessForm({
   meeting: Meeting;
   isOwner: boolean;
   feishu: boolean;
+  groups: boolean;
   initial: components["schemas"]["MeetingAccess"];
   people: components["schemas"]["Person"][];
   onClose: () => void;
@@ -178,6 +193,7 @@ function AccessForm({
       <p className="text-xs leading-relaxed text-muted">
         创建者和管理员总能看、能编辑；删除会议、改这里的设置只有他们能做。
         {feishu && "已经发到飞书群的卡片、导入的飞书文档不受这里的设置影响；只有团队所有人可见的会议才会自动发到飞书群。"}
+        {groups && "已经发到钉钉、企业微信、Slack 群里的消息不受这里的设置影响；只有团队所有人可见的会议才会自动发到这些群。"}
       </p>
       {save.isError && <Notice tone="bad">{errorMessage(save.error)}</Notice>}
       <div className="flex justify-end gap-2">

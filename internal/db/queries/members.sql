@@ -87,3 +87,10 @@ WHERE created_by = $1 AND kind = 'invite' AND used_at IS NULL AND expires_at > n
 -- 在服务器上用命令给账号本人生成的那种不算：它的效力来自能登录服务器，和角色无关
 DELETE FROM account_links
 WHERE created_by = $1 AND kind = 'reset' AND used_at IS NULL AND user_id <> created_by;
+
+-- name: GetPendingInviteByEmail :one
+-- 这个邮箱还没被接受的邀请（每个邮箱最多一个）。可能已经过期，要用 usable 再检查
+SELECT * FROM account_links WHERE kind = 'invite' AND email = $1 AND used_at IS NULL;
+
+-- name: LockLinkByID :one
+SELECT * FROM account_links WHERE id = $1 FOR UPDATE;

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/mail"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -101,6 +102,8 @@ func toInvite(l sqlc.AccountLink, invitedBy string, issuerIsAdmin bool) Invite {
 type Member struct {
 	sqlc.User
 	Reset *PendingReset
+	// 关联了飞书账号（能用飞书登录）
+	FeishuLinked bool
 }
 
 // PendingReset 是一个已经发出去、还能用的重置密码链接。
@@ -131,9 +134,13 @@ func (s *Service) Members(ctx context.Context) ([]Member, []Invite, error) {
 		}
 		pending[*r.UserID] = reset
 	}
+	linked, err := s.q.ListIdentityUsers(ctx, providerFeishu)
+	if err != nil {
+		return nil, nil, err
+	}
 	members := make([]Member, len(users))
 	for i, u := range users {
-		members[i] = Member{User: u, Reset: pending[u.ID]}
+		members[i] = Member{User: u, Reset: pending[u.ID], FeishuLinked: slices.Contains(linked, u.ID)}
 	}
 
 	rows, err := s.q.ListPendingInvites(ctx)
@@ -526,6 +533,10 @@ func (s *Service) AcceptLink(ctx context.Context, token, name, pass string) (sql
 			if err := q.ClearLoginFailures(ctx, loginKey(target.Email)); err != nil {
 				return err
 			}
+			// 重置密码多半是账号出了问题：之前关联的飞书账号也一起解除，免得被人用它继续登录
+			if _, err := q.DeleteUserIdentity(ctx, sqlc.DeleteUserIdentityParams{Provider: providerFeishu, UserID: target.ID}); err != nil {
+				return err
+			}
 		}
 		return q.MarkLinkUsed(ctx, link.ID)
 	})
@@ -555,8 +566,11 @@ func (s *Service) ChangePassword(ctx context.Context, user sqlc.User, current, n
 			return err
 		}
 		// 改密码常常是因为担心账号被别人动过。之前发出去的重置链接如果还留着，
-		// 拿到它的人照样能进来，所以一起作废
-		_, err = q.DeletePendingReset(ctx, &me.ID)
+		// 拿到它的人照样能进来，所以一起作废；关联的飞书账号同理，一起解除，需要的话再关联
+		if _, err := q.DeletePendingReset(ctx, &me.ID); err != nil {
+			return err
+		}
+		_, err = q.DeleteUserIdentity(ctx, sqlc.DeleteUserIdentityParams{Provider: providerFeishu, UserID: me.ID})
 		return err
 	})
 	return out, err

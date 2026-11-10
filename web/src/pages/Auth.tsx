@@ -2,7 +2,8 @@ import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
-import { Button, Card, Field, Input, Notice } from "../components/ui";
+import { Button, buttonClass, Card, Field, Input, Notice } from "../components/ui";
+import { feishuErrorText, useFeishuResult } from "../lib/feishuAuth";
 
 export function AuthLayout({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
   return (
@@ -57,9 +58,15 @@ export function SetupPage() {
   );
 }
 
-export function LoginPage() {
+/**
+ * 登录页。管理员打开了飞书登录时多一个「用飞书登录」：普通的链接，整页跳到飞书的授权页，登录完飞书跳回首页。
+ * 用飞书登录没成功时，飞书跳回来的地址里带着原因的代号（见 useFeishuResult）。
+ */
+export function LoginPage({ feishuLogin }: { feishuLogin: boolean }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const { error: feishuError } = useFeishuResult();
+  const lastError = feishuError && feishuErrorText(feishuError, "login");
   const login = useMutation({
     mutationFn: () => unwrap(api.POST("/api/login", { body: { email, password } })),
     onSuccess: refreshStatus,
@@ -71,15 +78,33 @@ export function LoginPage() {
 
   return (
     <AuthLayout title="登录 zsmeet" subtitle="会议录音自动转写，生成纪要">
+      {lastError && (
+        <div className="mb-4">
+          <Notice tone="bad">{lastError}</Notice>
+        </div>
+      )}
+      {feishuLogin && (
+        <>
+          <a href="/api/auth/feishu/start" className={`${buttonClass("primary")} w-full`}>
+            用飞书登录
+          </a>
+          <p className="mt-2 text-center text-xs leading-relaxed text-muted">用飞书扫码，或者在飞书网页版已经登录时点一下就行</p>
+          <div className="my-5 flex items-center gap-3 text-xs text-muted" aria-hidden="true">
+            <span className="h-px flex-1 bg-line" />
+            或者用邮箱和密码
+            <span className="h-px flex-1 bg-line" />
+          </div>
+        </>
+      )}
       <form onSubmit={submit} className="flex flex-col gap-4">
         <Field label="邮箱" htmlFor="login-email">
-          <Input id="login-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" autoFocus />
+          <Input id="login-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" autoFocus={!feishuLogin} />
         </Field>
         <Field label="密码" htmlFor="login-password">
           <Input id="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required autoComplete="current-password" />
         </Field>
         {login.isError && <Notice tone="bad">{errorMessage(login.error)}</Notice>}
-        <Button type="submit" variant="primary" disabled={login.isPending}>
+        <Button type="submit" variant={feishuLogin ? "default" : "primary"} disabled={login.isPending}>
           {login.isPending ? "正在登录…" : "登录"}
         </Button>
       </form>

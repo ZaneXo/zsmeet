@@ -3,11 +3,14 @@
 package feishutest
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -62,6 +65,18 @@ type User struct {
 	Name, Email string
 }
 
+// LoginUser 是在授权页上登录着飞书的人（用飞书登录时用）。
+type LoginUser struct {
+	OpenID, UnionID, Name, Email, EnterpriseEmail string
+}
+
+// grant 是授权页发出去的一个授权码。
+type grant struct {
+	user           LoginUser
+	redirect, pkce string
+	used           bool
+}
+
 // Server 是假的开放平台。
 type Server struct {
 	*httptest.Server
@@ -82,10 +97,16 @@ type Server struct {
 	FailChats map[string]int
 	// 每个导入任务头几次查询返回「还在处理」
 	ImportPolls int
+	// 用飞书登录：授权页上登录着飞书的是谁。为 nil 时相当于用户在授权页上点了拒绝
+	LoginAs *LoginUser
+	// 换用户凭证时返回的错误码（模拟授权码过期、重定向 URL 对不上这类）
+	FailToken int
 	// 每个接口被调用的次数，键是「方法 路径」，路径里的变量换成 *
-	Calls map[string]int
-	tasks map[string]*Import
-	seq   int
+	Calls      map[string]int
+	tasks      map[string]*Import
+	grants     map[string]*grant
+	userTokens map[string]LoginUser
+	seq        int
 }
 
 // New 启动假的开放平台，测试结束时自动关掉。
@@ -99,6 +120,8 @@ func New(t *testing.T) *Server {
 		FailChats:  map[string]int{},
 		Calls:      map[string]int{},
 		tasks:      map[string]*Import{},
+		grants:     map[string]*grant{},
+		userTokens: map[string]LoginUser{},
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
@@ -169,6 +192,29 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "audio/wav")
 		w.Write(m.Data)
+		return
+	}
+	switch key {
+	case "GET /open-apis/authen/v1/authorize":
+		s.authorize(w, r)
+		return
+	case "POST /open-apis/authen/v2/oauth/token":
+		s.userToken(w, r)
+		return
+	case "GET /open-apis/authen/v1/user_info":
+		u, ok := s.userTokens[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		if !ok {
+			reply(w, 99991668, "invalid user access token", nil)
+			return
+		}
+		data := map[string]string{"name": u.Name, "open_id": u.OpenID, "union_id": u.UnionID, "tenant_key": "tenant_test"}
+		if u.Email != "" {
+			data["email"] = u.Email
+		}
+		if u.EnterpriseEmail != "" {
+			data["enterprise_email"] = u.EnterpriseEmail
+		}
+		reply(w, 0, "success", data)
 		return
 	}
 	if r.Header.Get("Authorization") != "Bearer "+token {
@@ -378,6 +424,78 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.t.Errorf("假飞书收到了没实现的请求：%s %s", r.Method, path)
 		reply(w, 404, "not found", nil)
+	}
+}
+
+// authorize 是飞书的授权页：用户已经登录着飞书（LoginAs），直接同意授权，带着授权码跳回 redirect_uri。
+// 参数不对时像飞书一样停在授权页上报错（这里返回 400），不跳回去。
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	back, err := url.Parse(q.Get("redirect_uri"))
+	if q.Get("client_id") != AppID || q.Get("response_type") != "code" || err != nil || back.Host == "" ||
+		q.Get("code_challenge") == "" || q.Get("code_challenge_method") != "S256" {
+		http.Error(w, "授权页参数不对", http.StatusBadRequest)
+		return
+	}
+	for _, scope := range strings.Fields(q.Get("scope")) {
+		if !strings.HasPrefix(scope, "contact:user.") {
+			http.Error(w, "20027 应用没有开通权限 "+scope, http.StatusBadRequest)
+			return
+		}
+	}
+	params := back.Query()
+	if q.Has("state") {
+		params.Set("state", q.Get("state"))
+	}
+	if s.LoginAs == nil {
+		params.Set("error", "access_denied")
+	} else {
+		code := s.next("code_")
+		s.grants[code] = &grant{user: *s.LoginAs, redirect: q.Get("redirect_uri"), pkce: q.Get("code_challenge")}
+		params.Set("code", code)
+	}
+	back.RawQuery = params.Encode()
+	http.Redirect(w, r, back.String(), http.StatusFound)
+}
+
+// userToken 用授权码换用户的访问凭证：授权码只能用一次，redirect_uri 和 PKCE 都要对得上。
+func (s *Server) userToken(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		GrantType    string `json:"grant_type"`
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+		Code         string `json:"code"`
+		RedirectURI  string `json:"redirect_uri"`
+		CodeVerifier string `json:"code_verifier"`
+	}
+	json.NewDecoder(r.Body).Decode(&in)
+	fail := func(status, code int, desc string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]any{"code": code, "error": "invalid_grant", "error_description": desc})
+	}
+	g := s.grants[in.Code]
+	sum := sha256.Sum256([]byte(in.CodeVerifier))
+	switch {
+	case s.FailToken != 0:
+		fail(http.StatusBadRequest, s.FailToken, "mock failure")
+	case in.GrantType != "authorization_code" || in.ClientID != AppID || in.ClientSecret != AppSecret:
+		fail(http.StatusBadRequest, 20002, "client authentication failed")
+	case g == nil || g.used:
+		fail(http.StatusBadRequest, 20003, "the code is invalid")
+	case in.RedirectURI != g.redirect:
+		fail(http.StatusBadRequest, 20071, "redirect_uri mismatch")
+	case base64.RawURLEncoding.EncodeToString(sum[:]) != g.pkce:
+		fail(http.StatusBadRequest, 20049, "PKCE verification failed")
+	default:
+		g.used = true
+		tok := s.next("u-token-")
+		s.userTokens[tok] = g.user
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"code": 0, "access_token": tok, "expires_in": 7200, "token_type": "Bearer",
+			"scope": "contact:user.email:readonly contact:user.employee:readonly",
+		})
 	}
 }
 

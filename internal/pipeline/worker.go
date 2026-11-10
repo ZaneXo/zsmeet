@@ -26,6 +26,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/storage"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/voiceprint"
 )
 
 const (
@@ -42,11 +43,13 @@ const (
 // errSuperseded 表示这场会议已经被新一轮任务接手，当前任务应该安静地退出。
 var errSuperseded = errors.New("会议已被新的任务接手")
 
-// recognizer 是处理流程需要识别引擎做的两件事。
+// recognizer 是处理流程需要识别引擎做的几件事。
 // 测试里用假的替换，不用加载几百 MB 的模型。
 type recognizer interface {
 	Transcribe(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error)
 	Diarize(samples []float32) []transcript.Turn
+	// Embed 给每位说话人算声音特征（声纹），键是 turns 里的说话人编号。只在管理员打开了声纹时调用
+	Embed(samples []float32, turns []transcript.Turn) (map[int]voiceprint.Voice, error)
 }
 
 // Worker 处理 queue.ProcessArgs。
@@ -72,6 +75,8 @@ type Worker struct {
 	// 飞书开放平台的地址（为空时按设置里选的飞书 / Lark），和按凭证复用的客户端
 	feishuBase string
 	feishu     *feishu.Pool
+	// 只在测试里设：允许群机器人的地址指向这个 http 的假服务器（host:port），见 webhook.CheckURL
+	webhookTestHost string
 }
 
 func newWorker(pool *pgxpool.Pool, cfg config.Config, store *storage.Local, st *settings.Store) *Worker {
@@ -106,6 +111,7 @@ func Start(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, store *st
 	river.AddWorker(workers, &reaper{pool: pool, store: w.store, settings: st})
 	river.AddWorker(workers, &shareWorker{w: w})
 	river.AddWorker(workers, &importWorker{w: w})
+	river.AddWorker(workers, &webhookWorker{w: w})
 
 	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
@@ -113,6 +119,7 @@ func Start(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, store *st
 			queue.QueueMaintenance:  {MaxWorkers: 1},
 			queue.QueueFeishu:       {MaxWorkers: 1},
 			queue.QueueFeishuImport: {MaxWorkers: 1},
+			queue.QueueWebhook:      {MaxWorkers: 1},
 		},
 		Workers: workers,
 		// River 认为超过这个时间还在跑的任务是卡死的，会重新执行，所以必须比最长的会议处理时间长

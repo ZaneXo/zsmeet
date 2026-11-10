@@ -17,6 +17,8 @@ type StatusOutput struct {
 		User        *User  `json:"user,omitempty" doc:"当前登录的用户，没登录时没有这个字段"`
 		LLMReady    bool   `json:"llm_ready" doc:"是否配置了大模型；只对登录用户有意义"`
 		FeishuReady bool   `json:"feishu_ready" doc:"是否配置了飞书（可以把纪要发到飞书）；只对登录用户有意义"`
+		Voiceprints bool   `json:"voiceprints" doc:"管理员是否打开了声纹（给说话人改过名字以后，之后的会议按声音认出这个人）；只对登录用户有意义"`
+		FeishuLogin bool   `json:"feishu_login" doc:"登录页上是否显示「用飞书登录」"`
 		Version     string `json:"version"`
 	}
 }
@@ -38,6 +40,9 @@ func (h *Handlers) Status(ctx context.Context, _ *struct{}) (*StatusOutput, erro
 		return nil, toHTTP(err)
 	}
 	out.Body.Initialized = initialized
+	if out.Body.FeishuLogin, err = h.svc.FeishuLoginEnabled(ctx); err != nil {
+		return nil, toHTTP(err)
+	}
 	if user, err := h.sessionUser(ctx); err == nil {
 		out.Body.User = new(toUser(user))
 		cfg, err := h.svc.LLMSettings(ctx)
@@ -50,6 +55,11 @@ func (h *Handlers) Status(ctx context.Context, _ *struct{}) (*StatusOutput, erro
 			return nil, toHTTP(err)
 		}
 		out.Body.FeishuReady = fs.Ready()
+		vp, err := h.svc.VoiceprintSettings(ctx)
+		if err != nil {
+			return nil, toHTTP(err)
+		}
+		out.Body.Voiceprints = vp.Enabled
 	}
 	return out, nil
 }

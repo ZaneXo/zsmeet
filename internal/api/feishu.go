@@ -28,7 +28,10 @@ type FeishuSettings struct {
 	DocFolder        string `json:"doc_folder" doc:"文档放在哪个云空间文件夹（token）；为空时放在应用自己的云空间"`
 	LinkShare        bool   `json:"link_share" doc:"公司里拿到文档链接的人都能看"`
 	ImportRecordings bool   `json:"import_recordings" doc:"自动导入飞书会议的云录制"`
+	Login            bool   `json:"login" doc:"允许成员用飞书登录"`
+	LoginAutoJoin    bool   `json:"login_auto_join" doc:"飞书账号还不是成员时自动创建成员账号；否则只有已经是成员的人能用飞书登录"`
 	ConsoleURL       string `json:"console_url" doc:"这个应用在飞书开发者后台的页面，没填 App ID 时为空"`
+	LoginRedirectURL string `json:"login_redirect_url" doc:"用飞书登录要填进飞书应用「安全设置 → 重定向 URL」的地址，没填访问地址时为空"`
 }
 
 type FeishuSettingsOutput struct {
@@ -40,7 +43,11 @@ func toFeishuSettings(cfg settings.Feishu) *FeishuSettingsOutput {
 		Domain: cfg.Domain, AppID: cfg.AppID, AppSecretSet: cfg.AppSecret != "", SiteURL: cfg.SiteURL,
 		ChatID: cfg.ChatID, ChatName: cfg.ChatName, AutoPush: cfg.AutoPush, WithDoc: cfg.WithDoc,
 		DocFolder: cfg.DocFolder, LinkShare: cfg.LinkShare, ImportRecordings: cfg.ImportRecordings,
+		Login: cfg.Login, LoginAutoJoin: cfg.LoginAutoJoin,
 	}}
+	if cfg.SiteURL != "" {
+		out.Body.LoginRedirectURL = service.FeishuRedirectURL(cfg.SiteURL)
+	}
 	if out.Body.Domain == "" {
 		out.Body.Domain = "feishu"
 	}
@@ -80,6 +87,8 @@ type FeishuSettingsInput struct {
 		DocFolder        string `json:"doc_folder,omitempty" maxLength:"500" doc:"云空间文件夹的链接或者 token"`
 		LinkShare        bool   `json:"link_share,omitempty"`
 		ImportRecordings bool   `json:"import_recordings,omitempty"`
+		Login            bool   `json:"login,omitempty" doc:"允许成员用飞书登录"`
+		LoginAutoJoin    bool   `json:"login_auto_join,omitempty" doc:"飞书账号还不是成员时自动创建成员账号"`
 	}
 }
 
@@ -88,6 +97,7 @@ func (in *FeishuSettingsInput) toService() service.FeishuInput {
 	return service.FeishuInput{
 		Domain: b.Domain, AppID: b.AppID, AppSecret: b.AppSecret, SiteURL: b.SiteURL, ChatID: b.ChatID, ChatName: b.ChatName,
 		AutoPush: b.AutoPush, WithDoc: b.WithDoc, DocFolder: b.DocFolder, LinkShare: b.LinkShare, ImportRecordings: b.ImportRecordings,
+		Login: b.Login, LoginAutoJoin: b.LoginAutoJoin,
 	}
 }
 

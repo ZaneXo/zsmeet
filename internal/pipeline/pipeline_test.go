@@ -31,12 +31,21 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/storage"
 	"github.com/ZaneXo/zsmeet/internal/testdb"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/voiceprint"
 )
 
 // fakeEngine 代替真的识别引擎：不看音频内容，返回固定的两句话。
 type fakeEngine struct {
 	transcribed atomic.Int32
 	samples     atomic.Int64
+
+	// 算声纹时每位说话人（转写里的编号）返回的声音特征，没有的不返回
+	voices   map[int][]float32
+	embedded atomic.Int32
+	// 最后一次算声纹时收到的时间段
+	turns []transcript.Turn
+	// 算声纹时顺便做的事（模拟这时有人改了设置）
+	onEmbed func()
 }
 
 func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
@@ -51,6 +60,21 @@ func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress f
 
 func (e *fakeEngine) Diarize([]float32) []transcript.Turn {
 	return []transcript.Turn{{Start: 0, End: 1, Speaker: 4}, {Start: 1, End: 2, Speaker: 9}}
+}
+
+func (e *fakeEngine) Embed(_ []float32, turns []transcript.Turn) (map[int]voiceprint.Voice, error) {
+	e.embedded.Add(1)
+	e.turns = turns
+	if e.onEmbed != nil {
+		e.onEmbed()
+	}
+	out := map[int]voiceprint.Voice{}
+	for _, t := range turns {
+		if v, ok := e.voices[t.Speaker]; ok {
+			out[t.Speaker] = voiceprint.Voice{Embedding: v, Seconds: t.End - t.Start}
+		}
+	}
+	return out, nil
 }
 
 type env struct {

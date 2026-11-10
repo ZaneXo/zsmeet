@@ -6,9 +6,13 @@ import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { User } from "../api/client";
 import { Button, Card, Field, Input, Notice, Select, Spinner } from "../components/ui";
+import { feishuErrorText, useFeishuResult } from "../lib/feishuAuth";
+import { dateTime } from "../lib/format";
 import { FeishuSettingsSection } from "./FeishuSettings";
 import { MembersSection } from "./Members";
 import { TemplateSettingsSection } from "./TemplateSettings";
+import { VoiceprintSettingsSection } from "./VoiceprintSettings";
+import { WebhookSettingsSection } from "./WebhookSettings";
 
 const SECTIONS = [
   { key: "account", label: "账号", adminOnly: false },
@@ -16,7 +20,9 @@ const SECTIONS = [
   { key: "llm", label: "大模型", adminOnly: true },
   { key: "templates", label: "纪要模板", adminOnly: true },
   { key: "feishu", label: "飞书", adminOnly: true },
+  { key: "webhooks", label: "群机器人", adminOnly: true },
   { key: "retention", label: "录音保留", adminOnly: true },
+  { key: "voiceprints", label: "声纹", adminOnly: true },
 ] as const;
 
 type SectionKey = (typeof SECTIONS)[number]["key"];
@@ -58,7 +64,9 @@ export function SettingsPage({ user }: { user: User }) {
           {current === "llm" && <LLMSettingsCard />}
           {current === "templates" && <TemplateSettingsSection />}
           {current === "feishu" && <FeishuSettingsSection />}
+          {current === "webhooks" && <WebhookSettingsSection />}
           {current === "retention" && <RetentionCard />}
+          {current === "voiceprints" && <VoiceprintSettingsSection />}
         </div>
       </div>
     </div>
@@ -79,11 +87,112 @@ function AccountSection({ user }: { user: User }) {
           <dd>{user.role === "admin" ? "管理员" : "成员"}</dd>
         </dl>
         {user.role !== "admin" && (
-          <p className="mt-3 text-[13px] leading-relaxed text-muted">成员、大模型、飞书这些团队配置由管理员统一管理。</p>
+          <p className="mt-3 text-[13px] leading-relaxed text-muted">成员、大模型、飞书、群机器人这些团队配置由管理员统一管理。</p>
         )}
       </Card>
+      <FeishuLinkCard />
       <ChangePasswordCard email={user.email} />
     </div>
+  );
+}
+
+/**
+ * 飞书账号：关联以后可以在登录页上用飞书登录。管理员打开了飞书登录时才能关联（「关联飞书」整页跳到飞书的授权页，
+ * 完成后跳回这里，地址里带着结果）；已经关联的随时可以解除。没打开飞书登录、也没关联过时不显示。
+ */
+function FeishuLinkCard() {
+  const link = useQuery({
+    queryKey: ["me", "feishu"],
+    queryFn: () => unwrap(api.GET("/api/me/feishu")),
+  });
+  const result = useFeishuResult();
+  const [confirm, setConfirm] = useState(false);
+  // 关联前要输入当前密码：只拿到登录状态的人（比如别人的电脑上没退出）关联不了自己的飞书账号
+  const [pass, setPass] = useState("");
+  const start = useMutation({
+    mutationFn: () => unwrap(api.POST("/api/me/feishu/link", { body: { password: pass } })),
+    onSuccess: (data) => {
+      // 整页跳到飞书的授权页，完成后跳回这里，地址里带着结果
+      if (data.url) window.location.assign(data.url);
+    },
+  });
+  const unlink = useMutation({
+    mutationFn: () => unwrap(api.DELETE("/api/me/feishu")),
+    onSettled: () => {
+      setConfirm(false);
+      void queryClient.invalidateQueries({ queryKey: ["me", "feishu"] });
+    },
+  });
+  const data = link.data;
+  if (!data || (!data.enabled && !data.linked && !result.error)) return null;
+  return (
+    <Card className="flex flex-col gap-3 p-6">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-lg font-bold">飞书账号</h2>
+        <p className="text-[13px] leading-relaxed text-muted">
+          {data.linked
+            ? `已关联飞书账号${data.linked_at ? `（${dateTime(data.linked_at)} 起）` : ""}，可以在登录页上用飞书登录。换了飞书账号的话，先解除关联，再关联新的。`
+            : data.enabled
+              ? "还没有关联飞书账号。关联以后，可以在登录页上用飞书扫码登录。"
+              : "管理员没有打开飞书登录。"}
+        </p>
+      </div>
+      {result.linked && data.linked && !unlink.isSuccess && <Notice tone="ok">已关联飞书账号。</Notice>}
+      {result.error && <Notice tone="bad">{feishuErrorText(result.error, "account")}</Notice>}
+      {unlink.isError && <Notice tone="bad">{errorMessage(unlink.error)}</Notice>}
+      {unlink.isSuccess && !data.linked && <Notice tone="ok">已解除关联。</Notice>}
+      {data.linked ? (
+        confirm ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-ink-2">解除以后不能再用这个飞书账号登录，确定吗？</span>
+            <Button size="sm" variant="danger" disabled={unlink.isPending} onClick={() => unlink.mutate()}>
+              解除关联
+            </Button>
+            <Button size="sm" onClick={() => setConfirm(false)}>
+              取消
+            </Button>
+          </div>
+        ) : (
+          <div>
+            <Button size="sm" onClick={() => setConfirm(true)}>
+              解除关联
+            </Button>
+          </div>
+        )
+      ) : (
+        data.enabled && (
+          <form
+            className="flex flex-col gap-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              start.mutate();
+            }}
+          >
+            <Field label="当前密码" htmlFor="feishu-link-password" hint="关联前先确认是你本人。用飞书自动创建的账号没有密码，请管理员给你生成重置密码的链接">
+              <Input
+                id="feishu-link-password"
+                type="password"
+                autoComplete="current-password"
+                className="max-w-xs"
+                required
+                value={pass}
+                onChange={(e) => {
+                  setPass(e.target.value);
+                  start.reset();
+                }}
+              />
+            </Field>
+            {start.isError && <Notice tone="bad">{errorMessage(start.error)}</Notice>}
+            {start.data?.error && <Notice tone="bad">{feishuErrorText(start.data.error, "account")}</Notice>}
+            <div>
+              <Button type="submit" variant="primary" size="sm" disabled={start.isPending || !pass}>
+                {start.isPending ? "正在核对…" : "关联飞书"}
+              </Button>
+            </div>
+          </form>
+        )
+      )}
+    </Card>
   );
 }
 
@@ -97,6 +206,8 @@ function ChangePasswordCard({ email }: { email: string }) {
       setCurrent("");
       setNext("");
       setAgain("");
+      // 改了密码，飞书的关联也解除了
+      void queryClient.invalidateQueries({ queryKey: ["me", "feishu"] });
     },
   });
   const mismatch = again.length > 0 && next !== again;
@@ -112,7 +223,7 @@ function ChangePasswordCard({ email }: { email: string }) {
         <input type="email" name="username" autoComplete="username" value={email} readOnly hidden />
         <div className="flex flex-col gap-1">
           <h2 className="text-lg font-bold">修改密码</h2>
-          <p className="text-[13px] leading-relaxed text-muted">改完以后这台设备保持登录，其他设备上的登录会全部退出。忘了当前密码的话，请管理员帮你重置。</p>
+          <p className="text-[13px] leading-relaxed text-muted">改完以后这台设备保持登录，其他设备上的登录会全部退出；关联了飞书的话，关联也会解除，需要时再关联一次。忘了当前密码的话，请管理员帮你重置。</p>
         </div>
         <Field label="当前密码" htmlFor="pw-current">
           <Input id="pw-current" type="password" className="max-w-sm" value={current} onChange={(e) => { setCurrent(e.target.value); change.reset(); }} required autoComplete="current-password" />
@@ -125,7 +236,7 @@ function ChangePasswordCard({ email }: { email: string }) {
         </Field>
         {mismatch && <Notice tone="warn">两次输入的新密码不一样。</Notice>}
         {change.isError && <Notice tone="bad">{errorMessage(change.error)}</Notice>}
-        {change.isSuccess && <Notice tone="ok">密码已修改。其他设备上的登录已经退出。</Notice>}
+        {change.isSuccess && <Notice tone="ok">密码已修改。其他设备上的登录已经退出，和飞书的关联（如果有）也解除了。</Notice>}
         <div>
           <Button type="submit" variant="primary" disabled={change.isPending || mismatch}>
             {change.isPending ? "正在保存…" : "修改密码"}

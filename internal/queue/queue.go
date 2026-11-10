@@ -19,6 +19,8 @@ const (
 	QueueFeishu = "feishu"
 	// 导入飞书会议的录制：要等飞书生成好、再下载，单独一个队列，不耽误发群
 	QueueFeishuImport = "feishu_import"
+	// 发到钉钉、企业微信、Slack 的群机器人。各平台都限制每个机器人每分钟 20 条左右，一个一个发
+	QueueWebhook = "webhook"
 )
 
 // ProcessArgs 处理一场会议：有转写就只写纪要，没有就从音频开始。
@@ -71,6 +73,18 @@ func (FeishuRecordingArgs) Kind() string { return "feishu_recording" }
 func (FeishuRecordingArgs) InsertOpts() river.InsertOpts {
 	// 等录制生成用的是「过一会儿再来」（不算次数），这里的次数只给网络问题之类的错误用
 	return river.InsertOpts{Queue: QueueFeishuImport, MaxAttempts: 8, UniqueOpts: river.UniqueOpts{ByArgs: true}}
+}
+
+// WebhookSendArgs 把一场会议的纪要发到一个群机器人（照着 webhook_sends 表里的一条做）。
+type WebhookSendArgs struct {
+	SendID uuid.UUID `json:"send_id"`
+}
+
+func (WebhookSendArgs) Kind() string { return "webhook_send" }
+
+func (WebhookSendArgs) InsertOpts() river.InsertOpts {
+	// 网络问题、对方出错时重试几次，间隔越来越长；限流时等够平台要求的时间再试，不算次数（见 pipeline.webhookRetry）
+	return river.InsertOpts{Queue: QueueWebhook, MaxAttempts: 6}
 }
 
 // Client 是 River 客户端的简称。

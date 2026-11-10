@@ -26,11 +26,25 @@ type Turn struct {
 
 // AssignSpeakers 给每句话找说话人：取时间重叠最多的那个人；
 // 完全没有重叠时取 1 秒内最近的那个人。最后按第一次开口的顺序重新编号。
-func AssignSpeakers(segs []Segment, turns []Turn) {
+// 返回说话人区分给的编号 → 转写里的编号；一句话都没分到的人不在里面。
+func AssignSpeakers(segs []Segment, turns []Turn) map[int]int {
 	for i := range segs {
 		segs[i].Speaker = pickSpeaker(segs[i], turns)
 	}
-	renumber(segs)
+	return renumber(segs)
+}
+
+// RenumberTurns 把说话人区分的结果换成转写里的编号（ids 是 AssignSpeakers 的返回值），
+// 一句话都没分到的人的时间段去掉。
+func RenumberTurns(turns []Turn, ids map[int]int) []Turn {
+	out := make([]Turn, 0, len(turns))
+	for _, t := range turns {
+		if id, ok := ids[t.Speaker]; ok {
+			t.Speaker = id
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func pickSpeaker(seg Segment, turns []Turn) int {
@@ -56,7 +70,7 @@ func pickSpeaker(seg Segment, turns []Turn) int {
 	return best
 }
 
-func renumber(segs []Segment) {
+func renumber(segs []Segment) map[int]int {
 	ids := make(map[int]int)
 	for i := range segs {
 		s := segs[i].Speaker
@@ -68,6 +82,7 @@ func renumber(segs []Segment) {
 		}
 		segs[i].Speaker = ids[s]
 	}
+	return ids
 }
 
 // joinText 把两句接在一起。英文的两句之间要留一个空格，中文直接接上。
@@ -201,14 +216,25 @@ func PlainText(segs []Segment) string {
 	return b.String()
 }
 
-// RemapNames 重新识别以后，同一个人的说话人编号可能变了。按新旧两份转写里各个说话人说话时间的重叠，
-// 把以前起的名字对到新的编号上：只有旧的 a 和新的 b 互相是对方重叠最多的那个，才算同一个人。
+// RemapNames 重新识别以后，同一个人的说话人编号可能变了。把以前起的名字对到新的编号上（见 SpeakerMap），
 // 对不上的名字不要了，宁可让人重新起，也不要张冠李戴。
 func RemapNames(old, segs []Segment, names Names) Names {
 	out := Names{}
 	if len(names) == 0 {
 		return out
 	}
+	ids := SpeakerMap(old, segs)
+	for a, name := range names {
+		if b, ok := ids[a]; ok {
+			out[b] = name
+		}
+	}
+	return out
+}
+
+// SpeakerMap 按新旧两份转写里各个说话人说话时间的重叠，找出旧编号 → 新编号：
+// 只有旧的 a 和新的 b 互相是对方重叠最多的那个，才算同一个人。对不上的旧编号不在里面。
+func SpeakerMap(old, segs []Segment) map[int]int {
 	overlap := map[[2]int]float64{}
 	for _, o := range old {
 		if o.Speaker < 0 {
@@ -242,10 +268,10 @@ func RemapNames(old, segs []Segment, names Names) Names {
 		consider(best, k[0], k[1], secs)
 		consider(back, k[1], k[0], secs)
 	}
-	for a, name := range names {
-		b, ok := best[a]
-		if ok && b.id >= 0 && back[b.id].id == a {
-			out[b.id] = name
+	out := map[int]int{}
+	for a, b := range best {
+		if b.id >= 0 && back[b.id].id == a {
+			out[a] = b.id
 		}
 	}
 	return out

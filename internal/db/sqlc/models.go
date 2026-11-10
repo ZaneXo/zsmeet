@@ -97,6 +97,7 @@ type Meeting struct {
 	DeletedBy      *uuid.UUID
 	Speakers       []byte
 	Retranscribe   bool
+	AutoSpeakers   []int32
 }
 
 type MeetingMember struct {
@@ -143,6 +144,13 @@ type Setting struct {
 	UpdatedAt time.Time
 }
 
+type SpeakerEmbedding struct {
+	MeetingID uuid.UUID
+	Speaker   int32
+	Embedding []float32
+	Seconds   float32
+}
+
 type Transcript struct {
 	MeetingID uuid.UUID
 	Segments  []byte
@@ -164,4 +172,54 @@ type User struct {
 	Disabled     bool
 	CreatedAt    time.Time
 	SessionEpoch int32
+}
+
+type UserIdentity struct {
+	Provider  string
+	Subject   string
+	UserID    uuid.UUID
+	CreatedAt time.Time
+}
+
+type Voiceprint struct {
+	ID        uuid.UUID
+	Name      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type VoiceprintSample struct {
+	MeetingID    uuid.UUID
+	Speaker      int32
+	VoiceprintID uuid.UUID
+	Embedding    []float32
+	Seconds      float32
+	CreatedAt    time.Time
+}
+
+type Webhook struct {
+	ID        uuid.UUID
+	Platform  string
+	Name      string
+	Url       string
+	UrlMasked string
+	Secret    string
+	AutoPush  bool
+	CreatedBy *uuid.UUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type WebhookSend struct {
+	ID             uuid.UUID
+	MeetingID      uuid.UUID
+	WebhookID      *uuid.UUID
+	WebhookName    string
+	Platform       string
+	MinutesVersion int32
+	Status         string
+	Error          string
+	RequestedBy    *uuid.UUID
+	CreatedAt      time.Time
+	FinishedAt     *time.Time
 }

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alexedwards/scs/v2/memstore"
+	"github.com/alexedwards/scs/pgxstore"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -73,8 +73,8 @@ func newServer(t *testing.T) *client {
 		t.Fatal(err)
 	}
 	svc := service.New(pool, store, settings.New(sqlc.New(pool), box), inserter)
-	// 和线上同一份会话配置，只是存在内存里
-	sess := NewSessions(memstore.New(), false)
+	// 和线上同一份会话配置、同一个存储（sessions 表），测试能数出写了几条会话。不开定时清理
+	sess := NewSessions(pgxstore.NewWithCleanupInterval(pool, 0), false)
 
 	// 和线上的默认值一样只信本机：测试客户端从本机连过来，相当于前面有一个同机的反向代理
 	proxies, err := config.ParseTrustedProxies("")

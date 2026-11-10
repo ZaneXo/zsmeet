@@ -44,6 +44,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ask": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 问会议
+         * @description 用自然语言提问，管理员配置的大模型根据会议的纪要和转写回答，并给出能点的出处。不填 meeting_id 时在自己能看的所有会议里找，填了只问那一场（看不到的会议返回 404）。没配置大模型时返回 409；每人每分钟最多问 6 次，超过返回 429；大模型出错或超时返回 502。
+         */
+        post: operations["ask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/feishu/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 飞书登录完跳回来
+         * @description 飞书的授权页跳回这里。核对 state（只能用一次，10 分钟内有效），用授权码换出飞书账号：登录时对应到 zsmeet 的账号后登录，回到首页；关联时关联到当前登录的账号，回到账号页（地址里带 feishu=linked）。失败时跳回登录页或者账号页，地址里的 feishu_error 是原因。
+         */
+        get: operations["feishu-login-callback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/feishu/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 用飞书登录，或者关联飞书账号
+         * @description 浏览器整页打开这个地址，会被带到飞书的授权页（扫码，或者在飞书网页版已登录时点一下）。管理员没打开飞书登录、系统还没初始化时直接跳回登录页（关联时是账号页），地址里的 feishu_error 是原因。不写会话。
+         */
+        get: operations["feishu-login-start"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/feishu/chats": {
         parameters: {
             query?: never;
@@ -149,6 +209,50 @@ export interface paths {
         put?: never;
         /** 退出登录 */
         post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/me/feishu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 我关联的飞书账号
+         * @description 要关联飞书账号，浏览器整页打开 /api/auth/feishu/start?mode=link。
+         */
+        get: operations["get-feishu-link"];
+        put?: never;
+        post?: never;
+        /**
+         * 解除和飞书账号的关联
+         * @description 换了飞书账号时用：解除以后再关联新的飞书账号。
+         */
+        delete: operations["unlink-feishu"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/me/feishu/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 关联飞书：输入密码后发起
+         * @description 核对当前密码，通过后返回飞书授权页的地址（浏览器整页打开），同时在 Cookie 里存下这次关联的 state。密码不对时返回 422。要求输入密码，是为了只拿到登录状态的人没法把自己的飞书账号关联上来。
+         */
+        post: operations["feishu-link-start"];
         delete?: never;
         options?: never;
         head?: never;
@@ -480,7 +584,7 @@ export interface paths {
         get?: never;
         /**
          * 给说话人起名字
-         * @description 转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。
+         * @description 转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。管理员打开了声纹时，名字连同这位说话人的声音特征记进声纹库，之后的会议按声音认出他；按声音认出的名字照原样提交一次算确认。
          */
         put: operations["rename-speakers"];
         post?: never;
@@ -504,6 +608,27 @@ export interface paths {
         get: operations["get-transcript"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/meetings/{id}/webhooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 能发到的群机器人，和这场会议最近一次发到每个群的情况 */
+        get: operations["list-meeting-webhooks"];
+        put?: never;
+        /**
+         * 把纪要发到群里
+         * @description 把当前版本的纪要（摘要、待办和链接）发到选的钉钉、企业微信、Slack 群机器人。后台发送，状态看 GET 同一个地址。能编辑这场会议的人可以发。
+         */
+        post: operations["send-to-webhooks"];
         delete?: never;
         options?: never;
         head?: never;
@@ -545,6 +670,26 @@ export interface paths {
          * @description 立刻生效：被停用的人下一次请求就会被退出登录，之后重新启用也要重新登录。管理员不能修改自己。一位管理员被降级或停用时，他发出去还没用的邀请会立刻过期（重新生成后可以接着用），他给别人生成的重置密码链接作废。
          */
         patch: operations["update-member"];
+        trace?: never;
+    };
+    "/api/members/{id}/feishu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 解除成员和飞书账号的关联
+         * @description 成员换了飞书账号、自己又登录不了（比如用飞书自动创建的账号不知道密码）时，管理员在这里解除。解除以后他用新的飞书账号登录时，重新按企业邮箱对应。
+         */
+        delete: operations["unlink-member-feishu"];
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/members/{id}/reset-link": {
@@ -734,6 +879,110 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/site": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** zsmeet 的访问地址 */
+        get: operations["get-site-settings"];
+        /** 保存 zsmeet 的访问地址 */
+        put: operations["put-site-settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/voiceprints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 声纹设置 */
+        get: operations["get-voiceprint-settings"];
+        /**
+         * 打开或关掉声纹
+         * @description 关掉以后不再收集、不再比对声音特征，已经记下的声纹留着，要删的话调用「删除全部声纹」。
+         */
+        put: operations["put-voiceprint-settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/webhooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 群机器人
+         * @description 钉钉、企业微信、Slack 群里的自定义机器人，纪要可以发到这些群里。
+         */
+        get: operations["list-webhooks"];
+        put?: never;
+        /**
+         * 加一个群机器人
+         * @description 只接受各平台官方的 Webhook 地址（https://oapi.dingtalk.com、https://qyapi.weixin.qq.com、https://hooks.slack.com）。地址和加签的密钥加密后保存。
+         */
+        post: operations["create-webhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/webhooks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** 改一个群机器人 */
+        put: operations["update-webhook"];
+        post?: never;
+        /**
+         * 删掉一个群机器人
+         * @description 已经发到群里的消息不会撤回。发送记录留着。
+         */
+        delete: operations["delete-webhook"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/webhooks/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 往群机器人发一条测试消息
+         * @description 等发完才返回。地址失效、关键词或加签不对时返回 422，detail 里是原因和改法。
+         */
+        post: operations["test-webhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/setup": {
         parameters: {
             query?: never;
@@ -876,6 +1125,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/voiceprints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 声纹库里的人
+         * @description 最近更新的在前。只说从几场会议里学到的，不列是哪几场。
+         */
+        get: operations["list-voiceprints"];
+        put?: never;
+        post?: never;
+        /**
+         * 删除全部声纹
+         * @description 删除声纹库，以及每场会议里存的说话人声音特征，不能恢复。会议里已经起好的名字不变。
+         */
+        delete: operations["delete-all-voiceprints"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/voiceprints/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 删除一个人的声纹
+         * @description 连同学到的全部样本一起删除，不能恢复。会议里已经起好的名字不变；以后有人再把说话人改成这个名字，会重新开始学。
+         */
+        delete: operations["delete-voiceprint"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -887,6 +1180,35 @@ export interface components {
             password: string;
             token: string;
         };
+        AskInputBody: {
+            /** @description 只问这一场会议（会议的 ID）；不填表示在自己能看的所有会议里找 */
+            meeting_id?: string;
+            /** @description 要问的问题，最多 300 个字，例如「上周关于报价定了什么？」 */
+            question: string;
+        };
+        AskOutputBody: {
+            /** @description 大模型的回答，纯文本；[n] 对应 citations 里的出处。会议记录里没找到时也是一段说明 */
+            answer: string;
+            /** @description 回答引用的出处，按 n 排列。回答里引用了材料里没有的编号时直接去掉，不会出现在这里 */
+            citations: components["schemas"]["Citation"][];
+            /**
+             * Format: date
+             * @description 问题限定的开始日期（含），没限定时没有这一项
+             */
+            from?: string;
+            /** @description 实际拿去搜索的词：大模型从问题里提取的，大模型没给出时从问题里拆出来的。只问一场会议、整场都交给了大模型时为空 */
+            keywords: string[];
+            /**
+             * Format: int64
+             * @description 交给大模型的材料来自几场会议（按问题找到的最相关的几场，最多 6 场）
+             */
+            meetings_searched: number;
+            /**
+             * Format: date
+             * @description 问题限定的结束日期（含），没限定时没有这一项
+             */
+            to?: string;
+        };
         ChangePasswordInputBody: {
             current_password: string;
             /** @description 8 到 200 位 */
@@ -895,6 +1217,34 @@ export interface components {
         ChunksOutputBody: {
             /** @description 已经收到的分片序号 */
             received: number[] | null;
+        };
+        Citation: {
+            /**
+             * Format: double
+             * @description 引用的那句话从录音开头算的秒数；-1 表示没有时间点（纪要里没标时间的行）
+             */
+            at: number;
+            /**
+             * Format: date-time
+             * @description 会议时间
+             */
+            date: string;
+            /** Format: uuid */
+            meeting_id: string;
+            /**
+             * Format: int64
+             * @description 回答里写成 [n] 的序号，从 1 开始
+             */
+            n: number;
+            /** @description 引用的原文（太长的截断） */
+            quote: string;
+            /**
+             * @description 引用的是转写里的一句，还是纪要里的一行。纪要里的时间点只精确到秒
+             * @enum {string}
+             */
+            source: "transcript" | "minutes";
+            /** @description 会议标题 */
+            title: string;
         };
         CompleteUploadInputBody: {
             /**
@@ -1003,6 +1353,27 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        FeishuLinkOutputBody: {
+            /** @description 管理员打开了飞书登录（能关联飞书账号） */
+            enabled: boolean;
+            /** @description 是否关联了飞书账号 */
+            linked: boolean;
+            /**
+             * Format: date-time
+             * @description 什么时候关联的
+             */
+            linked_at?: string;
+        };
+        FeishuLinkStartInputBody: {
+            /** @description 当前的密码 */
+            password: string;
+        };
+        FeishuLinkStartOutputBody: {
+            /** @description 发起不了时的原因代号（和回调地址里的 feishu_error 一样），比如管理员没打开飞书登录 */
+            error?: string;
+            /** @description 飞书授权页的地址，浏览器整页打开它 */
+            url?: string;
+        };
         FeishuSettings: {
             app_id: string;
             /** @description 是否已经保存了 App Secret；Secret 本身不会返回 */
@@ -1025,6 +1396,12 @@ export interface components {
             import_recordings: boolean;
             /** @description 公司里拿到文档链接的人都能看 */
             link_share: boolean;
+            /** @description 允许成员用飞书登录 */
+            login: boolean;
+            /** @description 飞书账号还不是成员时自动创建成员账号；否则只有已经是成员的人能用飞书登录 */
+            login_auto_join: boolean;
+            /** @description 用飞书登录要填进飞书应用「安全设置 → 重定向 URL」的地址，没填访问地址时为空 */
+            login_redirect_url: string;
             /** @description zsmeet 的访问地址，卡片上的链接用它拼 */
             site_url: string;
             /** @description 发到群里时同时导入成飞书文档 */
@@ -1044,6 +1421,10 @@ export interface components {
             domain?: "feishu" | "lark";
             import_recordings?: boolean;
             link_share?: boolean;
+            /** @description 允许成员用飞书登录 */
+            login?: boolean;
+            /** @description 飞书账号还不是成员时自动创建成员账号 */
+            login_auto_join?: boolean;
             site_url?: string;
             with_doc?: boolean;
         };
@@ -1194,6 +1575,8 @@ export interface components {
              * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
              */
             audio_deleted_at?: string;
+            /** @description 哪几位说话人（编号）的名字是按声音认出、自动起的（声纹）。有人改过名、或者照原样保存过以后就不在里面了 */
+            auto_speakers: number[];
             /** @description 当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口 */
             can_edit: boolean;
             /** @description 当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以 */
@@ -1271,6 +1654,8 @@ export interface components {
              * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
              */
             audio_deleted_at?: string;
+            /** @description 哪几位说话人（编号）的名字是按声音认出、自动起的（声纹）。有人改过名、或者照原样保存过以后就不在里面了 */
+            auto_speakers: number[];
             /** @description 当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口 */
             can_edit: boolean;
             /** @description 当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以 */
@@ -1345,12 +1730,26 @@ export interface components {
             /** Format: uuid */
             user_id: string;
         };
+        MeetingWebhook: {
+            id: string;
+            /** @description 这场会议最近一次发到这个群的记录，没发过时没有 */
+            latest?: components["schemas"]["WebhookSend"];
+            name: string;
+            /** @enum {string} */
+            platform: "dingtalk" | "wecom" | "slack";
+        };
+        MeetingWebhooksOutputBody: {
+            /** @description 管理员加的群机器人；一个都没有时会议页上不显示「发到群里」 */
+            items: components["schemas"]["MeetingWebhook"][];
+        };
         Member: {
             /** Format: date-time */
             created_at: string;
             /** @description 已停用的成员不能登录 */
             disabled: boolean;
             email: string;
+            /** @description 关联了飞书账号，能用飞书登录 */
+            feishu_linked: boolean;
             /** Format: uuid */
             id: string;
             name: string;
@@ -1484,6 +1883,10 @@ export interface components {
             start: number;
             text: string;
         };
+        SendToWebhooksInputBody: {
+            /** @description 发到哪几个群机器人 */
+            webhook_ids: string[] | null;
+        };
         SetMeetingAccessInputBody: {
             /** @description 单独指定的人，整份替换；不传表示一个都没有。可见范围是只有自己时忽略（清空） */
             members?: components["schemas"]["Item"][] | null;
@@ -1503,7 +1906,19 @@ export interface components {
             /** @description 同时导入成飞书文档 */
             with_doc?: boolean;
         };
+        SiteSettingsInputBody: {
+            /** @description 例如 https://meet.example.com。为空表示不填 */
+            url: string;
+        };
+        SiteSettingsOutputBody: {
+            /** @description 飞书配置里填的访问地址。上面没填时用它 */
+            feishu_url: string;
+            /** @description zsmeet 的访问地址，发到群里的消息用它链接回会议；为空表示没填 */
+            url: string;
+        };
         StatusOutputBody: {
+            /** @description 登录页上是否显示「用飞书登录」 */
+            feishu_login: boolean;
             /** @description 是否配置了飞书（可以把纪要发到飞书）；只对登录用户有意义 */
             feishu_ready: boolean;
             /** @description 是否已经创建过管理员；没有的话显示初始化向导 */
@@ -1513,6 +1928,8 @@ export interface components {
             /** @description 当前登录的用户，没登录时没有这个字段 */
             user?: components["schemas"]["User"];
             version: string;
+            /** @description 管理员是否打开了声纹（给说话人改过名字以后，之后的会议按声音认出这个人）；只对登录用户有意义 */
+            voiceprints: boolean;
         };
         Template: {
             /** @description 管理员自己定义的模板（可以改、可以删）；内置的模板是 false */
@@ -1548,6 +1965,8 @@ export interface components {
              * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
              */
             audio_deleted_at?: string;
+            /** @description 哪几位说话人（编号）的名字是按声音认出、自动起的（声纹）。有人改过名、或者照原样保存过以后就不在里面了 */
+            auto_speakers: number[];
             /** @description 当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口 */
             can_edit: boolean;
             /** @description 当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以 */
@@ -1639,6 +2058,100 @@ export interface components {
             /** @enum {string} */
             role: "admin" | "member";
         };
+        Voiceprint: {
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int64
+             * @description 从几场会议里学到的
+             */
+            meetings: number;
+            name: string;
+            /**
+             * Format: double
+             * @description 学到的说话一共多少秒
+             */
+            seconds: number;
+            /**
+             * Format: date-time
+             * @description 最近一次学到或去掉样本的时间
+             */
+            updated_at: string;
+        };
+        VoiceprintSettingsInputBody: {
+            enabled: boolean;
+        };
+        VoiceprintSettingsOutputBody: {
+            /** @description 是否记住说话人：给说话人改过名字以后，之后的会议按声音认出这个人、自动用这个名字。默认关着 */
+            enabled: boolean;
+        };
+        VoiceprintsOutputBody: {
+            items: components["schemas"]["Voiceprint"][];
+        };
+        Webhook: {
+            /** @description 纪要第一次生成后自动发到这个群（只发团队里所有人都能看的会议） */
+            auto_push: boolean;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            name: string;
+            /**
+             * @description 钉钉、企业微信或 Slack
+             * @enum {string}
+             */
+            platform: "dingtalk" | "wecom" | "slack";
+            /** @description 钉钉是否开了加签；密钥本身不会返回 */
+            secret_set: boolean;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description 打了码的 Webhook 地址，密钥只留最后 4 位 */
+            url_masked: string;
+        };
+        WebhookBody: {
+            auto_push?: boolean;
+            /** @description 钉钉不再加签，清掉保存的密钥 */
+            clear_secret?: boolean;
+            name: string;
+            /** @enum {string} */
+            platform: "dingtalk" | "wecom" | "slack";
+            /** @description 钉钉「加签」的密钥（SEC 开头）。留空表示沿用已保存的 */
+            secret?: string;
+            /** @description Webhook 地址。改的时候留空表示沿用已保存的 */
+            url?: string;
+        };
+        WebhookSend: {
+            /** Format: date-time */
+            created_at: string;
+            /** @description 失败的原因；发送中时是上一次没发出去的原因 */
+            error: string;
+            /** Format: date-time */
+            finished_at?: string;
+            id: string;
+            /**
+             * Format: int32
+             * @description 发的是第几版纪要
+             */
+            minutes_version: number;
+            /** @enum {string} */
+            platform: "dingtalk" | "wecom" | "slack";
+            /** @description 谁发的；纪要生成后自动发的为空 */
+            requested_by_name: string;
+            /**
+             * @description pending 发送中；done 已发送；failed 失败。发送中超过半小时的（后台任务丢了）也报成 failed，可以重新发
+             * @enum {string}
+             */
+            status: "pending" | "done" | "failed";
+            /** @description 群机器人已经删掉时为空 */
+            webhook_id: string;
+            /** @description 发送时群机器人的名字 */
+            webhook_name: string;
+        };
+        WebhookSendsOutputBody: {
+            items: components["schemas"]["WebhookSend"][];
+        };
+        WebhooksOutputBody: {
+            items: components["schemas"]["Webhook"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -1702,6 +2215,112 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["LinkInfoOutputBody"];
                 };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    ask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AskInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AskOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "feishu-login-callback": {
+        parameters: {
+            query?: {
+                /** @description 飞书给的授权码 */
+                code?: string;
+                /** @description 发起登录时的 state，原样带回来 */
+                state?: string;
+                /** @description 用户在授权页上拒绝时是 access_denied */
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                /** @description 发起时存下的 state（加密的） */
+                zsmeet_feishu_state?: string;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Found */
+            302: {
+                headers: {
+                    "Cache-Control"?: string;
+                    Location?: string;
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "feishu-login-start": {
+        parameters: {
+            query?: {
+                /** @description 不用填。以前的 link（关联飞书）不再从这里发起，要在账号页上输入密码（POST /api/me/feishu/link） */
+                mode?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Found */
+            302: {
+                headers: {
+                    "Cache-Control"?: string;
+                    Location?: string;
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Error */
             default: {
@@ -1884,6 +2503,96 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-feishu-link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuLinkOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "unlink-feishu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "feishu-link-start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeishuLinkStartInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeishuLinkStartOutputBody"];
+                };
             };
             /** @description Error */
             default: {
@@ -2668,6 +3377,72 @@ export interface operations {
             };
         };
     };
+    "list-meeting-webhooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingWebhooksOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "send-to-webhooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendToWebhooksInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookSendsOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "list-members": {
         parameters: {
             query?: never;
@@ -2720,6 +3495,35 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Member"];
                 };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "unlink-member-feishu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Error */
             default: {
@@ -3133,6 +3937,285 @@ export interface operations {
             };
         };
     };
+    "get-site-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiteSettingsOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "put-site-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SiteSettingsInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiteSettingsOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-voiceprint-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceprintSettingsOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "put-voiceprint-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VoiceprintSettingsInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceprintSettingsOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "list-webhooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhooksOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "create-webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Webhook"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "update-webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Webhook"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "delete-webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "test-webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     setup: {
         parameters: {
             query?: never;
@@ -3398,6 +4481,91 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Meeting"];
                 };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "list-voiceprints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceprintsOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "delete-all-voiceprints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "delete-voiceprint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Error */
             default: {

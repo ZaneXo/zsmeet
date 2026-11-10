@@ -99,9 +99,26 @@ type Meeting struct {
 	Retranscribe   bool
 }
 
+type MeetingMember struct {
+	MeetingID uuid.UUID
+	UserID    uuid.UUID
+	CanEdit   bool
+	AddedBy   *uuid.UUID
+	CreatedAt time.Time
+}
+
 type MeetingSearch struct {
 	MeetingID uuid.UUID
 	Doc       interface{}
+}
+
+type MinutesTemplate struct {
+	ID        uuid.UUID
+	Name      string
+	Guide     string
+	CreatedBy *uuid.UUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type MinutesVersion struct {

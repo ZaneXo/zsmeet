@@ -9,6 +9,7 @@ import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName
 import { useTicker } from "../lib/useTicker";
 import { TrashList } from "./Trash";
 import { UploadDialog } from "./UploadDialog";
+import { VISIBILITY_LABEL } from "./AccessDialog";
 
 /** 网页录音的会议多久没收到新的分片，就不再显示「录音中」（录音的网页可能关掉了、断网了，或者暂停着）。 */
 const RECORDING_STALE_MS = 90_000;
@@ -92,7 +93,7 @@ export function MeetingsPage() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1.5">
           <h1 className="text-[26px] font-bold">会议</h1>
-          <p className="text-sm text-muted">在网页上录音，或者上传录音文件，自动转写、区分说话人并生成纪要。团队里的人都能看到这里的会议。</p>
+          <p className="text-sm text-muted">在网页上录音，或者上传录音文件，自动转写、区分说话人并生成纪要。会议默认团队里的人都能看到，创建者可以改成只给指定的人看。</p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
           <label className="relative block w-72 max-w-full">
@@ -210,6 +211,7 @@ export function MeetingsPage() {
                     {m.duration_sec > 0 && <span>{duration(m.duration_sec)}</span>}
                     <span>{SOURCE_LABEL[m.source]}</span>
                     <span>{m.owner_name}</span>
+                    {m.visibility !== "team" && <span>{VISIBILITY_LABEL[m.visibility]}</span>}
                   </div>
                   {m.status === "failed" && <div className="mt-2 text-sm leading-relaxed text-bad">{m.error}</div>}
                 </AppLink>

@@ -221,6 +221,30 @@ export interface paths {
         patch: operations["rename-meeting"];
         trace?: never;
     };
+    "/api/meetings/{id}/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 谁能看、谁能编辑这场会议
+         * @description 能看这场会议的人都能看。创建者和管理员总能看、能编辑，不在列表里。
+         */
+        get: operations["get-meeting-access"];
+        /**
+         * 改谁能看、谁能编辑这场会议
+         * @description 只有创建者和管理员能改。已经发到飞书群的卡片、导入的飞书文档不受影响。
+         */
+        put: operations["set-meeting-access"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/meetings/{id}/chunks": {
         parameters: {
             query?: never;
@@ -547,6 +571,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 团队里的人
+         * @description 没停用的成员，给会议指定谁能看、谁能编辑时选。所有登录的人都能看。
+         */
+        get: operations["list-people"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings/feishu": {
         parameters: {
             query?: never;
@@ -669,6 +713,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 录音保留多久 */
+        get: operations["get-retention"];
+        /**
+         * 保存录音保留多久
+         * @description 改短以后，后台巡检时（每分钟一次）会删掉已经过期的录音文件，删了不能恢复。转写和纪要不受影响。
+         */
+        put: operations["put-retention"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/setup": {
         parameters: {
             query?: never;
@@ -716,11 +781,39 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 可选的纪要模板 */
+        /**
+         * 可选的纪要模板
+         * @description 先是内置的四种，再是管理员自己定义的。
+         */
         get: operations["list-templates"];
         put?: never;
-        post?: never;
+        /** 新建纪要模板 */
+        post: operations["create-template"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/templates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 修改纪要模板
+         * @description 只能改自定义的模板。以后用它写的纪要按新的写法，已经写好的不变。
+         */
+        put: operations["update-template"];
+        post?: never;
+        /**
+         * 删除纪要模板
+         * @description 只能删自定义的模板。已经写好的纪要不受影响；还选着它的会议以后重新生成时用通用模板。
+         */
+        delete: operations["delete-template"];
         options?: never;
         head?: never;
         patch?: never;
@@ -827,6 +920,11 @@ export interface components {
             template?: string;
             /** @description 留空会用当前时间起一个 */
             title?: string;
+            /**
+             * @description 谁能看：团队所有人（默认）或者只有自己（管理员也能看）
+             * @enum {string}
+             */
+            visibility?: "team" | "private";
         };
         EditMinutesInputBody: {
             /** @description Markdown */
@@ -1034,6 +1132,12 @@ export interface components {
             /** @description 链接里的一次性凭证，只在这一次返回。完整链接是 <站点地址>/invite#<token> */
             token: string;
         };
+        Item: {
+            /** @description 除了看，还能编辑；不传是只能看 */
+            can_edit?: boolean;
+            /** Format: uuid */
+            user_id: string;
+        };
         LLMModelsInputBody: {
             /** @description 留空表示沿用已保存的 Key */
             api_key?: string;
@@ -1085,8 +1189,15 @@ export interface components {
             password: string;
         };
         Meeting: {
-            /** @description 当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口 */
+            /**
+             * Format: date-time
+             * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
+             */
+            audio_deleted_at?: string;
+            /** @description 当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口 */
             can_edit: boolean;
+            /** @description 当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以 */
+            can_manage: boolean;
             /** Format: date-time */
             created_at: string;
             /** Format: int64 */
@@ -1110,6 +1221,8 @@ export interface components {
              * @description 当前纪要的版本号，0 表示还没有纪要
              */
             minutes_version: number;
+            /** Format: uuid */
+            owner_id: string;
             owner_name: string;
             /**
              * Format: double
@@ -1137,10 +1250,31 @@ export interface components {
             title: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description 谁能看：团队所有人、指定的人、只有创建者（管理员总能看）
+             * @enum {string}
+             */
+            visibility: "team" | "members" | "private";
+        };
+        MeetingAccess: {
+            /** @description 单独指定的人。可见范围是团队所有人时，这里是还能编辑的人；是指定的人时，这里是能看的人（can_edit 的还能编辑） */
+            members: components["schemas"]["MeetingMember"][];
+            /**
+             * @description 谁能看：团队所有人、指定的人、只有创建者（管理员总能看）
+             * @enum {string}
+             */
+            visibility: "team" | "members" | "private";
         };
         MeetingListItem: {
-            /** @description 当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口 */
+            /**
+             * Format: date-time
+             * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
+             */
+            audio_deleted_at?: string;
+            /** @description 当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口 */
             can_edit: boolean;
+            /** @description 当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以 */
+            can_manage: boolean;
             /** Format: date-time */
             created_at: string;
             /** Format: int64 */
@@ -1166,6 +1300,8 @@ export interface components {
              * @description 当前纪要的版本号，0 表示还没有纪要
              */
             minutes_version: number;
+            /** Format: uuid */
+            owner_id: string;
             owner_name: string;
             /**
              * Format: double
@@ -1193,6 +1329,21 @@ export interface components {
             title: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description 谁能看：团队所有人、指定的人、只有创建者（管理员总能看）
+             * @enum {string}
+             */
+            visibility: "team" | "members" | "private";
+        };
+        MeetingMember: {
+            /** @description 除了看，还能编辑 */
+            can_edit: boolean;
+            /** @description 这个人已经停用了，登录不了 */
+            disabled: boolean;
+            email: string;
+            name: string;
+            /** Format: uuid */
+            user_id: string;
         };
         Member: {
             /** Format: date-time */
@@ -1246,6 +1397,15 @@ export interface components {
             /** @description 是在服务器上用 zsmeet reset-link 命令生成的，不是哪位管理员在网页上生成的 */
             from_server: boolean;
         };
+        PeopleOutputBody: {
+            items: components["schemas"]["Person"][];
+        };
+        Person: {
+            email: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
         RegenerateMinutesInputBody: {
             /** @description 用哪个纪要模板 */
             template: string;
@@ -1264,6 +1424,20 @@ export interface components {
             expires_at: string;
             /** @description 链接里的一次性凭证，只在这一次返回。完整链接是 <站点地址>/reset#<token> */
             token: string;
+        };
+        RetentionInputBody: {
+            /**
+             * Format: int64
+             * @description 录音保留多少天，7 到 3650，或者 0 表示一直保留
+             */
+            audio_days: number;
+        };
+        RetentionOutputBody: {
+            /**
+             * Format: int64
+             * @description 录音保留多少天，0 表示一直保留。过了保留期只删录音文件，转写和纪要一直留着
+             */
+            audio_days: number;
         };
         SaveMarksInputBody: {
             /** @description 全部标记（整份替换）：录音开始后的秒数，不算暂停的时间 */
@@ -1310,6 +1484,12 @@ export interface components {
             start: number;
             text: string;
         };
+        SetMeetingAccessInputBody: {
+            /** @description 单独指定的人，整份替换；不传表示一个都没有。可见范围是只有自己时忽略（清空） */
+            members?: components["schemas"]["Item"][] | null;
+            /** @enum {string} */
+            visibility: "team" | "members" | "private";
+        };
         SetupInputBody: {
             /** Format: email */
             email: string;
@@ -1335,7 +1515,17 @@ export interface components {
             version: string;
         };
         Template: {
+            /** @description 管理员自己定义的模板（可以改、可以删）；内置的模板是 false */
+            custom: boolean;
+            /** @description 纪要要有哪几部分、每部分写什么（交给大模型的说明） */
+            guide: string;
             id: string;
+            name: string;
+        };
+        TemplateBody: {
+            /** @description 纪要要有哪几部分、每部分写什么，一行一部分 */
+            guide: string;
+            /** @description 模板的名字，选模板时显示 */
             name: string;
         };
         TemplatesOutputBody: {
@@ -1353,8 +1543,15 @@ export interface components {
             items: components["schemas"]["TrashedMeeting"][];
         };
         TrashedMeeting: {
-            /** @description 当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口 */
+            /**
+             * Format: date-time
+             * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
+             */
+            audio_deleted_at?: string;
+            /** @description 当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口 */
             can_edit: boolean;
+            /** @description 当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以 */
+            can_manage: boolean;
             /** Format: date-time */
             created_at: string;
             /**
@@ -1385,6 +1582,8 @@ export interface components {
              * @description 当前纪要的版本号，0 表示还没有纪要
              */
             minutes_version: number;
+            /** Format: uuid */
+            owner_id: string;
             owner_name: string;
             /**
              * Format: double
@@ -1417,6 +1616,11 @@ export interface components {
             title: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description 谁能看：团队所有人、指定的人、只有创建者（管理员总能看）
+             * @enum {string}
+             */
+            visibility: "team" | "members" | "private";
         };
         UpdateMemberInputBody: {
             /** @description true 停用，false 启用；不传表示不改 */
@@ -1873,6 +2077,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Meeting"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-meeting-access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingAccess"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "set-meeting-access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetMeetingAccessInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingAccess"];
                 };
             };
             /** @description Error */
@@ -2522,6 +2792,35 @@ export interface operations {
             };
         };
     };
+    "list-people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PeopleOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "get-feishu-settings": {
         parameters: {
             query?: never;
@@ -2772,6 +3071,68 @@ export interface operations {
             };
         };
     };
+    "get-retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetentionOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "put-retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RetentionInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetentionOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     setup: {
         parameters: {
             query?: never;
@@ -2851,6 +3212,103 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TemplatesOutputBody"];
                 };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "create-template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TemplateBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Template"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "update-template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TemplateBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Template"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "delete-template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Error */
             default: {

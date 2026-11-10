@@ -8,12 +8,15 @@ import type { User } from "../api/client";
 import { Button, Card, Field, Input, Notice, Select, Spinner } from "../components/ui";
 import { FeishuSettingsSection } from "./FeishuSettings";
 import { MembersSection } from "./Members";
+import { TemplateSettingsSection } from "./TemplateSettings";
 
 const SECTIONS = [
   { key: "account", label: "账号", adminOnly: false },
   { key: "members", label: "成员", adminOnly: true },
   { key: "llm", label: "大模型", adminOnly: true },
+  { key: "templates", label: "纪要模板", adminOnly: true },
   { key: "feishu", label: "飞书", adminOnly: true },
+  { key: "retention", label: "录音保留", adminOnly: true },
 ] as const;
 
 type SectionKey = (typeof SECTIONS)[number]["key"];
@@ -53,7 +56,9 @@ export function SettingsPage({ user }: { user: User }) {
           {current === "account" && <AccountSection user={user} />}
           {current === "members" && <MembersSection me={user} />}
           {current === "llm" && <LLMSettingsCard />}
+          {current === "templates" && <TemplateSettingsSection />}
           {current === "feishu" && <FeishuSettingsSection />}
+          {current === "retention" && <RetentionCard />}
         </div>
       </div>
     </div>
@@ -290,6 +295,90 @@ function LLMSettingsCard() {
         <p className="rounded-xl bg-canvas px-4 py-3 text-[13px] leading-relaxed text-ink-2">
           语音识别在你自己的服务器上完成，录音不会发给任何外部服务。只有转写出来的文字会发给上面填的大模型；用自己部署的模型，数据就完全不出内网。
         </p>
+      </form>
+    </Card>
+  );
+}
+
+// 录音保留期能选的几档（天），0 表示一直保留
+const RETENTION_CHOICES = [
+  [30, "30 天"],
+  [90, "90 天"],
+  [180, "半年"],
+  [365, "一年"],
+  [730, "两年"],
+  [0, "一直保留"],
+] as const;
+
+/** 录音保留多久：过了保留期只删录音文件，转写和纪要一直留着。 */
+function RetentionCard() {
+  const saved = useQuery({
+    queryKey: ["settings", "retention"],
+    queryFn: () => unwrap(api.GET("/api/settings/retention")),
+  });
+  const [days, setDays] = useState<number | null>(null);
+  const save = useMutation({
+    mutationFn: (audio_days: number) => unwrap(api.PUT("/api/settings/retention", { body: { audio_days } })),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["settings", "retention"], data);
+      setDays(null);
+      // 已经过期的录音删掉以后，会议页上要跟着变
+      void queryClient.invalidateQueries({ queryKey: ["meeting"] });
+    },
+  });
+
+  if (saved.isPending) return <Spinner label="正在加载配置…" />;
+  if (saved.isError) return <Notice tone="bad">{errorMessage(saved.error)}</Notice>;
+
+  const current = saved.data.audio_days;
+  const chosen = days ?? current;
+  const known = RETENTION_CHOICES.some(([d]) => d === current);
+  // 改短了：已经超过新期限的录音保存以后马上就会被删
+  const shorter = chosen !== 0 && (current === 0 || chosen < current);
+
+  return (
+    <Card className="p-6">
+      <form
+        className="flex flex-col gap-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          save.mutate(chosen);
+        }}
+      >
+        <div className="flex flex-col gap-1">
+          <h2 className="text-lg font-bold">录音保留多久</h2>
+          <p className="text-[13px] leading-relaxed text-muted">
+            录音文件比较占地方，也是最敏感的数据。过了保留期只删录音文件，转写和纪要一直留着，照样能看、能搜；只是不能再回放、重新转写。
+          </p>
+        </div>
+        <Field label="录音保留" htmlFor="retention-days" hint="从会议创建的时候算起。">
+          <Select
+            id="retention-days"
+            className="max-w-xs"
+            value={chosen}
+            onChange={(e) => {
+              setDays(Number(e.target.value));
+              save.reset();
+            }}
+          >
+            {!known && <option value={current}>{current} 天</option>}
+            {RETENTION_CHOICES.map(([d, label]) => (
+              <option key={d} value={d}>
+                {label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {shorter && chosen !== current && (
+          <Notice tone="warn">保存以后，已经超过 {chosen} 天的会议的录音会在一分钟内删除，删了不能恢复。</Notice>
+        )}
+        {save.isError && <Notice tone="bad">{errorMessage(save.error)}</Notice>}
+        {save.isSuccess && <Notice tone="ok">已保存。</Notice>}
+        <div>
+          <Button type="submit" variant="primary" disabled={save.isPending || chosen === current}>
+            保存
+          </Button>
+        </div>
       </form>
     </Card>
   );

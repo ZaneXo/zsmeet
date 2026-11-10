@@ -18,6 +18,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/llm"
 	"github.com/ZaneXo/zsmeet/internal/minutes"
 	"github.com/ZaneXo/zsmeet/internal/search"
+	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/storage"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
@@ -301,7 +302,11 @@ func (r *run) writeMinutes(ctx context.Context, segs []transcript.Segment) error
 	}
 
 	r.report(ctx, StageMinutes, 0)
-	tpl, ok := minutes.Find(r.m.Template)
+	// 选的模板被管理员删掉了的话用通用模板
+	tpl, ok, err := service.FindTemplate(ctx, w.q, r.m.Template)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		tpl = minutes.Templates[0]
 	}
@@ -346,8 +351,9 @@ func (r *run) writeMinutes(ctx context.Context, segs []transcript.Segment) error
 		if err != nil {
 			return err
 		}
-		// 第一份纪要生成后自动发到飞书群（管理员打开了的话）。重新生成的不自动发，免得刷屏
-		if source == "auto" && feishuCfg.Ready() && feishuCfg.AutoPush && feishuCfg.ChatID != "" {
+		// 第一份纪要生成后自动发到飞书群（管理员打开了的话）。重新生成的不自动发，免得刷屏。
+		// 只发团队里所有人都能看的会议：指定了人、只有自己能看的会议不能自动发到群里
+		if source == "auto" && m.Visibility == service.VisibilityTeam && feishuCfg.Ready() && feishuCfg.AutoPush && feishuCfg.ChatID != "" {
 			if err := w.queueShare(ctx, tx, q, id, version, feishuCfg); err != nil {
 				return err
 			}

@@ -122,3 +122,56 @@ func (h *Handlers) ListLLMModels(ctx context.Context, in *LLMModelsInput) (*LLMM
 	out.Body.Models = models
 	return out, nil
 }
+
+// ---- 录音保留期 ----
+
+type RetentionOutput struct {
+	Body struct {
+		AudioDays int `json:"audio_days" doc:"录音保留多少天，0 表示一直保留。过了保留期只删录音文件，转写和纪要一直留着"`
+	}
+}
+
+var getRetentionOp = huma.Operation{
+	OperationID: "get-retention",
+	Method:      http.MethodGet,
+	Path:        "/api/settings/retention",
+	Summary:     "录音保留多久",
+	Tags:        []string{"设置"},
+	Security:    adminOnly,
+}
+
+func (h *Handlers) GetRetention(ctx context.Context, _ *struct{}) (*RetentionOutput, error) {
+	r, err := h.svc.Retention(ctx)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	out := &RetentionOutput{}
+	out.Body.AudioDays = r.AudioDays
+	return out, nil
+}
+
+type RetentionInput struct {
+	Body struct {
+		AudioDays int `json:"audio_days" minimum:"0" maximum:"3650" doc:"录音保留多少天，7 到 3650，或者 0 表示一直保留"`
+	}
+}
+
+var putRetentionOp = huma.Operation{
+	OperationID: "put-retention",
+	Method:      http.MethodPut,
+	Path:        "/api/settings/retention",
+	Summary:     "保存录音保留多久",
+	Description: "改短以后，后台巡检时（每分钟一次）会删掉已经过期的录音文件，删了不能恢复。转写和纪要不受影响。",
+	Tags:        []string{"设置"},
+	Security:    adminOnly,
+}
+
+func (h *Handlers) PutRetention(ctx context.Context, in *RetentionInput) (*RetentionOutput, error) {
+	r, err := h.svc.SaveRetention(ctx, in.Body.AudioDays)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	out := &RetentionOutput{}
+	out.Body.AudioDays = r.AudioDays
+	return out, nil
+}

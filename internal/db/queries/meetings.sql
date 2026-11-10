@@ -1,6 +1,6 @@
 -- name: CreateMeeting :one
-INSERT INTO meetings (owner_id, title, source, template, hotwords)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO meetings (owner_id, title, source, template, hotwords, visibility)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: GetMeeting :one
@@ -12,15 +12,19 @@ WHERE m.id = $1;
 SELECT * FROM meetings WHERE id = $1 FOR UPDATE;
 
 -- name: ListMeetings :many
--- 一期可见范围固定为团队，visibility 先存着，二期按它过滤。
+-- 只列 viewer 能看的会议（管理员都能看，见 service.Access）。
 -- query 是 Go 里拼好的 tsquery（见 search.TSQuery），为空表示不筛选。
 -- owner 不为空时只列这个人创建的。
 -- before_at、before_id 用来翻页：只列排在这场会议后面的（搜索时一页一页取候选）。
-SELECT sqlc.embed(m), u.name AS owner_name
+SELECT sqlc.embed(m), u.name AS owner_name,
+       (mm.user_id IS NOT NULL)::bool AS is_member, coalesce(mm.can_edit, false)::bool AS member_can_edit
 FROM meetings m
 JOIN users u ON u.id = m.owner_id
 LEFT JOIN meeting_search s ON s.meeting_id = m.id
+LEFT JOIN meeting_members mm ON mm.meeting_id = m.id AND mm.user_id = sqlc.arg('viewer')::uuid
 WHERE m.deleted_at IS NULL
+  AND (sqlc.arg('is_admin')::bool OR m.owner_id = sqlc.arg('viewer')::uuid OR m.visibility = 'team'
+       OR (m.visibility = 'members' AND mm.user_id IS NOT NULL))
   AND (sqlc.narg('owner')::uuid IS NULL OR m.owner_id = sqlc.narg('owner')::uuid)
   AND (sqlc.narg('query')::text IS NULL OR s.doc @@ (sqlc.narg('query')::text)::tsquery)
   AND (sqlc.narg('before_at')::timestamptz IS NULL
@@ -143,11 +147,15 @@ ORDER BY mv.version DESC;
 UPDATE meetings SET terms = $2 WHERE id = $1;
 
 -- name: TermsMatching :many
--- 全部会议的术语表里，正确写法或者听错写法就是 q 的那些条目（不分大小写、不管空格：「Go 语言」和「Go语言」算一样）。
--- 搜索时用来扩展搜索词
+-- viewer 能看的会议的术语表里，正确写法或者听错写法就是 q 的那些条目（不分大小写、不管空格：「Go 语言」和「Go语言」算一样）。
+-- 搜索时用来扩展搜索词。看不到的会议的术语表不用：里面的人名、项目名也算会议内容
 SELECT DISTINCT (t.value->>'term')::text AS term, (t.value->'variants')::jsonb AS variants
-FROM meetings m, jsonb_array_elements(m.terms) AS t
+FROM meetings m
+LEFT JOIN meeting_members mm ON mm.meeting_id = m.id AND mm.user_id = sqlc.arg('viewer')::uuid
+CROSS JOIN LATERAL jsonb_array_elements(m.terms) AS t
 WHERE m.deleted_at IS NULL
+  AND (sqlc.arg('is_admin')::bool OR m.owner_id = sqlc.arg('viewer')::uuid OR m.visibility = 'team'
+       OR (m.visibility = 'members' AND mm.user_id IS NOT NULL))
   AND (regexp_replace(lower(t.value->>'term'), '\s+', '', 'g') = regexp_replace(lower(sqlc.arg('q')::text), '\s+', '', 'g')
    OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.value->'variants') AS v
               WHERE regexp_replace(lower(v), '\s+', '', 'g') = regexp_replace(lower(sqlc.arg('q')::text), '\s+', '', 'g')));
@@ -218,3 +226,16 @@ LIMIT 100;
 
 -- name: SetMeetingSpeakers :exec
 UPDATE meetings SET speakers = $2, updated_at = now() WHERE id = $1;
+
+-- name: ExpiredAudio :many
+-- 录音过了保留期的会议（创建满 days 天、录音还在、没在处理的），一次最多 100 场
+SELECT id, audio_key FROM meetings
+WHERE audio_key <> '' AND audio_deleted_at IS NULL AND status IN ('done', 'failed')
+  AND created_at < now() - make_interval(days => sqlc.arg('days')::int)
+ORDER BY created_at
+LIMIT 100;
+
+-- name: MarkAudioDeleted :execrows
+-- 记下录音已经删除。会议这时又开始处理（重新转写）的话不删
+UPDATE meetings SET audio_deleted_at = now(), updated_at = now()
+WHERE id = $1 AND audio_deleted_at IS NULL AND status IN ('done', 'failed');

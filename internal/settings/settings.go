@@ -124,3 +124,35 @@ func (s *Store) SaveFeishu(ctx context.Context, f Feishu) error {
 	}
 	return s.q.PutSetting(ctx, sqlc.PutSettingParams{Key: keyFeishu, Value: raw})
 }
+
+// Retention 是录音保留多久。过了保留期只删录音文件，转写和纪要一直留着。
+type Retention struct {
+	// 录音保留多少天，0 表示一直保留
+	AudioDays int `json:"audio_days"`
+}
+
+// DefaultAudioDays 是管理员没设置过时录音保留的天数。
+const DefaultAudioDays = 90
+
+const keyRetention = "retention"
+
+// Retention 返回录音保留多久；没设置过时是 DefaultAudioDays 天。
+func (s *Store) Retention(ctx context.Context) (Retention, error) {
+	raw, err := s.q.GetSetting(ctx, keyRetention)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Retention{AudioDays: DefaultAudioDays}, nil
+	}
+	if err != nil {
+		return Retention{}, err
+	}
+	var r Retention
+	return r, json.Unmarshal(raw, &r)
+}
+
+func (s *Store) SaveRetention(ctx context.Context, r Retention) error {
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	return s.q.PutSetting(ctx, sqlc.PutSettingParams{Key: keyRetention, Value: raw})
+}

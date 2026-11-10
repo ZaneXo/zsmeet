@@ -103,7 +103,7 @@ func Start(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, store *st
 
 	workers := river.NewWorkers()
 	river.AddWorker(workers, w)
-	river.AddWorker(workers, &reaper{pool: pool, store: w.store})
+	river.AddWorker(workers, &reaper{pool: pool, store: w.store, settings: st})
 	river.AddWorker(workers, &shareWorker{w: w})
 	river.AddWorker(workers, &importWorker{w: w})
 

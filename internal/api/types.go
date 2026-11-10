@@ -37,20 +37,25 @@ type Meeting struct {
 	Hotwords    string `json:"hotwords"`
 	DurationSec int    `json:"duration_sec"`
 	HasAudio    bool   `json:"has_audio" doc:"录音还在不在（过了保留期会被删除）"`
+	// 录音过了保留期被删除的时间；没删时没有这一项
+	AudioDeletedAt *time.Time `json:"audio_deleted_at,omitempty" doc:"录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项"`
 	// 0 表示还没有纪要
 	MinutesVersion int               `json:"minutes_version" doc:"当前纪要的版本号，0 表示还没有纪要"`
-	CanEdit        bool              `json:"can_edit" doc:"当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口"`
+	Visibility     string            `json:"visibility" enum:"team,members,private" doc:"谁能看：团队所有人、指定的人、只有创建者（管理员总能看）"`
+	CanEdit        bool              `json:"can_edit" doc:"当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口"`
+	CanManage      bool              `json:"can_manage" doc:"当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以"`
 	Marks          []float64         `json:"marks" doc:"网页录音时标记的重点：录音开始后的秒数"`
 	Speakers       map[string]string `json:"speakers" nullable:"false" doc:"给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」"`
 	LastChunkAt    *time.Time        `json:"last_chunk_at,omitempty" doc:"最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次"`
 
+	OwnerID   string    `json:"owner_id" format:"uuid"`
 	OwnerName string    `json:"owner_name"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// toMeeting 把会议转成接口的样子。viewer 是当前登录的人，can_edit 是对他而言的。
-func toMeeting(m service.Meeting, viewer sqlc.User) Meeting {
+// toMeeting 把会议转成接口的样子。can_edit、can_manage 是对取出这场会议的人而言的（见 service.Access）。
+func toMeeting(m service.Meeting) Meeting {
 	speakers := map[string]string{}
 	for idx, name := range transcript.ParseNames(m.Speakers) {
 		speakers[strconv.Itoa(idx)] = name
@@ -71,11 +76,15 @@ func toMeeting(m service.Meeting, viewer sqlc.User) Meeting {
 		Hotwords:       m.Hotwords,
 		DurationSec:    int(m.DurationSec),
 		HasAudio:       m.AudioKey != "" && m.AudioDeletedAt == nil,
+		AudioDeletedAt: m.AudioDeletedAt,
 		MinutesVersion: int(m.CurrentVersion),
-		CanEdit:        service.CanModify(viewer, m.Meeting),
+		Visibility:     m.Visibility,
+		CanEdit:        m.Access.Edit,
+		CanManage:      m.Access.Manage,
 		Marks:          marks,
 		Speakers:       speakers,
 		LastChunkAt:    m.LastChunkAt,
+		OwnerID:        m.OwnerID.String(),
 		OwnerName:      m.OwnerName,
 		CreatedAt:      m.CreatedAt,
 		UpdatedAt:      m.UpdatedAt,

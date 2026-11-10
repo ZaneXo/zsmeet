@@ -33,33 +33,14 @@ const (
 	maxTitleChars  = 200
 )
 
-// Meeting 是会议加上创建者的名字。
+// Meeting 是会议加上创建者的名字，和取出它的人对它的权限。
 type Meeting struct {
 	sqlc.Meeting
 	OwnerName string
 	// 搜索时命中的句子（转写）和行（纪要），不是搜索时为空
 	Hits []search.Hit
-}
-
-// CanModify 决定谁能修改一场会议：创建者和管理员。
-// 查看不受限制，所有成员都能看到全部会议。
-// 以后要放开成「所有人可编辑」或者支持「指定成员可编辑」，只改这一处。
-func CanModify(user sqlc.User, m sqlc.Meeting) bool {
-	return user.Role == "admin" || m.OwnerID == user.ID
-}
-
-var errNotAllowed = &Error{Forbidden, "只有这场会议的创建者和管理员能修改它"}
-
-// modifiable 取出会议，并确认 user 有权修改。
-func (s *Service) modifiable(ctx context.Context, user sqlc.User, id uuid.UUID) (Meeting, error) {
-	m, err := s.GetMeeting(ctx, id)
-	if err != nil {
-		return Meeting{}, err
-	}
-	if !CanModify(user, m.Meeting) {
-		return Meeting{}, errNotAllowed
-	}
-	return m, nil
+	// 取出这场会议的人能对它做什么（见 Access）
+	Access Access
 }
 
 type NewMeeting struct {
@@ -67,6 +48,8 @@ type NewMeeting struct {
 	Source   string
 	Template string
 	Hotwords string
+	// 谁能看：team（默认）或者 private。指定具体的人在建好以后的会议页面上做
+	Visibility string
 }
 
 // CreateMeeting 新建一场等待上传的会议。
@@ -84,26 +67,33 @@ func (s *Service) CreateMeeting(ctx context.Context, user sqlc.User, in NewMeeti
 	if in.Template == "" {
 		in.Template = minutes.Templates[0].ID
 	}
-	if _, ok := minutes.Find(in.Template); !ok {
-		return Meeting{}, invalid("没有这个纪要模板：%s", in.Template)
+	if err := s.checkTemplate(ctx, in.Template); err != nil {
+		return Meeting{}, err
 	}
 	hotwords := strings.TrimSpace(in.Hotwords)
 	if utf8.RuneCountInString(hotwords) > 500 {
 		return Meeting{}, invalid("热词太多了，最长 500 个字")
+	}
+	switch in.Visibility {
+	case "":
+		in.Visibility = VisibilityTeam
+	case VisibilityTeam, VisibilityPrivate:
+	default:
+		return Meeting{}, invalid("新建会议时可见范围只能是团队所有人或者只有自己，指定具体的人请建好以后在会议页面上设置")
 	}
 
 	var m sqlc.Meeting
 	err = s.tx(ctx, func(_ pgx.Tx, q *sqlc.Queries) error {
 		var err error
 		m, err = q.CreateMeeting(ctx, sqlc.CreateMeetingParams{
-			OwnerID: user.ID, Title: title, Source: in.Source, Template: in.Template, Hotwords: hotwords,
+			OwnerID: user.ID, Title: title, Source: in.Source, Template: in.Template, Hotwords: hotwords, Visibility: in.Visibility,
 		})
 		if err != nil {
 			return err
 		}
 		return search.Reindex(ctx, q, m.ID)
 	})
-	return Meeting{Meeting: m, OwnerName: user.Name}, err
+	return Meeting{Meeting: m, OwnerName: user.Name, Access: fullAccess}, err
 }
 
 func cleanTitle(title string) (string, error) {
@@ -132,29 +122,29 @@ type MeetingList struct {
 	Partial bool
 }
 
-// ListMeetings 按时间倒序列出会议。owner 不为 nil 时只列这个人创建的。
+// ListMeetings 按时间倒序列出 viewer 能看的会议。owner 不为 nil 时只列这个人创建的。
 // query 不为空时在标题、纪要和转写里搜索，每场会议带上命中的句子（Meeting.Hits）：
 // 先列真的搜到的会议，不够 limit 场时再列只是错了一个字的，都按时间倒序。
-func (s *Service) ListMeetings(ctx context.Context, query string, owner *uuid.UUID, limit int) (MeetingList, error) {
+func (s *Service) ListMeetings(ctx context.Context, viewer sqlc.User, query string, owner *uuid.UUID, limit int) (MeetingList, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		rows, err := s.q.ListMeetings(ctx, sqlc.ListMeetingsParams{Owner: owner, MaxRows: int32(limit)})
+		rows, err := s.q.ListMeetings(ctx, sqlc.ListMeetingsParams{Viewer: viewer.ID, IsAdmin: viewer.Role == "admin", Owner: owner, MaxRows: int32(limit)})
 		if err != nil {
 			return MeetingList{}, err
 		}
 		out := make([]Meeting, len(rows))
 		for i, r := range rows {
-			out[i] = Meeting{Meeting: r.Meeting, OwnerName: r.OwnerName}
+			out[i] = listed(viewer, r)
 		}
 		return MeetingList{Items: out}, nil
 	}
 
-	spellings, err := s.spellings(ctx, query)
+	spellings, err := s.spellings(ctx, viewer, query)
 	if err != nil {
 		return MeetingList{}, err
 	}
 	list := MeetingList{Items: []Meeting{}, Spellings: spellings}
-	sc := &searchScan{s: s, owner: owner, spellings: spellings, limit: limit, list: &list, seen: map[uuid.UUID]bool{}}
+	sc := &searchScan{s: s, viewer: viewer, owner: owner, spellings: spellings, limit: limit, list: &list, seen: map[uuid.UUID]bool{}}
 	// 搜的全是标点符号之类切不出词的东西时什么都匹配不上，tsquery 是空的
 	if exact := search.TSQuery(spellings); exact != "" {
 		if _, err := sc.run(ctx, exact, 0, func(r search.Result) bool { return r.Matched }); err != nil {
@@ -170,9 +160,15 @@ func (s *Service) ListMeetings(ctx context.Context, query string, owner *uuid.UU
 	return list, nil
 }
 
+// listed 把列表里的一行变成 Meeting，带上 viewer 的权限。
+func listed(viewer sqlc.User, r sqlc.ListMeetingsRow) Meeting {
+	return Meeting{Meeting: r.Meeting, OwnerName: r.OwnerName, Access: accessFor(viewer, r.Meeting, r.IsMember, r.MemberCanEdit)}
+}
+
 // searchScan 是一次搜索的进度：按时间从新到旧一页一页取索引粗筛出的候选会议，逐句找命中，留下的放进 list。
 type searchScan struct {
 	s         *Service
+	viewer    sqlc.User
 	owner     *uuid.UUID
 	spellings []string
 	limit     int
@@ -184,7 +180,9 @@ type searchScan struct {
 // run 用 tsq 粗筛候选，keep 返回 true 的留下，直到凑够 limit 场或者候选取完。
 // budget 大于 0 时最多检查这么多个候选；返回值表示是不是因为它停下的（还有没检查的候选）。
 func (sc *searchScan) run(ctx context.Context, tsq string, budget int, keep func(search.Result) bool) (bool, error) {
-	params := sqlc.ListMeetingsParams{Query: &tsq, Owner: sc.owner, MaxRows: searchPage}
+	params := sqlc.ListMeetingsParams{
+		Viewer: sc.viewer.ID, IsAdmin: sc.viewer.Role == "admin", Query: &tsq, Owner: sc.owner, MaxRows: searchPage,
+	}
 	checked := 0
 	for len(sc.list.Items) < sc.limit {
 		rows, err := sc.s.q.ListMeetings(ctx, params)
@@ -212,7 +210,9 @@ func (sc *searchScan) run(ctx context.Context, tsq string, budget int, keep func
 			if !keep(res) {
 				continue
 			}
-			sc.list.Items = append(sc.list.Items, Meeting{Meeting: r.Meeting, OwnerName: r.OwnerName, Hits: res.Hits})
+			m := listed(sc.viewer, r)
+			m.Hits = res.Hits
+			sc.list.Items = append(sc.list.Items, m)
 			if len(sc.list.Items) >= sc.limit {
 				return false, nil
 			}
@@ -253,7 +253,7 @@ func (s *Service) searchTexts(ctx context.Context, ids []uuid.UUID) (map[uuid.UU
 // （它就是某个词的正确写法或者听错写法时，这个词的所有写法都加进来）。
 // 比较时不分大小写、不管空格，和 TermsMatching 的口径一样。太短、没有字的写法不要（见 minutes.UsefulTerm）；
 // 包含了前面某种写法的也不要（「这识别模型」）：搜前面那种写法时本来就能找到它。
-func (s *Service) spellings(ctx context.Context, query string) ([]string, error) {
+func (s *Service) spellings(ctx context.Context, viewer sqlc.User, query string) ([]string, error) {
 	out := []string{query}
 	keys := []string{spellingKey(query)}
 	add := func(sp string) {
@@ -265,7 +265,7 @@ func (s *Service) spellings(ctx context.Context, query string) ([]string, error)
 		keys = append(keys, key)
 		out = append(out, sp)
 	}
-	rows, err := s.q.TermsMatching(ctx, query)
+	rows, err := s.q.TermsMatching(ctx, sqlc.TermsMatchingParams{Viewer: viewer.ID, IsAdmin: viewer.Role == "admin", Q: query})
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +305,8 @@ func (s *Service) transcriptsFor(ctx context.Context, ids []uuid.UUID) (map[uuid
 
 var errNoMeeting = notFound("会议不存在，可能已被删除")
 
-func (s *Service) GetMeeting(ctx context.Context, id uuid.UUID) (Meeting, error) {
+// getMeeting 取出一场会议，不检查权限（后台和权限检查本身用）。回收站里的会议当作不存在。
+func (s *Service) getMeeting(ctx context.Context, id uuid.UUID) (Meeting, error) {
 	row, err := s.q.GetMeeting(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && row.Meeting.DeletedAt != nil) {
 		// 放进回收站的会议当作不存在，回收站另有自己的接口
@@ -322,7 +323,7 @@ func (s *Service) RenameMeeting(ctx context.Context, user sqlc.User, id uuid.UUI
 	if title == "" {
 		return Meeting{}, invalid("标题不能为空")
 	}
-	if _, err := s.modifiable(ctx, user, id); err != nil {
+	if _, err := s.editable(ctx, user, id); err != nil {
 		return Meeting{}, err
 	}
 	err = s.tx(ctx, func(_ pgx.Tx, q *sqlc.Queries) error {
@@ -337,7 +338,7 @@ func (s *Service) RenameMeeting(ctx context.Context, user sqlc.User, id uuid.UUI
 	if err != nil {
 		return Meeting{}, err
 	}
-	return s.GetMeeting(ctx, id)
+	return s.GetMeeting(ctx, user, id)
 }
 
 // PutChunk 保存一个上传分片。同一片可以重复上传（断点续传时会发生），后一次覆盖前一次。
@@ -345,7 +346,7 @@ func (s *Service) PutChunk(ctx context.Context, user sqlc.User, id uuid.UUID, se
 	if seq < 0 || seq >= MaxChunks {
 		return invalid("分片序号超出范围")
 	}
-	m, err := s.modifiable(ctx, user, id)
+	m, err := s.manageable(ctx, user, id)
 	if err != nil {
 		return err
 	}
@@ -367,8 +368,8 @@ func (s *Service) PutChunk(ctx context.Context, user sqlc.User, id uuid.UUID, se
 }
 
 // ReceivedChunks 返回已经收到的分片序号，网页断点续传时用它跳过传过的。
-func (s *Service) ReceivedChunks(ctx context.Context, id uuid.UUID) ([]int, error) {
-	if _, err := s.GetMeeting(ctx, id); err != nil {
+func (s *Service) ReceivedChunks(ctx context.Context, user sqlc.User, id uuid.UUID) ([]int, error) {
+	if _, err := s.GetMeeting(ctx, user, id); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.ListChunks(ctx, id)
@@ -392,7 +393,7 @@ func (s *Service) CompleteUpload(ctx context.Context, user sqlc.User, id uuid.UU
 	if err != nil {
 		return Meeting{}, err
 	}
-	if _, err := s.modifiable(ctx, user, id); err != nil {
+	if _, err := s.manageable(ctx, user, id); err != nil {
 		return Meeting{}, err
 	}
 	rows, err := s.q.ListChunks(ctx, id)
@@ -429,7 +430,7 @@ func (s *Service) SaveMarks(ctx context.Context, user sqlc.User, id uuid.UUID, m
 	if err != nil {
 		return err
 	}
-	if _, err := s.modifiable(ctx, user, id); err != nil {
+	if _, err := s.manageable(ctx, user, id); err != nil {
 		return err
 	}
 	n, err := s.q.SetMeetingMarks(ctx, sqlc.SetMeetingMarksParams{ID: id, Marks: cleaned})
@@ -469,25 +470,36 @@ func cleanMarks(marks []float64) ([]float32, error) {
 
 // Retry 重新处理一场失败的会议。已经有转写的话只重写纪要。
 func (s *Service) Retry(ctx context.Context, user sqlc.User, id uuid.UUID) (Meeting, error) {
-	if _, err := s.modifiable(ctx, user, id); err != nil {
+	m, err := s.editable(ctx, user, id)
+	if err != nil {
 		return Meeting{}, err
+	}
+	// 录音过了保留期被删了、又还没有转写的话，重试也只能失败（有转写的照常重试，只重写纪要）
+	if m.AudioDeletedAt != nil {
+		if _, err := s.q.GetTranscript(ctx, id); errors.Is(err, pgx.ErrNoRows) {
+			return Meeting{}, conflict("这场会议的录音已经过了保留期被删除，又还没有转写出来，没法重新处理")
+		} else if err != nil {
+			return Meeting{}, err
+		}
 	}
 	return s.enqueue(ctx, user, id, []string{"failed"}, nil, "只有处理失败的会议才能重试")
 }
 
+var errAudioGone = conflict("这场会议的录音已经不在了（可能过了保留期），没法重新转写")
+
 // Retranscribe 用现在的识别模型重新转写一场会议（换了识别模型，或者转写有问题时用），
 // 转完会重新生成纪要，作为一个新版本，之前的版本都保留。
 func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID) (Meeting, error) {
-	m, err := s.modifiable(ctx, user, id)
+	m, err := s.editable(ctx, user, id)
 	if err != nil {
 		return Meeting{}, err
 	}
 	if m.AudioKey == "" || m.AudioDeletedAt != nil || !s.store.Exists(m.AudioKey) {
-		return Meeting{}, conflict("这场会议的录音已经不在了（可能过了保留期），没法重新转写")
+		return Meeting{}, errAudioGone
 	}
 	runID := uuid.New()
 	err = s.tx(ctx, func(tx pgx.Tx, q *sqlc.Queries) error {
-		_, err := q.QueueMeeting(ctx, sqlc.QueueMeetingParams{
+		queued, err := q.QueueMeeting(ctx, sqlc.QueueMeetingParams{
 			ID: id, RunID: &runID, RunBy: &user.ID, FromStatus: []string{"done", "failed"},
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -495,6 +507,10 @@ func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID
 		}
 		if err != nil {
 			return err
+		}
+		// 上面检查完以后，巡检可能刚好把过了保留期的录音删了（它只删已完成、失败的会议，排上队以后就不会再删）
+		if queued.AudioDeletedAt != nil {
+			return errAudioGone
 		}
 		// 后台看到这个标记就从存好的录音重新识别。旧的转写先留着：重新识别失败时转写和纪要都还在
 		if err := q.MarkRetranscribe(ctx, id); err != nil {
@@ -506,15 +522,15 @@ func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID
 	if err != nil {
 		return Meeting{}, err
 	}
-	return s.GetMeeting(ctx, id)
+	return s.GetMeeting(ctx, user, id)
 }
 
 // Regenerate 用指定模板重新生成纪要，结果是一个新版本，旧版本保留。
 func (s *Service) Regenerate(ctx context.Context, user sqlc.User, id uuid.UUID, template string) (Meeting, error) {
-	if _, ok := minutes.Find(template); !ok {
-		return Meeting{}, invalid("没有这个纪要模板：%s", template)
+	if err := s.checkTemplate(ctx, template); err != nil {
+		return Meeting{}, err
 	}
-	if _, err := s.modifiable(ctx, user, id); err != nil {
+	if _, err := s.editable(ctx, user, id); err != nil {
 		return Meeting{}, err
 	}
 	cfg, err := s.settings.LLM(ctx)
@@ -525,7 +541,7 @@ func (s *Service) Regenerate(ctx context.Context, user sqlc.User, id uuid.UUID, 
 		return Meeting{}, conflict("还没有配置大模型，请管理员先到「设置」里填写")
 	}
 	if _, err := s.q.GetTranscript(ctx, id); errors.Is(err, pgx.ErrNoRows) {
-		if _, err := s.GetMeeting(ctx, id); err != nil {
+		if _, err := s.getMeeting(ctx, id); err != nil {
 			return Meeting{}, err
 		}
 		return Meeting{}, conflict("这场会议还没有转写，不能生成纪要")
@@ -558,13 +574,13 @@ func (s *Service) enqueue(ctx context.Context, user sqlc.User, id uuid.UUID, fro
 	if err != nil {
 		return Meeting{}, err
 	}
-	return s.GetMeeting(ctx, id)
+	return s.GetMeeting(ctx, user, id)
 }
 
 // Transcript 返回转写。还没有转写时返回空列表。
-func (s *Service) Transcript(ctx context.Context, id uuid.UUID) ([]transcript.Segment, error) {
-	// 先确认会议在（没被删、没进回收站）
-	if _, err := s.GetMeeting(ctx, id); err != nil {
+func (s *Service) Transcript(ctx context.Context, user sqlc.User, id uuid.UUID) ([]transcript.Segment, error) {
+	// 先确认会议在（没被删、没进回收站）、这个人能看
+	if _, err := s.GetMeeting(ctx, user, id); err != nil {
 		return nil, err
 	}
 	raw, err := s.q.GetTranscript(ctx, id)
@@ -587,8 +603,8 @@ type Minutes struct {
 }
 
 // GetMinutes 返回指定版本的纪要；version 为 0 表示当前版本。
-func (s *Service) GetMinutes(ctx context.Context, id uuid.UUID, version int) (Minutes, error) {
-	m, err := s.GetMeeting(ctx, id)
+func (s *Service) GetMinutes(ctx context.Context, user sqlc.User, id uuid.UUID, version int) (Minutes, error) {
+	m, err := s.GetMeeting(ctx, user, id)
 	if err != nil {
 		return Minutes{}, err
 	}
@@ -628,7 +644,14 @@ func (s *Service) EditMinutes(ctx context.Context, user sqlc.User, id uuid.UUID,
 		if err != nil {
 			return err
 		}
-		if !CanModify(user, m) {
+		access, err := accessIn(ctx, q, user, m)
+		if err != nil {
+			return err
+		}
+		if !access.View {
+			return errNoMeeting
+		}
+		if !access.Edit {
 			return errNotAllowed
 		}
 		if m.Status != "done" {
@@ -644,12 +667,12 @@ func (s *Service) EditMinutes(ctx context.Context, user sqlc.User, id uuid.UUID,
 	if err != nil {
 		return Minutes{}, err
 	}
-	return s.GetMinutes(ctx, id, 0)
+	return s.GetMinutes(ctx, user, id, 0)
 }
 
 // AudioPath 返回录音文件在服务器上的路径，给回放用。
-func (s *Service) AudioPath(ctx context.Context, id uuid.UUID) (string, error) {
-	m, err := s.GetMeeting(ctx, id)
+func (s *Service) AudioPath(ctx context.Context, user sqlc.User, id uuid.UUID) (string, error) {
+	m, err := s.GetMeeting(ctx, user, id)
 	if err != nil {
 		return "", err
 	}

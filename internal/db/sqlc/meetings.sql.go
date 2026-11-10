@@ -121,17 +121,18 @@ func (q *Queries) ClearRetranscribe(ctx context.Context, id uuid.UUID) error {
 }
 
 const createMeeting = `-- name: CreateMeeting :one
-INSERT INTO meetings (owner_id, title, source, template, hotwords)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO meetings (owner_id, title, source, template, hotwords, visibility)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe
 `
 
 type CreateMeetingParams struct {
-	OwnerID  uuid.UUID
-	Title    string
-	Source   string
-	Template string
-	Hotwords string
+	OwnerID    uuid.UUID
+	Title      string
+	Source     string
+	Template   string
+	Hotwords   string
+	Visibility string
 }
 
 func (q *Queries) CreateMeeting(ctx context.Context, arg CreateMeetingParams) (Meeting, error) {
@@ -141,6 +142,7 @@ func (q *Queries) CreateMeeting(ctx context.Context, arg CreateMeetingParams) (M
 		arg.Source,
 		arg.Template,
 		arg.Hotwords,
+		arg.Visibility,
 	)
 	var i Meeting
 	err := row.Scan(
@@ -215,6 +217,40 @@ DELETE FROM upload_chunks WHERE meeting_id = $1
 func (q *Queries) DeleteChunks(ctx context.Context, meetingID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteChunks, meetingID)
 	return err
+}
+
+const expiredAudio = `-- name: ExpiredAudio :many
+SELECT id, audio_key FROM meetings
+WHERE audio_key <> '' AND audio_deleted_at IS NULL AND status IN ('done', 'failed')
+  AND created_at < now() - make_interval(days => $1::int)
+ORDER BY created_at
+LIMIT 100
+`
+
+type ExpiredAudioRow struct {
+	ID       uuid.UUID
+	AudioKey string
+}
+
+// 录音过了保留期的会议（创建满 days 天、录音还在、没在处理的），一次最多 100 场
+func (q *Queries) ExpiredAudio(ctx context.Context, days int32) ([]ExpiredAudioRow, error) {
+	rows, err := q.db.Query(ctx, expiredAudio, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ExpiredAudioRow
+	for rows.Next() {
+		var i ExpiredAudioRow
+		if err := rows.Scan(&i.ID, &i.AudioKey); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const expiredTrash = `-- name: ExpiredTrash :many
@@ -435,20 +471,26 @@ func (q *Queries) ListChunks(ctx context.Context, meetingID uuid.UUID) ([]ListCh
 }
 
 const listMeetings = `-- name: ListMeetings :many
-SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, u.name AS owner_name
+SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, u.name AS owner_name,
+       (mm.user_id IS NOT NULL)::bool AS is_member, coalesce(mm.can_edit, false)::bool AS member_can_edit
 FROM meetings m
 JOIN users u ON u.id = m.owner_id
 LEFT JOIN meeting_search s ON s.meeting_id = m.id
+LEFT JOIN meeting_members mm ON mm.meeting_id = m.id AND mm.user_id = $1::uuid
 WHERE m.deleted_at IS NULL
-  AND ($1::uuid IS NULL OR m.owner_id = $1::uuid)
-  AND ($2::text IS NULL OR s.doc @@ ($2::text)::tsquery)
-  AND ($3::timestamptz IS NULL
-       OR (m.created_at, m.id) < ($3::timestamptz, $4::uuid))
+  AND ($2::bool OR m.owner_id = $1::uuid OR m.visibility = 'team'
+       OR (m.visibility = 'members' AND mm.user_id IS NOT NULL))
+  AND ($3::uuid IS NULL OR m.owner_id = $3::uuid)
+  AND ($4::text IS NULL OR s.doc @@ ($4::text)::tsquery)
+  AND ($5::timestamptz IS NULL
+       OR (m.created_at, m.id) < ($5::timestamptz, $6::uuid))
 ORDER BY m.created_at DESC, m.id DESC
-LIMIT $5
+LIMIT $7
 `
 
 type ListMeetingsParams struct {
+	Viewer   uuid.UUID
+	IsAdmin  bool
 	Owner    *uuid.UUID
 	Query    *string
 	BeforeAt *time.Time
@@ -457,16 +499,20 @@ type ListMeetingsParams struct {
 }
 
 type ListMeetingsRow struct {
-	Meeting   Meeting
-	OwnerName string
+	Meeting       Meeting
+	OwnerName     string
+	IsMember      bool
+	MemberCanEdit bool
 }
 
-// 一期可见范围固定为团队，visibility 先存着，二期按它过滤。
+// 只列 viewer 能看的会议（管理员都能看，见 service.Access）。
 // query 是 Go 里拼好的 tsquery（见 search.TSQuery），为空表示不筛选。
 // owner 不为空时只列这个人创建的。
 // before_at、before_id 用来翻页：只列排在这场会议后面的（搜索时一页一页取候选）。
 func (q *Queries) ListMeetings(ctx context.Context, arg ListMeetingsParams) ([]ListMeetingsRow, error) {
 	rows, err := q.db.Query(ctx, listMeetings,
+		arg.Viewer,
+		arg.IsAdmin,
 		arg.Owner,
 		arg.Query,
 		arg.BeforeAt,
@@ -510,6 +556,8 @@ func (q *Queries) ListMeetings(ctx context.Context, arg ListMeetingsParams) ([]L
 			&i.Meeting.Speakers,
 			&i.Meeting.Retranscribe,
 			&i.OwnerName,
+			&i.IsMember,
+			&i.MemberCanEdit,
 		); err != nil {
 			return nil, err
 		}
@@ -668,6 +716,20 @@ func (q *Queries) LockMeeting(ctx context.Context, id uuid.UUID) (Meeting, error
 		&i.Retranscribe,
 	)
 	return i, err
+}
+
+const markAudioDeleted = `-- name: MarkAudioDeleted :execrows
+UPDATE meetings SET audio_deleted_at = now(), updated_at = now()
+WHERE id = $1 AND audio_deleted_at IS NULL AND status IN ('done', 'failed')
+`
+
+// 记下录音已经删除。会议这时又开始处理（重新转写）的话不删
+func (q *Queries) MarkAudioDeleted(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, markAudioDeleted, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const markRetranscribe = `-- name: MarkRetranscribe :exec
@@ -1029,22 +1091,32 @@ func (q *Queries) SetMeetingTerms(ctx context.Context, arg SetMeetingTermsParams
 
 const termsMatching = `-- name: TermsMatching :many
 SELECT DISTINCT (t.value->>'term')::text AS term, (t.value->'variants')::jsonb AS variants
-FROM meetings m, jsonb_array_elements(m.terms) AS t
+FROM meetings m
+LEFT JOIN meeting_members mm ON mm.meeting_id = m.id AND mm.user_id = $1::uuid
+CROSS JOIN LATERAL jsonb_array_elements(m.terms) AS t
 WHERE m.deleted_at IS NULL
-  AND (regexp_replace(lower(t.value->>'term'), '\s+', '', 'g') = regexp_replace(lower($1::text), '\s+', '', 'g')
+  AND ($2::bool OR m.owner_id = $1::uuid OR m.visibility = 'team'
+       OR (m.visibility = 'members' AND mm.user_id IS NOT NULL))
+  AND (regexp_replace(lower(t.value->>'term'), '\s+', '', 'g') = regexp_replace(lower($3::text), '\s+', '', 'g')
    OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.value->'variants') AS v
-              WHERE regexp_replace(lower(v), '\s+', '', 'g') = regexp_replace(lower($1::text), '\s+', '', 'g')))
+              WHERE regexp_replace(lower(v), '\s+', '', 'g') = regexp_replace(lower($3::text), '\s+', '', 'g')))
 `
+
+type TermsMatchingParams struct {
+	Viewer  uuid.UUID
+	IsAdmin bool
+	Q       string
+}
 
 type TermsMatchingRow struct {
 	Term     string
 	Variants []byte
 }
 
-// 全部会议的术语表里，正确写法或者听错写法就是 q 的那些条目（不分大小写、不管空格：「Go 语言」和「Go语言」算一样）。
-// 搜索时用来扩展搜索词
-func (q *Queries) TermsMatching(ctx context.Context, q_ string) ([]TermsMatchingRow, error) {
-	rows, err := q.db.Query(ctx, termsMatching, q_)
+// viewer 能看的会议的术语表里，正确写法或者听错写法就是 q 的那些条目（不分大小写、不管空格：「Go 语言」和「Go语言」算一样）。
+// 搜索时用来扩展搜索词。看不到的会议的术语表不用：里面的人名、项目名也算会议内容
+func (q *Queries) TermsMatching(ctx context.Context, arg TermsMatchingParams) ([]TermsMatchingRow, error) {
+	rows, err := q.db.Query(ctx, termsMatching, arg.Viewer, arg.IsAdmin, arg.Q)
 	if err != nil {
 		return nil, err
 	}

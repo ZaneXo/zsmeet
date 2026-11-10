@@ -35,6 +35,9 @@ export function MinutesPane({ meeting, hasTranscript, llmReady, isAdmin, canSeek
   const [draft, setDraft] = useState("");
   const [template, setTemplate] = useState(meeting.template);
   const templates = useTemplates();
+  // 会议原来用的自定义模板可能已经被管理员删掉了，那就改用通用模板（后台写纪要时也是这样）
+  const templateItems = templates.data?.items;
+  const chosen = !templateItems || templateItems.some((t) => t.id === template) ? template : "general";
   const busy = meeting.status === "queued" || meeting.status === "processing";
 
   const minutes = useQuery({
@@ -55,7 +58,7 @@ export function MinutesPane({ meeting, hasTranscript, llmReady, isAdmin, canSeek
   });
 
   const regenerate = useMutation({
-    mutationFn: () => unwrap(api.POST("/api/meetings/{id}/minutes/regenerate", { params: { path: { id } }, body: { template } })),
+    mutationFn: () => unwrap(api.POST("/api/meetings/{id}/minutes/regenerate", { params: { path: { id } }, body: { template: chosen } })),
     onSuccess: (updated) => {
       setMode("view");
       queryClient.setQueryData(["meeting", id], updated);
@@ -74,8 +77,8 @@ export function MinutesPane({ meeting, hasTranscript, llmReady, isAdmin, canSeek
   const data = minutes.data;
   const versions = data.versions ?? [];
   const templateSelect = (
-    <Select aria-label="纪要模板" className="w-40" value={template} onChange={(e) => setTemplate(e.target.value)}>
-      {(templates.data?.items ?? []).map((t) => (
+    <Select aria-label="纪要模板" className="w-40" value={chosen} onChange={(e) => setTemplate(e.target.value)}>
+      {(templateItems ?? []).map((t) => (
         <option key={t.id} value={t.id}>
           {t.name}
         </option>

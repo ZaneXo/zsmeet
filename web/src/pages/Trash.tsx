@@ -56,7 +56,7 @@ function TrashRow({ item }: { item: Trashed }) {
             <span className={daysLeft <= 3 ? "text-bad" : ""}>{daysLeft > 0 ? `${daysLeft} 天后彻底删除` : "马上就会彻底删除"}</span>
           </div>
         </div>
-        {item.can_edit && !confirming && (
+        {item.can_manage && !confirming && (
           <span className="flex gap-2">
             <Button size="sm" disabled={busy} onClick={() => restore.mutate()}>
               <Icon name="retry" size={15} />

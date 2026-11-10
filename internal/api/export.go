@@ -36,7 +36,7 @@ func (h *Handlers) Export(ctx context.Context, in *ExportInput) (*ExportOutput, 
 	if err != nil {
 		return nil, err
 	}
-	file, err := h.svc.Export(ctx, id, in.What, in.Format)
+	file, err := h.svc.Export(ctx, currentUser(ctx), id, in.What, in.Format)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

@@ -999,6 +999,36 @@ func TestLockedIPLeavesNoRows(t *testing.T) {
 	}
 }
 
+// 录音保留期：默认 90 天；只有管理员能改；范围不对时说清楚；录音删了以后会议上看得出来。
+func TestRetentionSettings(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	member := c.addMember("member@example.com", "李航")
+	member.want(member.do("GET", "/api/settings/retention", nil), 403)
+	if r := c.want(c.do("GET", "/api/settings/retention", nil), 200); r.Body["audio_days"] != float64(90) {
+		t.Errorf("默认 90 天：%s", r.Raw)
+	}
+	if r := c.want(c.do("PUT", "/api/settings/retention", obj{"audio_days": 3}), 422); !strings.Contains(r.Raw, "7 到 3650") {
+		t.Errorf("太短：%s", r.Raw)
+	}
+	if r := c.want(c.do("PUT", "/api/settings/retention", obj{"audio_days": 0}), 200); r.Body["audio_days"] != float64(0) {
+		t.Errorf("一直保留：%s", r.Raw)
+	}
+	c.want(c.do("PUT", "/api/settings/retention", obj{"audio_days": 30}), 200)
+	if r := c.want(c.do("GET", "/api/settings/retention", nil), 200); r.Body["audio_days"] != float64(30) {
+		t.Errorf("保存以后读出来：%s", r.Raw)
+	}
+
+	id := c.processed("产品周会", []transcript.Segment{{Start: 0, End: 2, Text: "好。"}}, "## 摘要\n好。", `[]`)
+	if _, err := c.pool.Exec(t.Context(), "UPDATE meetings SET audio_deleted_at = now() WHERE id = $1", id); err != nil {
+		t.Fatal(err)
+	}
+	m := c.want(c.do("GET", "/api/meetings/"+id, nil), 200)
+	if m.Body["has_audio"] != false || m.Body["audio_deleted_at"] == nil {
+		t.Errorf("录音删了以后：%s", m.Raw)
+	}
+}
+
 func TestClientIP(t *testing.T) {
 	loopback, err := config.ParseTrustedProxies("")
 	if err != nil {
@@ -1231,4 +1261,195 @@ func TestExport(t *testing.T) {
 	if resp, _ := get(c, "what=minutes"); resp.StatusCode != 404 {
 		t.Errorf("删掉的会议不能导出：%d", resp.StatusCode)
 	}
+}
+
+// 自定义纪要模板：大家都能看、都能选，只有管理员能加、改、删；内置的不能改；删掉以后不能再选。
+func TestCustomTemplates(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	member := c.addMember("member@example.com", "李航")
+
+	list := member.want(member.do("GET", "/api/templates", nil), 200)
+	if items := list.Body["items"].([]any); len(items) != 4 || items[0].(map[string]any)["custom"] != false {
+		t.Fatalf("一开始只有内置的四种：%s", list.Raw)
+	}
+	body := obj{"name": "需求评审", "guide": "1. 摘要：评审结论\n2. 需求变更：改了什么、谁提的"}
+	member.want(member.do("POST", "/api/templates", body), 403)
+	c.want(c.do("POST", "/api/templates", obj{"name": " ", "guide": "x"}), 422)
+	c.want(c.do("POST", "/api/templates", obj{"name": "x", "guide": strings.Repeat("长", 2001)}), 422)
+
+	created := c.want(c.do("POST", "/api/templates", body), 201)
+	id := created.Body["id"].(string)
+	if created.Body["custom"] != true || created.Body["name"] != "需求评审" {
+		t.Fatalf("新建的模板：%s", created.Raw)
+	}
+	list = member.want(member.do("GET", "/api/templates", nil), 200)
+	if items := list.Body["items"].([]any); len(items) != 5 || items[4].(map[string]any)["id"] != id {
+		t.Fatalf("自定义的排在内置的后面：%s", list.Raw)
+	}
+
+	// 普通成员也能用它新建会议、重新生成（这里没配大模型，过了模板检查以后停在「没有配置大模型」）
+	m := member.want(member.do("POST", "/api/meetings", obj{"title": "评审会", "source": "upload", "template": id}), 201)
+	if m.Body["template"] != id {
+		t.Fatalf("会议记下自定义模板：%s", m.Raw)
+	}
+	mid := member.processed("周会", []transcript.Segment{{Start: 0, End: 2, Text: "好。"}}, "## 摘要\n好。", `[]`)
+	if r := member.want(member.do("POST", "/api/meetings/"+mid+"/minutes/regenerate", obj{"template": id}), 409); !strings.Contains(r.Raw, "大模型") {
+		t.Errorf("模板检查应该通过：%s", r.Raw)
+	}
+
+	// 改：只有管理员；内置的模板 ID 不是 UUID，接口直接拒绝；不存在的是 404
+	member.want(member.do("PUT", "/api/templates/"+id, obj{"name": "改名", "guide": "x"}), 403)
+	c.want(c.do("PUT", "/api/templates/general", obj{"name": "改名", "guide": "x"}), 422)
+	c.want(c.do("PUT", "/api/templates/"+uuid.NewString(), obj{"name": "改名", "guide": "x"}), 404)
+	if r := c.want(c.do("PUT", "/api/templates/"+id, obj{"name": "需求评审会", "guide": "1. 结论"}), 200); r.Body["name"] != "需求评审会" || r.Body["guide"] != "1. 结论" {
+		t.Errorf("改完：%s", r.Raw)
+	}
+
+	// 删：只有管理员；删掉以后不能再选，用过它的会议还在
+	member.want(member.do("DELETE", "/api/templates/"+id, nil), 403)
+	c.want(c.do("DELETE", "/api/templates/general", nil), 422)
+	c.want(c.do("DELETE", "/api/templates/"+id, nil), 204)
+	c.want(c.do("DELETE", "/api/templates/"+id, nil), 404)
+	if items := c.want(c.do("GET", "/api/templates", nil), 200).Body["items"].([]any); len(items) != 4 {
+		t.Errorf("删掉以后只剩内置的：%v", items)
+	}
+	c.want(c.do("POST", "/api/meetings", obj{"title": "x", "source": "upload", "template": id}), 422)
+	c.want(c.do("POST", "/api/meetings/"+mid+"/minutes/regenerate", obj{"template": id}), 422)
+	if r := c.want(c.do("GET", "/api/meetings/"+m.Body["id"].(string), nil), 200); r.Body["template"] != id {
+		t.Errorf("用过它的会议不受影响：%s", r.Raw)
+	}
+}
+
+// 可见范围：只有自己能看的会议别人看不到（当作不存在），搜也搜不到，术语表也不拿来扩展搜索词；
+// 指定的人能看，勾了能编辑的还能改；团队所有人能看的会议也可以单独给人编辑权限；
+// 删除、改可见范围只有创建者和管理员能做。
+func TestMeetingAccess(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	owner := c.addMember("owner@example.com", "李航")
+	viewer := c.addMember("viewer@example.com", "王悦")
+	outsider := c.addMember("outsider@example.com", "赵雷")
+	userID := func(email string) string {
+		t.Helper()
+		var id string
+		if err := c.pool.QueryRow(t.Context(), "SELECT id FROM users WHERE email = $1", email).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	viewerID, outsiderID, ownerID := userID("viewer@example.com"), userID("outsider@example.com"), userID("owner@example.com")
+	listed := func(cl *client, q string) map[string]bool {
+		t.Helper()
+		out := map[string]bool{}
+		for _, it := range cl.want(cl.do("GET", "/api/meetings?q="+url.QueryEscape(q), nil), 200).Body["items"].([]any) {
+			out[it.(map[string]any)["id"].(string)] = true
+		}
+		return out
+	}
+
+	// 新建时只能选团队所有人或者只有自己
+	owner.want(owner.do("POST", "/api/meetings", obj{"title": "x", "source": "upload", "visibility": "members"}), 422)
+	p := owner.want(owner.do("POST", "/api/meetings", obj{"title": "一对一", "source": "upload", "visibility": "private"}), 201)
+	if p.Body["visibility"] != "private" || p.Body["can_manage"] != true || p.Body["owner_id"] != ownerID {
+		t.Fatalf("新建的私密会议：%s", p.Raw)
+	}
+	private := "/api/meetings/" + p.Body["id"].(string)
+	for _, path := range []string{"", "/transcript", "/minutes", "/chunks", "/access", "/export", "/feishu", "/audio"} {
+		viewer.want(viewer.do("GET", private+path, nil), 404)
+	}
+	viewer.want(viewer.do("PATCH", private, obj{"title": "看不到也改不了"}), 404)
+	if listed(viewer, "")[p.Body["id"].(string)] || !listed(c, "")[p.Body["id"].(string)] {
+		t.Error("私密会议别人列不出来，管理员列得出来")
+	}
+
+	// 指定的人：王悦能看不能改，赵雷看不到；纪要里的词、术语表里的写法赵雷也搜不到
+	m := owner.processed("融资讨论", []transcript.Segment{{Start: 1, End: 3, Text: "估值的事下周再谈。"}},
+		"## 摘要\n讨论了蓝鲸计划的估值。", `[{"term": "蓝鲸计划", "variants": ["蓝金计划"]}]`)
+	base := "/api/meetings/" + m
+	viewer.want(viewer.do("PUT", base+"/access", obj{"visibility": "team"}), 403)
+	owner.want(owner.do("PUT", base+"/access", obj{"visibility": "members", "members": []obj{{"user_id": uuid.NewString()}}}), 422)
+	got := owner.want(owner.do("PUT", base+"/access", obj{"visibility": "members", "members": []obj{
+		{"user_id": viewerID}, {"user_id": ownerID, "can_edit": true}, {"user_id": viewerID},
+	}}), 200)
+	if ms := got.Body["members"].([]any); len(ms) != 1 || ms[0].(map[string]any)["user_id"] != viewerID || ms[0].(map[string]any)["can_edit"] != false {
+		t.Fatalf("创建者自己、重复的人不算：%s", got.Raw)
+	}
+	if r := viewer.want(viewer.do("GET", base, nil), 200); r.Body["can_edit"] != false || r.Body["can_manage"] != false || r.Body["visibility"] != "members" {
+		t.Errorf("王悦能看不能改：%s", r.Raw)
+	}
+	viewer.want(viewer.do("GET", base+"/access", nil), 200)
+	outsider.want(outsider.do("GET", base, nil), 404)
+	viewer.want(viewer.do("PUT", base+"/minutes", obj{"content": "## 摘要\n被改了"}), 403)
+	if !listed(viewer, "蓝鲸计划")[m] || listed(outsider, "蓝鲸计划")[m] || listed(outsider, "")[m] {
+		t.Error("指定的人搜得到，别人搜不到")
+	}
+	r := outsider.want(outsider.do("GET", "/api/meetings?q="+url.QueryEscape("蓝金计划"), nil), 200)
+	if exp := r.Body["expanded"].([]any); len(exp) != 1 {
+		t.Errorf("看不到的会议的术语表不能拿来扩展搜索词：%s", r.Raw)
+	}
+
+	// 勾上能编辑：能改纪要、改标题，但不能删、不能改谁能看
+	owner.want(owner.do("PUT", base+"/access", obj{"visibility": "members", "members": []obj{{"user_id": viewerID, "can_edit": true}}}), 200)
+	if r := viewer.want(viewer.do("GET", base, nil), 200); r.Body["can_edit"] != true || r.Body["can_manage"] != false {
+		t.Errorf("王悦能编辑了：%s", r.Raw)
+	}
+	viewer.want(viewer.do("PUT", base+"/minutes", obj{"content": "## 摘要\n王悦补充了几句。"}), 200)
+	viewer.want(viewer.do("PATCH", base, obj{"title": "融资讨论（王悦改）"}), 200)
+	viewer.want(viewer.do("DELETE", base, nil), 403)
+	viewer.want(viewer.do("PUT", base+"/access", obj{"visibility": "team"}), 403)
+
+	// 团队所有人能看的会议，也可以单独给人编辑权限
+	team := owner.processed("周会", []transcript.Segment{{Start: 1, End: 3, Text: "好。"}}, "## 摘要\n好。", `[]`)
+	owner.want(owner.do("PUT", "/api/meetings/"+team+"/access", obj{"visibility": "team", "members": []obj{{"user_id": outsiderID, "can_edit": true}}}), 200)
+	outsider.want(outsider.do("PUT", "/api/meetings/"+team+"/minutes", obj{"content": "## 摘要\n赵雷改的。"}), 200)
+	viewer.want(viewer.do("PUT", "/api/meetings/"+team+"/minutes", obj{"content": "## 摘要\n王悦改的。"}), 403)
+	if r := viewer.want(viewer.do("GET", "/api/meetings/"+team, nil), 200); r.Body["can_edit"] != false {
+		t.Errorf("没被指定的人只能看：%s", r.Raw)
+	}
+
+	// 改成只有自己：单独指定的人清掉，王悦看不到了
+	got = owner.want(owner.do("PUT", base+"/access", obj{"visibility": "private", "members": []obj{{"user_id": viewerID, "can_edit": true}}}), 200)
+	if len(got.Body["members"].([]any)) != 0 {
+		t.Errorf("只有自己能看时不留单独指定的人：%s", got.Raw)
+	}
+	viewer.want(viewer.do("GET", base, nil), 404)
+
+	// 回收站：看不到的当作不存在，看得到但不是创建者的不能恢复
+	owner.want(owner.do("DELETE", "/api/meetings/"+team, nil), 204)
+	viewer.want(viewer.do("POST", "/api/trash/"+team+"/restore", nil), 403)
+	owner.want(owner.do("DELETE", base, nil), 204)
+	viewer.want(viewer.do("POST", "/api/trash/"+m+"/restore", nil), 404)
+	owner.want(owner.do("POST", "/api/trash/"+team+"/restore", nil), 200)
+
+	// 选人的列表不列停用的人；停用的人不能新加进来，原来就在的可以留着
+	if _, err := c.pool.Exec(t.Context(), "UPDATE users SET disabled = true WHERE id = $1", outsiderID); err != nil {
+		t.Fatal(err)
+	}
+	people := viewer.want(viewer.do("GET", "/api/people", nil), 200).Body["items"].([]any)
+	if len(people) != 3 {
+		t.Errorf("停用的人不列：%v", people)
+	}
+	owner.want(owner.do("PUT", "/api/meetings/"+team+"/access", obj{"visibility": "team", "members": []obj{{"user_id": outsiderID, "can_edit": true}, {"user_id": viewerID}}}), 200)
+	other := owner.processed("另一场", []transcript.Segment{{Start: 1, End: 3, Text: "好。"}}, "## 摘要\n好。", `[]`)
+	owner.want(owner.do("PUT", "/api/meetings/"+other+"/access", obj{"visibility": "members", "members": []obj{{"user_id": outsiderID}}}), 422)
+}
+
+// 录音过了保留期被删了：还没有转写的失败会议不能重试（重试也只能失败），有转写的照常重试（只重写纪要）；不能重新转写。
+func TestRetryAfterAudioExpired(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	noTranscript := c.want(c.do("POST", "/api/meetings", obj{"title": "识别失败的会", "source": "upload"}), 201).Body["id"].(string)
+	withTranscript := c.processed("纪要失败的会", []transcript.Segment{{Start: 0, End: 2, Text: "好。"}}, "## 摘要\n好。", `[]`)
+	for _, id := range []string{noTranscript, withTranscript} {
+		if _, err := c.pool.Exec(t.Context(),
+			"UPDATE meetings SET status = 'failed', audio_key = 'audio/' || id || '.m4a', audio_deleted_at = now() WHERE id = $1", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r := c.want(c.do("POST", "/api/meetings/"+noTranscript+"/retry", nil), 409); !strings.Contains(r.Raw, "保留期") {
+		t.Errorf("没有转写、录音也没了：%s", r.Raw)
+	}
+	c.want(c.do("POST", "/api/meetings/"+withTranscript+"/retranscribe", nil), 409)
+	c.want(c.do("POST", "/api/meetings/"+withTranscript+"/retry", nil), 200)
 }

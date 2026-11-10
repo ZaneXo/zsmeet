@@ -10,6 +10,7 @@ import { Button, buttonClass, Card, Chip, Icon, Input, Notice, ProgressBar, Spin
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
+import { AccessDialog, VISIBILITY_LABEL } from "./AccessDialog";
 import { FeishuShareDialog, LatestFeishuShare } from "./FeishuShare";
 import { meetingChip, recordingLive } from "./Meetings";
 import { MinutesPane } from "./MinutesPane";
@@ -70,8 +71,9 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
   }, [jumpSec]);
   const audio = useRef<HTMLAudioElement>(null);
   const [now, setNow] = useState(0);
-  // 「发到飞书」的弹窗开着没有
+  // 「发到飞书」「谁能看」的弹窗开着没有
   const [sharing, setSharing] = useState(false);
+  const [access, setAccess] = useState(false);
   const seek = useCallback((sec: number) => {
     const el = audio.current;
     if (!el) return;
@@ -108,7 +110,7 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
 
   const chip = meetingChip(m);
   const hasTranscript = segments.length > 0;
-  // 管理员配置了飞书、已经有纪要时，创建者和管理员可以把纪要发到飞书
+  // 管理员配置了飞书、已经有纪要时，能编辑的人可以把纪要发到飞书
   const canShare = feishuReady && m.can_edit && m.minutes_version > 0;
 
   return (
@@ -123,6 +125,13 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
             {m.duration_sec > 0 && <span>{duration(m.duration_sec)}</span>}
             <span>{SOURCE_LABEL[m.source]}</span>
             <span>创建者 {m.owner_name}</span>
+            {m.can_manage ? (
+              <button type="button" className="cursor-pointer font-medium text-brand hover:text-brand-hover" onClick={() => setAccess(true)}>
+                {VISIBILITY_LABEL[m.visibility]} · 设置谁能看
+              </button>
+            ) : (
+              m.visibility !== "team" && <span>{VISIBILITY_LABEL[m.visibility]}</span>
+            )}
           </div>
           {feishuReady && <LatestFeishuShare meeting={m} onOpen={canShare ? () => setSharing(true) : undefined} />}
         </div>
@@ -135,10 +144,11 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
             </Button>
           )}
           <ExportMenu meeting={m} hasTranscript={hasTranscript} />
-          {m.can_edit && <DeleteMeeting meeting={m} />}
+          {m.can_manage && <DeleteMeeting meeting={m} />}
         </span>
       </div>
       {sharing && <FeishuShareDialog meeting={m} onClose={() => setSharing(false)} />}
+      {access && <AccessDialog meeting={m} isOwner={m.owner_id === user.id} feishu={feishuReady} onClose={() => setAccess(false)} />}
 
       {m.status !== "done" && <ProcessingPanel meeting={m} user={user} minutesOnly={hasTranscript} />}
 
@@ -154,6 +164,12 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
             onTimeUpdate={(e) => setNow(e.currentTarget.currentTime)}
           />
         </Card>
+      )}
+
+      {m.audio_deleted_at && (
+        <p className="rounded-xl border border-line bg-white px-4 py-3 text-[13px] leading-relaxed text-muted">
+          录音已经过了保留期，在 {dateTime(m.audio_deleted_at)} 删除了。转写和纪要都还在，只是不能再回放、重新转写。
+        </p>
       )}
 
       {(m.marks ?? []).length > 0 && <MarksCard marks={m.marks ?? []} segments={segments} canSeek={m.has_audio} onSeek={seek} />}
@@ -290,7 +306,7 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
   if (m.status === "uploading") {
     return (
       <Notice tone="warn">
-        {m.can_edit
+        {m.can_manage
           ? "这场会议的录音还没有传完。上传的那个页面如果已经关掉了，需要重新上传一次。"
           : `${m.owner_name} 正在上传这场会议的录音，传完以后才会开始处理。`}
       </Notice>
@@ -417,7 +433,7 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
   const chunks = useQuery({
     queryKey: ["chunks", m.id],
     queryFn: () => unwrap(api.GET("/api/meetings/{id}/chunks", { params: { path: { id: m.id } } })),
-    enabled: m.can_edit && !live,
+    enabled: m.can_manage && !live,
   });
   const received = contiguous(chunks.data?.received ?? []);
   const [confirming, setConfirming] = useState(false);
@@ -443,7 +459,7 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
     );
   }
   if (local) return <LocalRecordingCard item={local} />;
-  if (!m.can_edit) {
+  if (!m.can_manage) {
     return (
       <Notice tone="info">
         {m.owner_name}

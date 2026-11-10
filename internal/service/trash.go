@@ -31,7 +31,7 @@ var errNotInTrash = notFound("回收站里没有这场会议，可能已经被�
 
 // DeleteMeeting 把会议放进回收站。创建者和管理员可以删。正在处理的会议也可以删，后台处理完的结果照样保存，恢复以后能看到。
 func (s *Service) DeleteMeeting(ctx context.Context, user sqlc.User, id uuid.UUID) error {
-	if _, err := s.modifiable(ctx, user, id); err != nil {
+	if _, err := s.manageable(ctx, user, id); err != nil {
 		return err
 	}
 	_, err := s.q.TrashMeeting(ctx, sqlc.TrashMeetingParams{ID: id, DeletedBy: &user.ID})
@@ -53,7 +53,8 @@ func (s *Service) ListTrash(ctx context.Context, user sqlc.User) ([]TrashedMeeti
 	}
 	out := make([]TrashedMeeting, len(rows))
 	for i, r := range rows {
-		out[i] = TrashedMeeting{Meeting: Meeting{Meeting: r.Meeting, OwnerName: r.OwnerName}, DeletedByName: r.DeletedByName}
+		// 列出来的只有自己创建的（管理员是全部），都能处理
+		out[i] = TrashedMeeting{Meeting: Meeting{Meeting: r.Meeting, OwnerName: r.OwnerName, Access: fullAccess}, DeletedByName: r.DeletedByName}
 	}
 	return out, nil
 }
@@ -70,8 +71,16 @@ func (s *Service) trashed(ctx context.Context, user sqlc.User, id uuid.UUID) err
 	if row.Meeting.DeletedAt == nil {
 		return errNotInTrash
 	}
-	if !CanModify(user, row.Meeting) {
-		return errNotAllowed
+	// 看不到的会议当作不存在；看得到但不是创建者（也不是管理员）的不能处理
+	access, err := accessIn(ctx, s.q, user, row.Meeting)
+	if err != nil {
+		return err
+	}
+	if !access.View {
+		return errNotInTrash
+	}
+	if !access.Manage {
+		return errNotManager
 	}
 	return nil
 }
@@ -86,7 +95,7 @@ func (s *Service) RestoreMeeting(ctx context.Context, user sqlc.User, id uuid.UU
 	} else if err != nil {
 		return Meeting{}, err
 	}
-	return s.GetMeeting(ctx, id)
+	return s.GetMeeting(ctx, user, id)
 }
 
 // PurgeMeeting 立即彻底删除回收站里的一场会议，不能恢复。

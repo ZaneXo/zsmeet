@@ -179,9 +179,9 @@ func (s *Service) FeishuChats(ctx context.Context) ([]feishu.Chat, settings.Feis
 }
 
 // ShareToFeishu 把会议当前版本的纪要发到飞书：chatID 不为空时推到这个群，withDoc 为 true 时同时导入成飞书文档。
-// 真正的发送在后台做，这里记下来、加任务就返回。创建者和管理员可以发。
+// 真正的发送在后台做，这里记下来、加任务就返回。能编辑这场会议的人可以发。
 func (s *Service) ShareToFeishu(ctx context.Context, user sqlc.User, id uuid.UUID, chatID string, withDoc bool) (sqlc.FeishuShare, error) {
-	m, err := s.modifiable(ctx, user, id)
+	m, err := s.editable(ctx, user, id)
 	if err != nil {
 		return sqlc.FeishuShare{}, err
 	}
@@ -241,8 +241,8 @@ func (s *Service) ShareToFeishu(ctx context.Context, user sqlc.User, id uuid.UUI
 }
 
 // FeishuShares 列出一场会议最近发到飞书的记录，最新的在前。
-func (s *Service) FeishuShares(ctx context.Context, id uuid.UUID) ([]sqlc.ListSharesRow, error) {
-	if _, err := s.GetMeeting(ctx, id); err != nil {
+func (s *Service) FeishuShares(ctx context.Context, user sqlc.User, id uuid.UUID) ([]sqlc.ListSharesRow, error) {
+	if _, err := s.GetMeeting(ctx, user, id); err != nil {
 		return nil, err
 	}
 	return s.q.ListShares(ctx, id)

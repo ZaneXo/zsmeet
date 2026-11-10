@@ -44,7 +44,14 @@ func (s *Service) RenameSpeakers(ctx context.Context, user sqlc.User, id uuid.UU
 		if err != nil {
 			return err
 		}
-		if !CanModify(user, m) {
+		access, err := accessIn(ctx, q, user, m)
+		if err != nil {
+			return err
+		}
+		if !access.View {
+			return errNoMeeting
+		}
+		if !access.Edit {
 			return errNotAllowed
 		}
 		current := transcript.ParseNames(m.Speakers)
@@ -96,5 +103,5 @@ func (s *Service) RenameSpeakers(ctx context.Context, user sqlc.User, id uuid.UU
 	if err != nil {
 		return Meeting{}, err
 	}
-	return s.GetMeeting(ctx, id)
+	return s.GetMeeting(ctx, user, id)
 }

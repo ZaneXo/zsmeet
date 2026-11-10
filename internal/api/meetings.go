@@ -12,15 +12,20 @@ import (
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/google/uuid"
 
-	"github.com/ZaneXo/zsmeet/internal/minutes"
 	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
 // ---- 模板 ----
 
 type Template struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Guide  string `json:"guide" doc:"纪要要有哪几部分、每部分写什么（交给大模型的说明）"`
+	Custom bool   `json:"custom" doc:"管理员自己定义的模板（可以改、可以删）；内置的模板是 false"`
+}
+
+func toTemplate(t service.Template) Template {
+	return Template{ID: t.ID, Name: t.Name, Guide: t.Guide, Custom: t.Custom}
 }
 
 type TemplatesOutput struct {
@@ -34,16 +39,106 @@ var listTemplatesOp = huma.Operation{
 	Method:      http.MethodGet,
 	Path:        "/api/templates",
 	Summary:     "可选的纪要模板",
+	Description: "先是内置的四种，再是管理员自己定义的。",
 	Tags:        []string{"会议"},
 	Security:    loggedIn,
 }
 
-func (h *Handlers) ListTemplates(context.Context, *struct{}) (*TemplatesOutput, error) {
+func (h *Handlers) ListTemplates(ctx context.Context, _ *struct{}) (*TemplatesOutput, error) {
+	items, err := h.svc.Templates(ctx)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
 	out := &TemplatesOutput{}
-	for _, t := range minutes.Templates {
-		out.Body.Items = append(out.Body.Items, Template{ID: t.ID, Name: t.Name})
+	out.Body.Items = make([]Template, len(items))
+	for i, t := range items {
+		out.Body.Items[i] = toTemplate(t)
 	}
 	return out, nil
+}
+
+type TemplateBody struct {
+	Name  string `json:"name" maxLength:"30" doc:"模板的名字，选模板时显示"`
+	Guide string `json:"guide" maxLength:"2000" doc:"纪要要有哪几部分、每部分写什么，一行一部分"`
+}
+
+type TemplateInput struct {
+	Body TemplateBody
+}
+
+type TemplateOutput struct {
+	Body Template
+}
+
+var createTemplateOp = huma.Operation{
+	OperationID:   "create-template",
+	Method:        http.MethodPost,
+	Path:          "/api/templates",
+	Summary:       "新建纪要模板",
+	Tags:          []string{"会议"},
+	Security:      adminOnly,
+	DefaultStatus: http.StatusCreated,
+}
+
+func (h *Handlers) CreateTemplate(ctx context.Context, in *TemplateInput) (*TemplateOutput, error) {
+	t, err := h.svc.CreateTemplate(ctx, currentUser(ctx), in.Body.Name, in.Body.Guide)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	return &TemplateOutput{Body: toTemplate(t)}, nil
+}
+
+type TemplateID struct {
+	ID string `path:"id" format:"uuid"`
+}
+
+type UpdateTemplateInput struct {
+	TemplateID
+	Body TemplateBody
+}
+
+var updateTemplateOp = huma.Operation{
+	OperationID: "update-template",
+	Method:      http.MethodPut,
+	Path:        "/api/templates/{id}",
+	Summary:     "修改纪要模板",
+	Description: "只能改自定义的模板。以后用它写的纪要按新的写法，已经写好的不变。",
+	Tags:        []string{"会议"},
+	Security:    adminOnly,
+}
+
+func (h *Handlers) UpdateTemplate(ctx context.Context, in *UpdateTemplateInput) (*TemplateOutput, error) {
+	id, err := uuid.Parse(in.ID)
+	if err != nil {
+		return nil, huma.Error404NotFound("没有这个自定义模板")
+	}
+	t, err := h.svc.UpdateTemplate(ctx, id, in.Body.Name, in.Body.Guide)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	return &TemplateOutput{Body: toTemplate(t)}, nil
+}
+
+var deleteTemplateOp = huma.Operation{
+	OperationID:   "delete-template",
+	Method:        http.MethodDelete,
+	Path:          "/api/templates/{id}",
+	Summary:       "删除纪要模板",
+	Description:   "只能删自定义的模板。已经写好的纪要不受影响；还选着它的会议以后重新生成时用通用模板。",
+	Tags:          []string{"会议"},
+	Security:      adminOnly,
+	DefaultStatus: http.StatusNoContent,
+}
+
+func (h *Handlers) DeleteTemplate(ctx context.Context, in *TemplateID) (*struct{}, error) {
+	id, err := uuid.Parse(in.ID)
+	if err != nil {
+		return nil, huma.Error404NotFound("没有这个自定义模板")
+	}
+	if err := h.svc.DeleteTemplate(ctx, id); err != nil {
+		return nil, toHTTP(err)
+	}
+	return nil, nil
 }
 
 // ---- 会议 ----
@@ -94,7 +189,7 @@ func (h *Handlers) ListMeetings(ctx context.Context, in *ListMeetingsInput) (*Li
 	if in.Mine {
 		owner = &viewer.ID
 	}
-	list, err := h.svc.ListMeetings(ctx, in.Q, owner, in.Limit)
+	list, err := h.svc.ListMeetings(ctx, viewer, in.Q, owner, in.Limit)
 	if err != nil {
 		return nil, toHTTP(err)
 	}
@@ -105,7 +200,7 @@ func (h *Handlers) ListMeetings(ctx context.Context, in *ListMeetingsInput) (*Li
 		for j, h := range m.Hits {
 			hits[j] = SearchHit(h)
 		}
-		out.Body.Items[i] = MeetingListItem{Meeting: toMeeting(m, viewer), Hits: hits}
+		out.Body.Items[i] = MeetingListItem{Meeting: toMeeting(m), Hits: hits}
 	}
 	out.Body.Expanded = list.Spellings
 	if out.Body.Expanded == nil {
@@ -121,6 +216,8 @@ type CreateMeetingInput struct {
 		Source   string `json:"source" enum:"upload,record"`
 		Template string `json:"template,omitempty" doc:"纪要模板的 ID，留空用通用模板"`
 		Hotwords string `json:"hotwords,omitempty" maxLength:"500" doc:"人名、产品名等专有名词，用逗号分开"`
+		// 指定具体的人要在建好以后用「谁能看」接口设置
+		Visibility string `json:"visibility,omitempty" enum:"team,private" doc:"谁能看：团队所有人（默认）或者只有自己（管理员也能看）"`
 	}
 }
 
@@ -138,11 +235,12 @@ var createMeetingOp = huma.Operation{
 func (h *Handlers) CreateMeeting(ctx context.Context, in *CreateMeetingInput) (*MeetingOutput, error) {
 	m, err := h.svc.CreateMeeting(ctx, currentUser(ctx), service.NewMeeting{
 		Title: in.Body.Title, Source: in.Body.Source, Template: in.Body.Template, Hotwords: in.Body.Hotwords,
+		Visibility: in.Body.Visibility,
 	})
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }
 
 var getMeetingOp = huma.Operation{
@@ -159,11 +257,11 @@ func (h *Handlers) GetMeeting(ctx context.Context, in *MeetingID) (*MeetingOutpu
 	if err != nil {
 		return nil, err
 	}
-	m, err := h.svc.GetMeeting(ctx, id)
+	m, err := h.svc.GetMeeting(ctx, currentUser(ctx), id)
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }
 
 type RenameMeetingInput struct {
@@ -191,7 +289,7 @@ func (h *Handlers) RenameMeeting(ctx context.Context, in *RenameMeetingInput) (*
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }
 
 // ---- 上传 ----
@@ -251,7 +349,7 @@ func (h *Handlers) ListChunks(ctx context.Context, in *MeetingID) (*ChunksOutput
 	if err != nil {
 		return nil, err
 	}
-	seqs, err := h.svc.ReceivedChunks(ctx, id)
+	seqs, err := h.svc.ReceivedChunks(ctx, currentUser(ctx), id)
 	if err != nil {
 		return nil, toHTTP(err)
 	}
@@ -316,7 +414,7 @@ func (h *Handlers) CompleteUpload(ctx context.Context, in *CompleteUploadInput) 
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }
 
 // ---- 处理 ----
@@ -340,7 +438,7 @@ func (h *Handlers) RetryMeeting(ctx context.Context, in *MeetingID) (*MeetingOut
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }
 
 var meetingEventsOp = huma.Operation{
@@ -366,11 +464,12 @@ func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Se
 	var last Meeting
 	idle := 0
 	for {
-		m, err := h.svc.GetMeeting(ctx, id)
+		// 每次都重新检查：看着看着被改成看不到了，就断开
+		m, err := h.svc.GetMeeting(ctx, viewer, id)
 		if err != nil {
 			return
 		}
-		cur := toMeeting(m, viewer)
+		cur := toMeeting(m)
 		switch {
 		// Meeting 里有切片和指针，要比较内容
 		case !reflect.DeepEqual(cur, last):
@@ -417,7 +516,7 @@ func (h *Handlers) Retranscribe(ctx context.Context, in *MeetingID) (*MeetingOut
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }
 
 type RenameSpeakersInput struct {
@@ -454,7 +553,7 @@ func (h *Handlers) RenameSpeakers(ctx context.Context, in *RenameSpeakersInput) 
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }
 
 // ---- 转写 ----
@@ -480,7 +579,7 @@ func (h *Handlers) GetTranscript(ctx context.Context, in *MeetingID) (*Transcrip
 	if err != nil {
 		return nil, err
 	}
-	segs, err := h.svc.Transcript(ctx, id)
+	segs, err := h.svc.Transcript(ctx, currentUser(ctx), id)
 	if err != nil {
 		return nil, toHTTP(err)
 	}
@@ -515,7 +614,7 @@ func (h *Handlers) GetMinutes(ctx context.Context, in *GetMinutesInput) (*Minute
 	if err != nil {
 		return nil, err
 	}
-	m, err := h.svc.GetMinutes(ctx, id, in.Version)
+	m, err := h.svc.GetMinutes(ctx, currentUser(ctx), id, in.Version)
 	if err != nil {
 		return nil, toHTTP(err)
 	}
@@ -579,5 +678,5 @@ func (h *Handlers) RegenerateMinutes(ctx context.Context, in *RegenerateMinutesI
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }

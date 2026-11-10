@@ -89,6 +89,8 @@ export type StartOptions = {
   title: string;
   template: string;
   hotwords: string;
+  // 谁能看：团队所有人或者只有自己
+  visibility: "team" | "private";
   source: Source;
 };
 
@@ -363,7 +365,9 @@ class RecordingSession {
       const recorder = new MediaRecorder(this.mixer!.stream, { mimeType: mimeType || undefined, audioBitsPerSecond: 32_000 });
       // 录音器能建出来再新建会议，免得在服务器上留下一场什么也没有的会议
       const meeting = await unwrap(
-        api.POST("/api/meetings", { body: { title: opts.title, source: "record", template: opts.template, hotwords: opts.hotwords } }),
+        api.POST("/api/meetings", {
+          body: { title: opts.title, source: "record", template: opts.template, hotwords: opts.hotwords, visibility: opts.visibility },
+        }),
       );
 
       this.rec = {

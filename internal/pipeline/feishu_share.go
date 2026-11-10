@@ -17,6 +17,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/export"
 	"github.com/ZaneXo/zsmeet/internal/feishu"
 	"github.com/ZaneXo/zsmeet/internal/queue"
+	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
@@ -109,6 +110,10 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 	m := row.Meeting
 	if m.DeletedAt != nil {
 		return permanent("会议已经删除了")
+	}
+	// 自动发送（没有发起人）只发团队里所有人都能看的会议。排队以后（重试、等文档导入期间）会议可能被改成了别的可见范围
+	if share.RequestedBy == nil && m.Visibility != service.VisibilityTeam {
+		return permanent("会议已经改成不是团队所有人可见，不再自动发到群里")
 	}
 	mv, err := w.q.GetMinutesVersion(ctx, sqlc.GetMinutesVersionParams{MeetingID: m.ID, Version: share.MinutesVersion})
 	if err != nil {

@@ -322,7 +322,7 @@ func (h *Handlers) ListFeishuShares(ctx context.Context, in *MeetingID) (*Feishu
 	if err != nil {
 		return nil, err
 	}
-	rows, err := h.svc.FeishuShares(ctx, id)
+	rows, err := h.svc.FeishuShares(ctx, currentUser(ctx), id)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

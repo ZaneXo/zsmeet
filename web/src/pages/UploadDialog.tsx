@@ -7,11 +7,29 @@ import { Button, Field, Icon, Input, Modal, Notice, ProgressBar, Select } from "
 import { fileSize } from "../lib/format";
 import { MAX_UPLOAD_BYTES, uploadFile } from "../lib/upload";
 
+/** 新建会议时选谁能看。指定具体的人在建好以后的会议页面上设置。 */
+export function VisibilityField({ id, value, onChange, disabled }: {
+  id: string;
+  value: "team" | "private";
+  onChange: (v: "team" | "private") => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Field label="谁能看" htmlFor={id} hint="建好以后可以在会议页面上改，也可以指定具体的人">
+      <Select id={id} className="sm:w-72" value={value} onChange={(e) => onChange(e.target.value === "private" ? "private" : "team")} disabled={disabled}>
+        <option value="team">团队里所有人</option>
+        <option value="private">只有我（管理员也能看）</option>
+      </Select>
+    </Field>
+  );
+}
+
 export function useTemplates() {
   return useQuery({
     queryKey: ["templates"],
     queryFn: () => unwrap(api.GET("/api/templates")),
-    staleTime: Infinity,
+    // 管理员随时可能加、改、删自定义模板
+    staleTime: 60_000,
   });
 }
 
@@ -26,6 +44,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
   const [title, setTitle] = useState("");
   const [template, setTemplate] = useState("general");
   const [hotwords, setHotwords] = useState("");
+  const [visibility, setVisibility] = useState<"team" | "private">("team");
   const [dragging, setDragging] = useState(false);
   const [sent, setSent] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -61,7 +80,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
     const controller = new AbortController();
     abort.current = controller;
     try {
-      const meeting = await unwrap(api.POST("/api/meetings", { body: { title, source: "upload", template, hotwords } }));
+      const meeting = await unwrap(api.POST("/api/meetings", { body: { title, source: "upload", template, hotwords, visibility } }));
       const chunks = await uploadFile(meeting.id, file, setSent, controller.signal);
       await unwrap(api.POST("/api/meetings/{id}/complete", { params: { path: { id: meeting.id } }, body: { chunks } }));
       void queryClient.invalidateQueries({ queryKey: ["meetings"] });
@@ -135,6 +154,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
           </Field>
         </div>
         <p className="-mt-2 text-xs leading-relaxed text-muted">热词会交给大模型，纪要里这些词被识别成近音字时会纠正过来。</p>
+        <VisibilityField id="up-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 
         {busy && file && (
           <div className="flex flex-col gap-2">

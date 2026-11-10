@@ -12,16 +12,18 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/queue"
 	"github.com/ZaneXo/zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/storage"
 )
 
 // reaper 每分钟巡检一次：会议显示「处理中」但心跳已经停了，说明处理它的 worker 挂了
 // （被杀掉、内存不够、机器重启）。这种会议换一个 run_id 重新入队；反复挂掉的判为失败。
-// 同时彻底删除回收站里放满 30 天的会议。
+// 同时彻底删除回收站里放满 30 天的会议、删掉过了保留期的录音。
 type reaper struct {
 	river.WorkerDefaults[queue.ReapArgs]
-	pool  *pgxpool.Pool
-	store *storage.Local
+	pool     *pgxpool.Pool
+	store    *storage.Local
+	settings *settings.Store
 }
 
 func (*reaper) Timeout(*river.Job[queue.ReapArgs]) time.Duration { return time.Minute }
@@ -39,9 +41,22 @@ func (p *reaper) Work(ctx context.Context, _ *river.Job[queue.ReapArgs]) error {
 		slog.Warn("巡检发现处理中断的会议", "requeued", requeued, "failed", failed)
 	}
 	// 顺手清理回收站里放满 30 天的会议（连同录音文件）
-	purged, err := service.PurgeExpired(ctx, sqlc.New(p.pool), p.store)
+	q := sqlc.New(p.pool)
+	purged, err := service.PurgeExpired(ctx, q, p.store)
 	if purged > 0 {
 		slog.Info("彻底删除了回收站里过期的会议", "count", purged)
+	}
+	if err != nil {
+		return err
+	}
+	// 删掉过了保留期的录音（转写和纪要留着）
+	retention, err := p.settings.Retention(ctx)
+	if err != nil {
+		return err
+	}
+	expired, err := service.ExpireAudio(ctx, q, p.store, retention.AudioDays)
+	if expired > 0 {
+		slog.Info("删除了过了保留期的录音", "count", expired, "days", retention.AudioDays)
 	}
 	return err
 }

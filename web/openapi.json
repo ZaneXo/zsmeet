@@ -135,6 +135,14 @@
             "description": "留空会用当前时间起一个",
             "maxLength": 200,
             "type": "string"
+          },
+          "visibility": {
+            "description": "谁能看：团队所有人（默认）或者只有自己（管理员也能看）",
+            "enum": [
+              "team",
+              "private"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -683,6 +691,23 @@
         ],
         "type": "object"
       },
+      "Item": {
+        "additionalProperties": false,
+        "properties": {
+          "can_edit": {
+            "description": "除了看，还能编辑；不传是只能看",
+            "type": "boolean"
+          },
+          "user_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
       "LLMModelsInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -858,8 +883,17 @@
       "Meeting": {
         "additionalProperties": false,
         "properties": {
+          "audio_deleted_at": {
+            "description": "录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项",
+            "format": "date-time",
+            "type": "string"
+          },
           "can_edit": {
-            "description": "当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口",
+            "description": "当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "description": "当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以",
             "type": "boolean"
           },
           "created_at": {
@@ -905,6 +939,10 @@
             "description": "当前纪要的版本号，0 表示还没有纪要",
             "format": "int64",
             "type": "integer"
+          },
+          "owner_id": {
+            "format": "uuid",
+            "type": "string"
           },
           "owner_name": {
             "type": "string"
@@ -964,6 +1002,15 @@
           "updated_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "visibility": {
+            "description": "谁能看：团队所有人、指定的人、只有创建者（管理员总能看）",
+            "enum": [
+              "team",
+              "members",
+              "private"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -979,20 +1026,58 @@
           "duration_sec",
           "has_audio",
           "minutes_version",
+          "visibility",
           "can_edit",
+          "can_manage",
           "marks",
           "speakers",
+          "owner_id",
           "owner_name",
           "created_at",
           "updated_at"
         ],
         "type": "object"
       },
+      "MeetingAccess": {
+        "additionalProperties": false,
+        "properties": {
+          "members": {
+            "description": "单独指定的人。可见范围是团队所有人时，这里是还能编辑的人；是指定的人时，这里是能看的人（can_edit 的还能编辑）",
+            "items": {
+              "$ref": "#/components/schemas/MeetingMember"
+            },
+            "type": "array"
+          },
+          "visibility": {
+            "description": "谁能看：团队所有人、指定的人、只有创建者（管理员总能看）",
+            "enum": [
+              "team",
+              "members",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility",
+          "members"
+        ],
+        "type": "object"
+      },
       "MeetingListItem": {
         "additionalProperties": false,
         "properties": {
+          "audio_deleted_at": {
+            "description": "录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项",
+            "format": "date-time",
+            "type": "string"
+          },
           "can_edit": {
-            "description": "当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口",
+            "description": "当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "description": "当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以",
             "type": "boolean"
           },
           "created_at": {
@@ -1046,6 +1131,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "owner_id": {
+            "format": "uuid",
+            "type": "string"
+          },
           "owner_name": {
             "type": "string"
           },
@@ -1104,6 +1193,15 @@
           "updated_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "visibility": {
+            "description": "谁能看：团队所有人、指定的人、只有创建者（管理员总能看）",
+            "enum": [
+              "team",
+              "members",
+              "private"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -1120,12 +1218,46 @@
           "duration_sec",
           "has_audio",
           "minutes_version",
+          "visibility",
           "can_edit",
+          "can_manage",
           "marks",
           "speakers",
+          "owner_id",
           "owner_name",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "MeetingMember": {
+        "additionalProperties": false,
+        "properties": {
+          "can_edit": {
+            "description": "除了看，还能编辑",
+            "type": "boolean"
+          },
+          "disabled": {
+            "description": "这个人已经停用了，登录不了",
+            "type": "boolean"
+          },
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "name",
+          "email",
+          "can_edit",
+          "disabled"
         ],
         "type": "object"
       },
@@ -1291,6 +1423,42 @@
         ],
         "type": "object"
       },
+      "PeopleOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Person"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Person": {
+        "additionalProperties": false,
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "email"
+        ],
+        "type": "object"
+      },
       "RegenerateMinutesInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1349,6 +1517,36 @@
         "required": [
           "token",
           "expires_at"
+        ],
+        "type": "object"
+      },
+      "RetentionInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "audio_days": {
+            "description": "录音保留多少天，7 到 3650，或者 0 表示一直保留",
+            "format": "int64",
+            "maximum": 3650,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "audio_days"
+        ],
+        "type": "object"
+      },
+      "RetentionOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "audio_days": {
+            "description": "录音保留多少天，0 表示一直保留。过了保留期只删录音文件，转写和纪要一直留着",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "audio_days"
         ],
         "type": "object"
       },
@@ -1450,6 +1648,34 @@
         ],
         "type": "object"
       },
+      "SetMeetingAccessInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "members": {
+            "description": "单独指定的人，整份替换；不传表示一个都没有。可见范围是只有自己时忽略（清空）",
+            "items": {
+              "$ref": "#/components/schemas/Item"
+            },
+            "maxItems": 200,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "visibility": {
+            "enum": [
+              "team",
+              "members",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
+        ],
+        "type": "object"
+      },
       "SetupInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1524,6 +1750,14 @@
       "Template": {
         "additionalProperties": false,
         "properties": {
+          "custom": {
+            "description": "管理员自己定义的模板（可以改、可以删）；内置的模板是 false",
+            "type": "boolean"
+          },
+          "guide": {
+            "description": "纪要要有哪几部分、每部分写什么（交给大模型的说明）",
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
@@ -1533,7 +1767,29 @@
         },
         "required": [
           "id",
-          "name"
+          "name",
+          "guide",
+          "custom"
+        ],
+        "type": "object"
+      },
+      "TemplateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "guide": {
+            "description": "纪要要有哪几部分、每部分写什么，一行一部分",
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "name": {
+            "description": "模板的名字，选模板时显示",
+            "maxLength": 30,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "guide"
         ],
         "type": "object"
       },
@@ -1597,8 +1853,17 @@
       "TrashedMeeting": {
         "additionalProperties": false,
         "properties": {
+          "audio_deleted_at": {
+            "description": "录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项",
+            "format": "date-time",
+            "type": "string"
+          },
           "can_edit": {
-            "description": "当前登录的人能不能修改这场会议（创建者和管理员可以）。界面据此决定显不显示编辑入口",
+            "description": "当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "description": "当前登录的人能不能删除这场会议、改谁能看谁能编辑：创建者和管理员可以",
             "type": "boolean"
           },
           "created_at": {
@@ -1653,6 +1918,10 @@
             "description": "当前纪要的版本号，0 表示还没有纪要",
             "format": "int64",
             "type": "integer"
+          },
+          "owner_id": {
+            "format": "uuid",
+            "type": "string"
           },
           "owner_name": {
             "type": "string"
@@ -1717,6 +1986,15 @@
           "updated_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "visibility": {
+            "description": "谁能看：团队所有人、指定的人、只有创建者（管理员总能看）",
+            "enum": [
+              "team",
+              "members",
+              "private"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -1735,9 +2013,12 @@
           "duration_sec",
           "has_audio",
           "minutes_version",
+          "visibility",
           "can_edit",
+          "can_manage",
           "marks",
           "speakers",
+          "owner_id",
           "owner_name",
           "created_at",
           "updated_at"
@@ -2427,6 +2708,110 @@
           }
         ],
         "summary": "修改会议标题",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
+    "/api/meetings/{id}/access": {
+      "get": {
+        "description": "能看这场会议的人都能看。创建者和管理员总能看、能编辑，不在列表里。",
+        "operationId": "get-meeting-access",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingAccess"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "谁能看、谁能编辑这场会议",
+        "tags": [
+          "会议"
+        ]
+      },
+      "put": {
+        "description": "只有创建者和管理员能改。已经发到飞书群的卡片、导入的飞书文档不受影响。",
+        "operationId": "set-meeting-access",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMeetingAccessInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingAccess"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "改谁能看、谁能编辑这场会议",
         "tags": [
           "会议"
         ]
@@ -3502,6 +3887,43 @@
         ]
       }
     },
+    "/api/people": {
+      "get": {
+        "description": "没停用的成员，给会议指定谁能看、谁能编辑时选。所有登录的人都能看。",
+        "operationId": "list-people",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeopleOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "团队里的人",
+        "tags": [
+          "成员"
+        ]
+      }
+    },
     "/api/settings/feishu": {
       "get": {
         "operationId": "get-feishu-settings",
@@ -3851,6 +4273,91 @@
         ]
       }
     },
+    "/api/settings/retention": {
+      "get": {
+        "operationId": "get-retention",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "录音保留多久",
+        "tags": [
+          "设置"
+        ]
+      },
+      "put": {
+        "description": "改短以后，后台巡检时（每分钟一次）会删掉已经过期的录音文件，删了不能恢复。转写和纪要不受影响。",
+        "operationId": "put-retention",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "保存录音保留多久",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
     "/api/setup": {
       "post": {
         "description": "只在系统里还没有任何用户时可用，成功后直接登录。",
@@ -3927,6 +4434,7 @@
     },
     "/api/templates": {
       "get": {
+        "description": "先是内置的四种，再是管理员自己定义的。",
         "operationId": "list-templates",
         "responses": {
           "200": {
@@ -3956,6 +4464,153 @@
           }
         ],
         "summary": "可选的纪要模板",
+        "tags": [
+          "会议"
+        ]
+      },
+      "post": {
+        "operationId": "create-template",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Template"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "新建纪要模板",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
+    "/api/templates/{id}": {
+      "delete": {
+        "description": "只能删自定义的模板。已经写好的纪要不受影响；还选着它的会议以后重新生成时用通用模板。",
+        "operationId": "delete-template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "删除纪要模板",
+        "tags": [
+          "会议"
+        ]
+      },
+      "put": {
+        "description": "只能改自定义的模板。以后用它写的纪要按新的写法，已经写好的不变。",
+        "operationId": "update-template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Template"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "修改纪要模板",
         "tags": [
           "会议"
         ]

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/export"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
@@ -23,9 +24,9 @@ type ExportFile struct {
 const docxType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 // Export 导出纪要（当前版本）或转写。what 是 minutes / transcript，format 是 md / docx / txt（txt 只用于转写）。
-// 团队里的人都能看全部会议，所以也都能导出。
-func (s *Service) Export(ctx context.Context, id uuid.UUID, what, format string) (ExportFile, error) {
-	m, err := s.GetMeeting(ctx, id)
+// 能看这场会议的人都能导出。
+func (s *Service) Export(ctx context.Context, user sqlc.User, id uuid.UUID, what, format string) (ExportFile, error) {
+	m, err := s.GetMeeting(ctx, user, id)
 	if err != nil {
 		return ExportFile{}, err
 	}
@@ -38,7 +39,7 @@ func (s *Service) Export(ctx context.Context, id uuid.UUID, what, format string)
 		if m.CurrentVersion == 0 {
 			return ExportFile{}, conflict("这场会议还没有纪要，等生成以后再导出")
 		}
-		minutes, err := s.GetMinutes(ctx, id, 0)
+		minutes, err := s.GetMinutes(ctx, user, id, 0)
 		if err != nil {
 			return ExportFile{}, err
 		}
@@ -48,7 +49,7 @@ func (s *Service) Export(ctx context.Context, id uuid.UUID, what, format string)
 			format = "md" // 纪要本来就是 Markdown 文本
 		}
 	case "transcript":
-		segs, err := s.Transcript(ctx, id)
+		segs, err := s.Transcript(ctx, user, id)
 		if err != nil {
 			return ExportFile{}, err
 		}

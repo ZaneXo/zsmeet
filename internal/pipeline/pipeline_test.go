@@ -26,6 +26,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/queue"
 	"github.com/ZaneXo/zsmeet/internal/search"
 	"github.com/ZaneXo/zsmeet/internal/secret"
+	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/storage"
 	"github.com/ZaneXo/zsmeet/internal/testdb"
@@ -122,7 +123,7 @@ func (e *env) upload(content []byte) queue.ProcessArgs {
 	e.t.Helper()
 	ctx := e.t.Context()
 	m, err := e.q.CreateMeeting(ctx, sqlc.CreateMeetingParams{
-		OwnerID: e.user.ID, Title: "产品周会", Source: "upload", Template: "general", Hotwords: "River",
+		OwnerID: e.user.ID, Title: "产品周会", Source: "upload", Template: "general", Hotwords: "River", Visibility: "team",
 	})
 	if err != nil {
 		e.t.Fatal(err)
@@ -534,5 +535,100 @@ func TestRenameWhileWritingMinutes(t *testing.T) {
 	mv, err := e.q.GetMinutesVersion(t.Context(), sqlc.GetMinutesVersionParams{MeetingID: id, Version: 1})
 	if err != nil || mv.Content != "## 摘要\n张敏 提出一期只做网页端。" {
 		t.Errorf("纪要要用最新的名字：%q %v", mv.Content, err)
+	}
+}
+
+// 录音保留期：过期的录音文件删掉、记下删除时间，转写和纪要留着；正在处理的不删；0 表示一直保留。
+func TestExpireAudio(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	id := args.MeetingID
+	m := e.meeting(id)
+	file := e.w.store.Path(m.AudioKey)
+	if n, err := service.ExpireAudio(ctx, e.q, e.w.store, 90); err != nil || n != 0 {
+		t.Fatalf("刚创建的会议不过期：%d %v", n, err)
+	}
+	if _, err := e.pool.Exec(ctx, "UPDATE meetings SET created_at = now() - interval '100 days' WHERE id = $1", id); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := service.ExpireAudio(ctx, e.q, e.w.store, 0); err != nil || n != 0 {
+		t.Fatalf("一直保留时什么都不删：%d %v", n, err)
+	}
+	// 正在处理（比如重新生成纪要）的不删
+	e.enqueue(id, "done")
+	if n, err := service.ExpireAudio(ctx, e.q, e.w.store, 90); err != nil || n != 0 {
+		t.Fatalf("正在处理的会议不删录音：%d %v", n, err)
+	}
+	if _, err := e.pool.Exec(ctx, "UPDATE meetings SET status = 'done' WHERE id = $1", id); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := service.ExpireAudio(ctx, e.q, e.w.store, 90); err != nil || n != 1 {
+		t.Fatalf("过了保留期的录音要删：%d %v", n, err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("录音文件要删掉：%v", err)
+	}
+	if m := e.meeting(id); m.AudioDeletedAt == nil || m.CurrentVersion == 0 {
+		t.Errorf("记下删除时间，纪要留着：%+v", m)
+	}
+	if _, err := e.q.GetTranscript(ctx, id); err != nil {
+		t.Errorf("转写留着：%v", err)
+	}
+	if n, _ := service.ExpireAudio(ctx, e.q, e.w.store, 90); n != 0 {
+		t.Errorf("删过的不再删：%d", n)
+	}
+}
+
+// 自定义模板的写法交给大模型；模板被删掉以后重新生成，改用通用模板。
+func TestCustomTemplateAndFallback(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	tpl, err := e.q.CreateCustomTemplate(t.Context(), sqlc.CreateCustomTemplateParams{
+		Name: "需求评审", Guide: "1. 需求变更：逐条列出改了什么、谁提的", CreatedBy: &e.user.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := e.upload(wav())
+	if _, err := e.pool.Exec(t.Context(), "UPDATE meetings SET template = $2 WHERE id = $1", args.MeetingID, tpl.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	if prompt := e.lastPrompt.Load(); prompt == nil || !strings.Contains(*prompt, "逐条列出改了什么、谁提的") {
+		t.Errorf("提示词里没有自定义模板的写法：%v", prompt)
+	}
+	mv, err := e.q.GetMinutesVersion(t.Context(), sqlc.GetMinutesVersionParams{MeetingID: args.MeetingID, Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mv.Template != tpl.ID.String() {
+		t.Errorf("第 1 版记下用的模板：%q", mv.Template)
+	}
+
+	if _, err := e.q.DeleteCustomTemplate(t.Context(), tpl.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(e.enqueue(args.MeetingID, "done")); err != nil {
+		t.Fatal(err)
+	}
+	if m := e.meeting(args.MeetingID); m.Status != "done" || m.CurrentVersion != 2 {
+		t.Fatalf("模板删掉以后照样能重新生成：%s %d %s", m.Status, m.CurrentVersion, m.Error)
+	}
+	if prompt := e.lastPrompt.Load(); prompt == nil || !strings.Contains(*prompt, "三到五句话说清楚这场会讨论了什么") {
+		t.Errorf("应该改用通用模板：%v", prompt)
+	}
+	mv, err = e.q.GetMinutesVersion(t.Context(), sqlc.GetMinutesVersionParams{MeetingID: args.MeetingID, Version: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mv.Template != "general" {
+		t.Errorf("第 2 版记的是通用模板：%q", mv.Template)
 	}
 }

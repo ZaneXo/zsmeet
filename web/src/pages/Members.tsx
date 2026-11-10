@@ -124,7 +124,7 @@ export function MembersSection({ me }: { me: User }) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-col gap-1">
             <h2 className="text-lg font-bold">成员</h2>
-            <p className="text-[13px] leading-relaxed text-muted">所有成员都能看到全部会议；只有会议的创建者和管理员能修改。</p>
+            <p className="text-[13px] leading-relaxed text-muted">会议默认所有成员都能看，只有创建者和管理员能改；创建者可以改成只给指定的人看，也可以指定谁还能编辑。管理员能看、能改所有会议。</p>
           </div>
           {!inviting && (
             <Button variant="primary" size="sm" onClick={() => setInviting(true)}>
@@ -409,7 +409,7 @@ function InviteForm({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
           </Select>
         </Field>
       </div>
-      <p className="text-xs leading-relaxed text-muted">成员可以上传会议、查看全部会议。管理员还能管理成员、配置大模型，并修改任何一场会议。</p>
+      <p className="text-xs leading-relaxed text-muted">成员可以上传会议、查看团队里的会议。管理员还能管理成员、配置大模型，看得到、改得了所有会议。</p>
       {create.isError && <Notice tone="bad">{errorMessage(create.error)}</Notice>}
       <div className="flex gap-2">
         <Button type="submit" variant="primary" size="sm" disabled={create.isPending}>

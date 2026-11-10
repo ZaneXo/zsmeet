@@ -275,7 +275,8 @@ func parseID(s string) (uuid.UUID, error) {
 
 // audio 回放录音。
 func (h *Handlers) audio(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.sessionUser(r.Context()); err != nil {
+	user, err := h.sessionUser(r.Context())
+	if err != nil {
 		code, msg := status(err)
 		http.Error(w, msg, code)
 		return
@@ -285,7 +286,7 @@ func (h *Handlers) audio(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	path, err := h.svc.AudioPath(r.Context(), id)
+	path, err := h.svc.AudioPath(r.Context(), user, id)
 	if err != nil {
 		code, msg := status(err)
 		http.Error(w, msg, code)

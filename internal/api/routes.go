@@ -13,6 +13,9 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, logoutOp, h.Logout)
 
 	huma.Register(api, listTemplatesOp, h.ListTemplates)
+	huma.Register(api, createTemplateOp, h.CreateTemplate)
+	huma.Register(api, updateTemplateOp, h.UpdateTemplate)
+	huma.Register(api, deleteTemplateOp, h.DeleteTemplate)
 	huma.Register(api, listMeetingsOp, h.ListMeetings)
 	huma.Register(api, createMeetingOp, h.CreateMeeting)
 	huma.Register(api, getMeetingOp, h.GetMeeting)
@@ -21,6 +24,9 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, retranscribeOp, h.Retranscribe)
 	huma.Register(api, renameSpeakersOp, h.RenameSpeakers)
 	huma.Register(api, exportOp, h.Export)
+	huma.Register(api, getMeetingAccessOp, h.GetMeetingAccess)
+	huma.Register(api, setMeetingAccessOp, h.SetMeetingAccess)
+	huma.Register(api, listPeopleOp, h.ListPeople)
 	huma.Register(api, deleteMeetingOp, h.DeleteMeeting)
 	huma.Register(api, listTrashOp, h.ListTrash)
 	huma.Register(api, restoreMeetingOp, h.RestoreMeeting)
@@ -53,6 +59,9 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, putLLMSettingsOp, h.PutLLMSettings)
 	huma.Register(api, testLLMSettingsOp, h.TestLLMSettings)
 	huma.Register(api, listLLMModelsOp, h.ListLLMModels)
+
+	huma.Register(api, getRetentionOp, h.GetRetention)
+	huma.Register(api, putRetentionOp, h.PutRetention)
 
 	huma.Register(api, getFeishuSettingsOp, h.GetFeishuSettings)
 	huma.Register(api, putFeishuSettingsOp, h.PutFeishuSettings)

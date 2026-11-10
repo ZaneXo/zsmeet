@@ -420,3 +420,46 @@ func TestShareDocOnlyGrantsRequester(t *testing.T) {
 		t.Errorf("只有纪要换了一版再发才标成「已更新」：%+v", sent)
 	}
 }
+
+// 只有自己能看、指定了人的会议不自动发到群里：群里的人不一定能看。
+// 排上队以后（重试、等文档导入期间）才改成不是团队可见的，发送时也不再发。
+func TestAutoPushSkipsNonTeamMeetings(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fs := e.feishu(settings.Feishu{SiteURL: "https://meet.example.com", ChatID: "oc_team", ChatName: "产品组", AutoPush: true})
+
+	queued := e.upload(wav())
+	if err := e.work(queued); err != nil {
+		t.Fatal(err)
+	}
+	shares := e.shares(queued.MeetingID)
+	if len(shares) != 1 {
+		t.Fatalf("团队可见的会议排上了自动发送：%+v", shares)
+	}
+	if _, err := e.pool.Exec(t.Context(), "UPDATE meetings SET visibility = 'private' WHERE id = $1", queued.MeetingID); err != nil {
+		t.Fatal(err)
+	}
+	sw := &shareWorker{w: e.w}
+	if err := sw.Work(t.Context(), jobOf(queue.FeishuShareArgs{ShareID: shares[0].FeishuShare.ID}, 2)); !errors.Is(err, &rivertype.JobCancelError{}) {
+		t.Fatalf("改成只有自己能看以后不再发，也不再重试：%v", err)
+	}
+	if s := e.shares(queued.MeetingID)[0].FeishuShare; s.Status != "failed" || !strings.Contains(s.Error, "不再自动发到群里") || len(fs.Sent()) != 0 {
+		t.Errorf("没有发出去，记下原因：%+v %v", s, fs.Sent())
+	}
+
+	for _, visibility := range []string{"private", "members"} {
+		args := e.upload(wav())
+		if _, err := e.pool.Exec(t.Context(), "UPDATE meetings SET visibility = $2 WHERE id = $1", args.MeetingID, visibility); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.work(args); err != nil {
+			t.Fatal(err)
+		}
+		if m := e.meeting(args.MeetingID); m.Status != "done" || m.CurrentVersion != 1 {
+			t.Fatalf("纪要照常生成：%s %d %s", m.Status, m.CurrentVersion, m.Error)
+		}
+		if shares := e.shares(args.MeetingID); len(shares) != 0 {
+			t.Errorf("%s 的会议不自动发到群里：%+v", visibility, shares)
+		}
+	}
+}

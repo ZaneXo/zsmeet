@@ -70,7 +70,7 @@ func (h *Handlers) ListTrash(ctx context.Context, _ *struct{}) (*TrashOutput, er
 	out.Body.Items = make([]TrashedMeeting, len(items))
 	for i, t := range items {
 		out.Body.Items[i] = TrashedMeeting{
-			Meeting:       toMeeting(t.Meeting, viewer),
+			Meeting:       toMeeting(t.Meeting),
 			DeletedAt:     *t.DeletedAt,
 			DeletedByName: t.DeletedByName,
 			PurgeAt:       t.PurgeAt(),
@@ -101,7 +101,7 @@ func (h *Handlers) RestoreMeeting(ctx context.Context, in *TrashID) (*MeetingOut
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m, currentUser(ctx))}, nil
+	return &MeetingOutput{Body: toMeeting(m)}, nil
 }
 
 var purgeMeetingOp = huma.Operation{

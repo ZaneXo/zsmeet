@@ -28,6 +28,12 @@
 # 前端依赖和构建结果（发布时由 Docker 或 make build 生成）
 /web/node_modules/
 /web/dist/
+/web/dist-desktop/
+
+# 桌面版（desktop/）的依赖、Rust 的构建产物、Tauri 生成的文件
+/desktop/node_modules/
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/
 
 # make build 的输出、Go 的测试产物
 /bin/

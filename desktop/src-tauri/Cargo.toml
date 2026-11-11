@@ -1,0 +1,54 @@
+[package]
+name = "zsmeet-desktop"
+version = "0.1.0"
+description = "zsmeet 桌面版：连上团队自己部署的 zsmeet 服务器"
+license = "MIT"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[lib]
+name = "zsmeet_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "zsmeet"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "io-util"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "http2"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1"
+url = "2"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
+hex = "0.4"
+percent-encoding = "2"
+log = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3"
+# 测试里的假服务器要收发 JSON
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

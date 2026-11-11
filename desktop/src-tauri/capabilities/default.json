@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口：只用到事件。App 自己的命令（commands.rs）默认允许；插件都在 Rust 这边调用，不开放给界面",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

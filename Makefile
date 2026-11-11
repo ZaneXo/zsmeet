@@ -15,7 +15,7 @@ DEV_ENV := ZSMEET_DATABASE_URL='$(DEV_DB_URL)' \
 
 .PHONY: help
 help: ## 列出所有命令
-	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-11s %s\n", $$1, $$2}'
+	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-18s %s\n", $$1, $$2}'
 
 # ---- 开发 ----
 
@@ -83,3 +83,28 @@ build: ## 构建带网页的程序到 bin/zsmeet
 .PHONY: docker
 docker: ## 构建 Docker 镜像 zsmeet:local（先把 deploy/.env.example 复制成 deploy/.env 并填好）
 	docker compose -f deploy/docker-compose.yml build
+
+# ---- 桌面版（macOS，desktop/，见 docs/desktop.md）----
+# 需要 Rust（rustup）。界面是 web/ 按桌面版模式构建的（pnpm -C web build --mode desktop），Tauri 会自动构建
+
+.PHONY: desktop-dev
+desktop-dev: ## 开发桌面版：打开 App 窗口，界面改了自动刷新
+	pnpm -C desktop install --frozen-lockfile
+	pnpm -C desktop tauri dev
+
+.PHONY: desktop-build
+desktop-build: ## 构建桌面版的 .app 和 DMG（本机的架构，ad-hoc 签名）
+	pnpm -C desktop install --frozen-lockfile
+	pnpm -C desktop tauri build
+
+.PHONY: desktop-universal
+desktop-universal: ## 构建 Apple 芯片和 Intel 通用的 DMG（和发布时一样）
+	rustup target add aarch64-apple-darwin x86_64-apple-darwin
+	pnpm -C desktop install --frozen-lockfile
+	pnpm -C desktop tauri build --target universal-apple-darwin
+
+.PHONY: desktop-test
+desktop-test: ## 桌面版的检查和测试：cargo fmt、clippy、cargo test
+	pnpm -C web install --frozen-lockfile
+	pnpm -C web build --mode desktop
+	cd desktop/src-tauri && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked

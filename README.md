@@ -171,6 +171,36 @@ zsmeet 的访问地址要填同事能打开的地址（卡片上的链接、用�
 
 内存：worker 加载模型后常驻约 1 GB。另外一场录音会整段读进内存，每小时约占 230 MB，所以单场上限是 6 小时。
 
+## 桌面版（macOS）
+
+macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自己部署的 zsmeet 服务器：看会议、搜索、问会议、上传录音、导出，和网页版一样；打开过的会议在断网时也能看。录电脑里会议软件的声音还在做（见[路线图](#路线图)）。设计见 [docs/desktop.md](docs/desktop.md)。
+
+**安装**：在 [Releases](https://github.com/ZaneXo/zsmeet/releases) 里找 `desktop-v` 开头的版本，下载 `zsmeet-desktop-…-macos-universal.dmg`，打开后把 zsmeet 拖进「应用程序」。目前的安装包没有签名，第一次打开时 macOS 会提示「无法验证开发者」：在「应用程序」里右键点 zsmeet →「打开」，再点一次「打开」（只用做一次）。新版本的 macOS 上如果没有「打开」按钮，到「系统设置 → 隐私与安全性」最下面点「仍要打开」。
+
+**第一次打开**：
+
+1. 填服务器地址，也就是在浏览器里打开 zsmeet 用的地址（比如 `https://meet.example.com`）。没写 `http://` 或 `https://` 时先试 https，连不上再试 http。服务器要先在网页上完成初始化，并且是支持桌面版的版本。
+2. 点「在浏览器里登录」：浏览器会打开 zsmeet 的登录页，用密码或飞书登录后点「允许」，浏览器会跳回 App，就登录好了。App 里不输密码。浏览器问「要打开 zsmeet 吗」时点允许。
+3. 登录信息存在 macOS 的钥匙串里（名称是 `io.github.zanexo.zsmeet`，账户是服务器地址），下次打开不用再登录。重新安装新版本后第一次打开，macOS 可能会问是否允许 zsmeet 使用钥匙串里的这一项，点「允许」或「始终允许」（没签名的 App 每个版本在系统看来都是新的）。
+
+**用起来和网页版的不同**：
+
+- 关掉窗口 App 不退出，留在菜单栏里（菜单栏图标 →「打开 zsmeet」）；要退出用菜单栏图标 →「退出」或者 ⌘Q。
+- 导出纪要、转写时弹出保存对话框；纪要里的链接用系统浏览器打开。
+- 「设置」里只有账号：能看到连的哪台服务器、退出登录、切换服务器。改密码、关联飞书，以及管理员的团队设置，点「在网页里打开」到浏览器里做。在网页上改了密码，或者在账号页退出了这台电脑，App 会回到登录页。
+- **离线**：连不上服务器时，会议列表、会议详情、纪要、转写这些打开过的内容照样能看，顶上显示「离线，显示的是上次同步的内容」，连上以后自动更新。没打开过的会议、录音回放、导出、修改都要等连上服务器。离线内容存在这台电脑上（每个用户最多约 256 MB），退出登录或切换服务器时删掉。
+
+**开发**：需要 Rust（[rustup](https://rustup.rs)，版本由 `desktop/src-tauri/rust-toolchain.toml` 固定）和上面「开发」一节的 Node + pnpm。
+
+```bash
+make desktop-dev        # 打开桌面版窗口，界面（web/）改了自动刷新。先用 make dev-api 起好服务器
+make desktop-test       # cargo fmt、clippy 和 Rust 的测试（不碰钥匙串，用假的服务器）
+make desktop-build      # 构建本机架构的 .app 和 DMG，在 desktop/src-tauri/target/release/bundle/ 下
+make desktop-universal  # 构建 Apple 芯片和 Intel 通用的 DMG，和发布时一样
+```
+
+开发模式下（`make desktop-dev`）macOS 不会把 `zsmeet://` 的链接交给它，浏览器登录完跳不回来：要试登录，用 `make desktop-build` 打出来的 App。界面里网页版和桌面版不一样的地方都在 `web/src/platform/`；网页版的构建（`pnpm -C web build`）里没有桌面版的代码。
+
 ## 它是怎么工作的
 
 ```
@@ -215,7 +245,8 @@ internal/
   llm/              调用 OpenAI 兼容接口
   db/               表结构迁移（migrations/）、SQL（queries/）、sqlc 生成的代码（sqlc/）
   …                 其余是各管一件小事的包：audio、models、search、storage、secret、settings
-web/                前端：React + TypeScript + Tailwind
+web/                前端：React + TypeScript + Tailwind（网页版和桌面版共用，不同的地方在 src/platform/）
+desktop/            桌面版（macOS，Tauri 2）：本地代理、离线缓存、登录、菜单栏
 deploy/             Dockerfile、docker-compose.yml、.env.example
 tools/newapi/       make api 用的接口骨架生成器
 ```
@@ -254,6 +285,14 @@ git tag v0.1.0 && git push origin v0.1.0
 
 Actions（`.github/workflows/release.yml`）会先跑一遍检查和测试，再分别在 amd64 和 arm64 的机器上构建镜像（识别库通过 cgo 调用，不交叉编译），合成一个多架构镜像推到 `ghcr.io/zanexo/zsmeet`，打上 `0.1.0`、`0.1`、`latest` 三个标签（`v0.2.0-rc.1` 这样带「-」的预发布版本只打它自己的版本号），最后发一个 GitHub Release。在 Actions 页面手动运行 Release 时只试着构建两种架构，不推镜像、不发 Release。
 
+桌面版单独发布，推一个 desktop-v 开头的标签（版本号要和 `desktop/src-tauri/tauri.conf.json`、`Cargo.toml` 里的一致）：
+
+```bash
+git tag desktop-v0.1.0 && git push origin desktop-v0.1.0
+```
+
+Actions（`.github/workflows/desktop.yml`）跑完检查和测试，在 macOS 上打一个通用的 DMG，附到这个标签的 Release 上（不会顶掉服务器版本的「Latest」）。默认是 ad-hoc 签名；在仓库的 Secrets 里配了 Apple 的证书（`APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`）和公证用的账号（`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`）以后，自动签名并公证，说明写在 workflow 文件开头。平时改了 `desktop/` 或 `web/` 的 PR 也会跑一遍桌面版的检查和测试。
+
 第一次发布后如果别人拉镜像提示没有权限，说明镜像还是私有的：在仓库主页右边的 Packages 里打开 zsmeet，到 Package settings 把 Visibility 改成 Public（只用改一次）。
 
 ### 代码审查
@@ -268,7 +307,7 @@ PR 由 [CodeAnt AI](https://www.codeant.ai) 自动做 AI 代码审查，审查�
 
 ## 路线图
 
-接下来：实时字幕、桌面录音器（录系统声音）、GPU 加速、英文界面。
+接下来：桌面版录音（录电脑里会议软件的声音和麦克风，断网也能录）、实时字幕、GPU 加速、英文界面。
 
 已知的不足：
 

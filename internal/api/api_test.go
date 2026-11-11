@@ -47,6 +47,8 @@ type client struct {
 	// 直接调业务层，给那些不经过网页的操作用（服务器上的救急命令）
 	svc   *service.Service
 	store *storage.Local
+	// 不为空时每个请求都带 Authorization: Bearer <bearer>，相当于一个 App
+	bearer string
 }
 
 // result 是一次请求的结果。Body 是解析后的 JSON（没有响应体时为空）。
@@ -54,6 +56,7 @@ type result struct {
 	Status int
 	Body   map[string]any
 	Raw    string
+	Header http.Header
 }
 
 // newServer 起一个完整的接口服务，返回一个还没登录的客户端。
@@ -119,6 +122,9 @@ func (c *client) do(method, path string, body any) result {
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		c.t.Fatal(err)
@@ -128,7 +134,7 @@ func (c *client) do(method, path string, body any) result {
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	r := result{Status: resp.StatusCode, Raw: string(raw)}
+	r := result{Status: resp.StatusCode, Raw: string(raw), Header: resp.Header}
 	if len(raw) > 0 && strings.Contains(resp.Header.Get("Content-Type"), "json") {
 		if err := json.Unmarshal(raw, &r.Body); err != nil {
 			c.t.Fatalf("%s %s 返回的不是合法的 JSON：%s", method, path, raw)

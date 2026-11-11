@@ -1,4 +1,6 @@
 import { ApiError } from "../api/client";
+import { apiCredentials, apiHeaders, apiUrl } from "../platform";
+import { noteResponse } from "../platform/offline";
 
 /** 上传文件时每片的大小。后端单片上限是 8 MB。 */
 const CHUNK_BYTES = 4 * 1024 * 1024;
@@ -19,13 +21,14 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function sendChunk(meetingId: string, seq: number, body: Blob, signal: AbortSignal, timeoutMs?: number): Promise<ApiError | undefined> {
   const limited = timeoutMs && typeof AbortSignal.any === "function" ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : signal;
   try {
-    const response = await fetch(`/api/meetings/${meetingId}/chunks/${seq}`, {
+    const response = await fetch(apiUrl(`/api/meetings/${meetingId}/chunks/${seq}`), {
       method: "PUT",
-      headers: { "Content-Type": "application/octet-stream" },
+      headers: { ...apiHeaders(), "Content-Type": "application/octet-stream" },
       body,
-      credentials: "same-origin",
+      credentials: apiCredentials(),
       signal: limited,
     });
+    noteResponse(response);
     if (response.ok) return undefined;
     const problem = (await response.json().catch(() => ({}))) as { detail?: string };
     return new ApiError(response.status, problem.detail ?? `上传失败（${response.status}）`);

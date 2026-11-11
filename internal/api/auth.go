@@ -22,8 +22,12 @@ type StatusOutput struct {
 		Voiceprints bool   `json:"voiceprints" doc:"管理员是否打开了声纹（给说话人改过名字以后，之后的会议按声音认出这个人）；只对登录用户有意义"`
 		FeishuLogin bool   `json:"feishu_login" doc:"登录页上是否显示「用飞书登录」"`
 		Version     string `json:"version"`
+		API         int    `json:"api" doc:"接口的版本号，从 1 开始。App 发现服务器的版本比自己需要的旧时，提示升级服务器"`
 	}
 }
+
+// APIVersion 是接口的版本号（/api/status 里的 api）。App 依赖的接口有不兼容的变化、或者 App 要用新加的接口时加一
+const APIVersion = 1
 
 var statusOp = huma.Operation{
 	OperationID: "get-status",
@@ -37,6 +41,7 @@ var statusOp = huma.Operation{
 func (h *Handlers) Status(ctx context.Context, _ *struct{}) (*StatusOutput, error) {
 	out := &StatusOutput{}
 	out.Body.Version = h.api.OpenAPI().Info.Version
+	out.Body.API = APIVersion
 	initialized, err := h.svc.Initialized(ctx)
 	if err != nil {
 		return nil, toHTTP(err)
@@ -45,7 +50,7 @@ func (h *Handlers) Status(ctx context.Context, _ *struct{}) (*StatusOutput, erro
 	if out.Body.FeishuLogin, err = h.svc.FeishuLoginEnabled(ctx); err != nil {
 		return nil, toHTTP(err)
 	}
-	if user, err := h.sessionUser(ctx); err == nil {
+	if user, _, err := h.requestUser(ctx); err == nil {
 		out.Body.User = new(toUser(user))
 		// 保存的 API Key、App Secret 解不开（ZSMEET_SECRET_KEY 改过）时当作没配置好，不让整个网页打不开：
 		// 管理员到设置里重新填就好

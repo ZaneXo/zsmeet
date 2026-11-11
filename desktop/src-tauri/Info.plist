@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 打包时 Tauri 会把这里的内容合并进 App 的 Info.plist -->
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>zsmeet 要连接你填写的会议服务器。服务器在公司或家里的局域网里时，需要允许访问本地网络。</string>
+</dict>
+</plist>

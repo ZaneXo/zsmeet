@@ -8,6 +8,7 @@ import type { Tone } from "../components/ui";
 import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName, STAGE_LABEL } from "../lib/format";
 import { jumpParam } from "../lib/jump";
 import { useTicker } from "../lib/useTicker";
+import { isDesktop } from "../platform";
 import { TrashList } from "./Trash";
 import { UploadDialog } from "./UploadDialog";
 import { VISIBILITY_LABEL } from "./AccessDialog";
@@ -16,11 +17,15 @@ import { AskPanel } from "./Ask";
 /** 网页录音的会议多久没收到新的分片，就不再显示「录音中」（录音的网页可能关掉了、断网了，或者暂停着）。 */
 const RECORDING_STALE_MS = 90_000;
 
-/** 网页录音还在进行：最近一直有新的分片传上来。 */
-export function recordingLive(m: Meeting): boolean {
-  if (m.source !== "record" || m.status !== "uploading") return false;
+/** 最近一直有新的录音分片传上来。 */
+function chunksFlowing(m: Meeting): boolean {
   const last = Date.parse(m.last_chunk_at ?? m.created_at);
   return Date.now() - last < RECORDING_STALE_MS;
+}
+
+/** 网页录音还在进行：最近一直有新的分片传上来。 */
+export function recordingLive(m: Meeting): boolean {
+  return m.source === "record" && m.status === "uploading" && chunksFlowing(m);
 }
 
 /** 会议在列表里显示的状态标签。 */
@@ -28,6 +33,8 @@ export function meetingChip(m: Meeting): { tone: Tone; text: string } {
   switch (m.status) {
     case "uploading":
       if (m.source === "record") return recordingLive(m) ? { tone: "info", text: "录音中" } : { tone: "mute", text: "录音未传完" };
+      // 桌面版录的：录音从那台电脑传上来，断网时联网后接着传
+      if (m.source === "desktop") return chunksFlowing(m) ? { tone: "info", text: "电脑录音中" } : { tone: "mute", text: "等电脑传完录音" };
       return { tone: "mute", text: "上传未完成" };
     case "queued":
       return { tone: "mute", text: "排队中" };
@@ -112,11 +119,13 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
               问会议
             </Button>
           )}
-          <AppLink to="/record" className={buttonClass("primary")}>
-            <Icon name="mic" />
-            开始录音
-          </AppLink>
-          <Button onClick={() => setUploading(true)}>
+          {!isDesktop && (
+            <AppLink to="/record" className={buttonClass("primary")}>
+              <Icon name="mic" />
+              开始录音
+            </AppLink>
+          )}
+          <Button variant={isDesktop ? "primary" : "default"} onClick={() => setUploading(true)}>
             <Icon name="upload" />
             上传录音
           </Button>
@@ -203,13 +212,19 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
             <>你还没有创建过会议。别人创建的会议在「全部」里。</>
           ) : (
             <div className="flex flex-col items-center gap-4">
-              <span>还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。</span>
+              <span>
+                {isDesktop
+                  ? "还没有会议。上传一段会议录音，几分钟后就能看到转写和纪要。"
+                  : "还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。"}
+              </span>
               <span className="flex flex-wrap justify-center gap-2.5">
-                <AppLink to="/record" className={buttonClass("primary")}>
-                  <Icon name="mic" />
-                  开始录音
-                </AppLink>
-                <Button onClick={() => setUploading(true)}>
+                {!isDesktop && (
+                  <AppLink to="/record" className={buttonClass("primary")}>
+                    <Icon name="mic" />
+                    开始录音
+                  </AppLink>
+                )}
+                <Button variant={isDesktop ? "primary" : "default"} onClick={() => setUploading(true)}>
                   <Icon name="upload" />
                   上传录音
                 </Button>

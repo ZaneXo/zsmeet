@@ -2,8 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import { Navigate, Route, Routes, useLocation } from "react-router";
 import { api, errorMessage, unwrap } from "./api/client";
 import { Shell } from "./components/Shell";
+import { isDesktop } from "./platform";
+import { switchServer } from "./platform/desktop";
+import { DesktopNotInitialized, DesktopSessionExpired } from "./platform/DesktopScreens";
 import { Button, Notice, Spinner } from "./components/ui";
+import { APP_AUTHORIZE_PATH, pendingAuthorize } from "./lib/appAuthorize";
 import { AccountLinkPage } from "./pages/AccountLink";
+import { AppAuthorizePage } from "./pages/AppAuthorize";
 import { LoginPage, SetupPage } from "./pages/Auth";
 import { MeetingDetailPage } from "./pages/MeetingDetail";
 import { MeetingsPage } from "./pages/Meetings";
@@ -38,11 +43,24 @@ export function App() {
       <div className="mx-auto mt-24 flex max-w-md flex-col gap-4 px-4">
         <Notice tone="bad">{errorMessage(status.error)}</Notice>
         <Button onClick={() => status.refetch()}>重试</Button>
+        {isDesktop && (
+          <Button variant="ghost" onClick={() => void switchServer()}>
+            换一个服务器
+          </Button>
+        )}
       </div>
     );
   }
-  if (!data.initialized) return <SetupPage />;
-  if (!data.user) return <LoginPage feishuLogin={data.feishu_login} />;
+  // App（桌面版）登录用的授权页：在浏览器里打开，不在平常的界面框架里，没登录时它自己先显示登录表单
+  if (!isDesktop && pathname === APP_AUTHORIZE_PATH) return <AppAuthorizePage status={data} />;
+  // 桌面版不在 App 里初始化、输密码：那些都在浏览器里做
+  if (!data.initialized) return isDesktop ? <DesktopNotInitialized /> : <SetupPage />;
+  if (!data.user) return isDesktop ? <DesktopSessionExpired /> : <LoginPage feishuLogin={data.feishu_login} />;
+  // 从授权页去用飞书登录，登录完被带回了首页：接着打开授权页
+  if (!isDesktop && pathname === "/") {
+    const pending = pendingAuthorize();
+    if (pending) return <Navigate to={APP_AUTHORIZE_PATH + pending} replace />;
+  }
 
   return (
     <Shell user={data.user}>
@@ -60,7 +78,8 @@ export function App() {
             />
           }
         />
-        <Route path="/record" element={<RecordPage user={data.user} />} />
+        {/* 桌面版的录音是原生录音（第三阶段），网页录音不放进 App */}
+        <Route path="/record" element={isDesktop ? <Navigate to="/" replace /> : <RecordPage user={data.user} />} />
         <Route path="/settings/:section?" element={<SettingsPage user={data.user} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

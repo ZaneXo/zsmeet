@@ -26,7 +26,7 @@ func toUser(u sqlc.User) User {
 type Meeting struct {
 	ID     string `json:"id" format:"uuid"`
 	Title  string `json:"title"`
-	Source string `json:"source" enum:"record,upload,feishu" doc:"录音从哪来：网页录音、上传文件、飞书会议"`
+	Source string `json:"source" enum:"record,upload,feishu,desktop" doc:"录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）"`
 	Status string `json:"status" enum:"uploading,queued,processing,done,failed"`
 	// 只在 status 为 processing 时有意义
 	Stage    string  `json:"stage" enum:",models,assemble,transcribe,diarize,minutes" doc:"正在进行的处理步骤"`

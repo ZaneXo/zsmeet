@@ -1,0 +1,169 @@
+# 桌面版（macOS，desktop/）：
+#   - 改了 desktop/ 或 web/ 的 PR、push 到 main：rustfmt、clippy、cargo test，以及按桌面版模式构建界面
+#   - 推 desktop-v 开头的标签（比如 desktop-v0.1.0）：再打一个 universal（Apple 芯片 + Intel）的 DMG，附到 GitHub Release 上
+#
+# 默认打出来的是 ad-hoc 签名（未签名）的 DMG，第一次打开要在 Finder 里右键 →「打开」。
+# 在仓库的 Settings → Secrets and variables → Actions 里配了下面这些 Secrets，就改成正式签名并公证：
+#   APPLE_CERTIFICATE           Developer ID Application 证书导出的 .p12，base64 编码（base64 -i cert.p12 | pbcopy）
+#   APPLE_CERTIFICATE_PASSWORD  导出 .p12 时设的密码
+#   APPLE_SIGNING_IDENTITY      证书名，比如 "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_ID                    用来公证的 Apple ID
+#   APPLE_PASSWORD              这个 Apple ID 的 App 专用密码（appleid.apple.com 里生成）
+#   APPLE_TEAM_ID               开发者团队 ID
+name: Desktop
+
+on:
+  push:
+    branches: [main]
+    tags: ["desktop-v*"]
+    # 标签不看 paths：推了 desktop-v 标签就一定会打包
+    paths:
+      - "desktop/**"
+      - "web/**"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "web/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: 检查和测试
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      # 和 ci.yml 一样，装 web/package.json 里 packageManager 指定的 pnpm 版本
+      - name: 安装 pnpm 和前端依赖
+        run: |
+          npm install -g "$(node -p 'require("./web/package.json").packageManager.split("+")[0]')"
+          pnpm -C web install --frozen-lockfile
+
+      # Rust 那边编译时要把界面打包进去，先构建好
+      - name: 按桌面版模式构建界面
+        run: pnpm -C web build --mode desktop
+
+      # 在 src-tauri 里执行，才会装上 rust-toolchain.toml 固定的版本
+      - name: 安装 Rust
+        working-directory: desktop/src-tauri
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/src-tauri/target
+          key: desktop-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/rust-toolchain.toml') }}
+          restore-keys: desktop-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: 代码格式（cargo fmt）
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+
+      - name: 静态检查（clippy）
+        working-directory: desktop/src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: 测试
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+
+  release:
+    name: 打包 DMG 并发布
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      # 配了证书才签名、公证；secrets 不能直接写在步骤的 if 里
+      HAS_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: 检查版本号
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node -p 'require("./desktop/src-tauri/tauri.conf.json").version')"
+          if [[ "$TAG" != "desktop-v$version" ]]; then
+            echo "标签 $TAG 和 desktop/src-tauri/tauri.conf.json 里的版本 $version 对不上，请先改版本号（Cargo.toml 也一起改）"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 pnpm 和依赖
+        run: |
+          npm install -g "$(node -p 'require("./web/package.json").packageManager.split("+")[0]')"
+          pnpm -C web install --frozen-lockfile
+          pnpm -C desktop install --frozen-lockfile
+
+      - name: 安装 Rust（两种架构）
+        working-directory: desktop/src-tauri
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: 构建（ad-hoc 签名）
+        if: env.HAS_SIGNING != 'true'
+        run: pnpm -C desktop tauri build --target universal-apple-darwin
+
+      # Tauri 看到 APPLE_CERTIFICATE 会把证书导入一个临时钥匙串来签名，看到 APPLE_ID 这一组会顺带公证
+      - name: 构建（签名并公证）
+        if: env.HAS_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm -C desktop tauri build --target universal-apple-darwin
+
+      - name: 发 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          src="desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/zsmeet_${VERSION}_universal.dmg"
+          dmg="zsmeet-desktop-${VERSION}-macos-universal.dmg"
+          cp "$src" "$dmg"
+          if [[ "$HAS_SIGNING" == "true" ]]; then
+            notes="zsmeet 桌面版（macOS 14.4 及以上，Apple 芯片和 Intel 都能用）。安装和第一次使用见 README 的「桌面版（macOS）」一节。"
+          else
+            notes="zsmeet 桌面版（macOS 14.4 及以上，Apple 芯片和 Intel 都能用）。这个版本没有签名：第一次打开时在「应用程序」里右键点 zsmeet →「打开」。详见 README 的「桌面版（macOS）」一节。"
+          fi
+          # 重新运行时 Release 已经在了，只替换文件
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            flags=()
+            if [[ "$TAG" == *-*-* ]]; then flags+=(--prerelease); fi
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "zsmeet 桌面版 $VERSION" --notes "$notes" --latest=false "${flags[@]}"
+          fi
+          gh release upload "$TAG" "$dmg" --repo "$GITHUB_REPOSITORY" --clobber

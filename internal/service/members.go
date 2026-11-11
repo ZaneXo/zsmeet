@@ -282,9 +282,13 @@ func (s *Service) UpdateMember(ctx context.Context, actor sqlc.User, id uuid.UUI
 			}
 		}
 		// 停用、重新启用时，这个人名下还没用的重置密码链接都作废：
-		// 停用期间不该留着能改他密码的链接，启用以后需要的话再生成一个
+		// 停用期间不该留着能改他密码的链接，启用以后需要的话再生成一个。
+		// 登录着的 App 也全部退出，和网页上的登录（session_epoch）一样
 		if before.Disabled != out.Disabled {
 			if _, err := q.DeletePendingReset(ctx, &id); err != nil {
+				return err
+			}
+			if err := revokeAppAccess(ctx, q, id, nil); err != nil {
 				return err
 			}
 		}
@@ -533,8 +537,12 @@ func (s *Service) AcceptLink(ctx context.Context, token, name, pass string) (sql
 			if err := q.ClearLoginFailures(ctx, loginKey(target.Email)); err != nil {
 				return err
 			}
-			// 重置密码多半是账号出了问题：之前关联的飞书账号也一起解除，免得被人用它继续登录
+			// 重置密码多半是账号出了问题：之前关联的飞书账号也一起解除，免得被人用它继续登录；
+			// 登录着的 App 也全部退出
 			if _, err := q.DeleteUserIdentity(ctx, sqlc.DeleteUserIdentityParams{Provider: providerFeishu, UserID: target.ID}); err != nil {
+				return err
+			}
+			if err := revokeAppAccess(ctx, q, target.ID, nil); err != nil {
 				return err
 			}
 		}
@@ -543,9 +551,10 @@ func (s *Service) AcceptLink(ctx context.Context, token, name, pass string) (sql
 	return user, err
 }
 
-// ChangePassword 让登录的人修改自己的密码。成功后他在其他设备上的登录全部失效，
+// ChangePassword 让登录的人修改自己的密码。成功后他在其他设备上的登录全部失效，登录着的 App 也全部退出。
 // 返回的用户带着新的 session_epoch，调用方要把它记进当前会话，当前设备才不会被一起踢掉。
-func (s *Service) ChangePassword(ctx context.Context, user sqlc.User, current, next string) (sqlc.User, error) {
+// 是在 App 里改的话 keepToken 是这台 App 的令牌，留着它，这台 App 不退出。
+func (s *Service) ChangePassword(ctx context.Context, user sqlc.User, current, next string, keepToken *uuid.UUID) (sqlc.User, error) {
 	if err := checkPassword(next); err != nil {
 		return sqlc.User{}, err
 	}
@@ -570,8 +579,10 @@ func (s *Service) ChangePassword(ctx context.Context, user sqlc.User, current, n
 		if _, err := q.DeletePendingReset(ctx, &me.ID); err != nil {
 			return err
 		}
-		_, err = q.DeleteUserIdentity(ctx, sqlc.DeleteUserIdentityParams{Provider: providerFeishu, UserID: me.ID})
-		return err
+		if _, err := q.DeleteUserIdentity(ctx, sqlc.DeleteUserIdentityParams{Provider: providerFeishu, UserID: me.ID}); err != nil {
+			return err
+		}
+		return revokeAppAccess(ctx, q, me.ID, keepToken)
 	})
 	return out, err
 }
@@ -619,9 +630,12 @@ func (s *Service) RecoverAdmin(ctx context.Context, email string) (sqlc.User, er
 		if out, err = q.SetUserDisabled(ctx, sqlc.SetUserDisabledParams{ID: user.ID, Disabled: false}); err != nil {
 			return err
 		}
-		// 下面两条和 UpdateMember 一样：重新启用时，他名下还没用的重置密码链接作废……
+		// 下面两条和 UpdateMember 一样：重新启用时，他名下还没用的重置密码链接作废（App 的登录也是）……
 		if user.Disabled {
 			if _, err := q.DeletePendingReset(ctx, &user.ID); err != nil {
+				return err
+			}
+			if err := revokeAppAccess(ctx, q, user.ID, nil); err != nil {
 				return err
 			}
 		}

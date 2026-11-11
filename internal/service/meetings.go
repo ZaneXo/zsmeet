@@ -61,7 +61,8 @@ func (s *Service) CreateMeeting(ctx context.Context, user sqlc.User, in NewMeeti
 	if title == "" {
 		title = time.Now().Format("1月2日 15:04") + " 的会议"
 	}
-	if in.Source != "upload" && in.Source != "record" {
+	// desktop 是桌面版录的电脑声音和麦克风；feishu 只由后台从飞书拉取时创建
+	if in.Source != "upload" && in.Source != "record" && in.Source != "desktop" {
 		return Meeting{}, invalid("不认识的会议来源：%s", in.Source)
 	}
 	if in.Template == "" {

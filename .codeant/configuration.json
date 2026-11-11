@@ -5,12 +5,15 @@
       "web/openapi.json",
       "web/src/api/schema.d.ts",
       "web/pnpm-lock.yaml",
-      "go.sum"
+      "go.sum",
+      "desktop/pnpm-lock.yaml",
+      "desktop/src-tauri/Cargo.lock",
+      "desktop/src-tauri/icons/**"
     ]
   },
   "file_filters": {
     "config": {
-      "exclude_files": "internal/db/sqlc/**,web/openapi.json,web/src/api/schema.d.ts,web/pnpm-lock.yaml,go.sum"
+      "exclude_files": "internal/db/sqlc/**,web/openapi.json,web/src/api/schema.d.ts,web/pnpm-lock.yaml,go.sum,desktop/pnpm-lock.yaml,desktop/src-tauri/Cargo.lock,desktop/src-tauri/icons/**"
     }
   }
 }

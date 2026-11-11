@@ -23,6 +23,27 @@ type AccountLink struct {
 	UsedAt    *time.Time
 }
 
+type AppAuthCode struct {
+	CodeHash      []byte
+	UserID        uuid.UUID
+	Client        string
+	DeviceName    string
+	CodeChallenge string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	UsedAt        *time.Time
+}
+
+type AppToken struct {
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	Client     string
+	DeviceName string
+	TokenHash  []byte
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+}
+
 type FeishuImport struct {
 	FeishuMeetingID string
 	Topic           string

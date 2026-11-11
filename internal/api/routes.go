@@ -14,6 +14,11 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, feishuLoginStartOp, h.FeishuLoginStart)
 	huma.Register(api, feishuLinkStartOp, h.FeishuLinkStart)
 	huma.Register(api, feishuLoginCallbackOp, h.FeishuLoginCallback)
+	huma.Register(api, authorizeAppOp, h.AuthorizeApp)
+	huma.Register(api, appTokenOp, h.AppToken)
+	huma.Register(api, appLogoutOp, h.AppLogout)
+	huma.Register(api, listDevicesOp, h.ListDevices)
+	huma.Register(api, deleteDeviceOp, h.DeleteDevice)
 
 	huma.Register(api, listTemplatesOp, h.ListTemplates)
 	huma.Register(api, createTemplateOp, h.CreateTemplate)

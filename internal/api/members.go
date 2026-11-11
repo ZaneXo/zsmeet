@@ -349,14 +349,21 @@ var changePasswordOp = huma.Operation{
 	Method:        http.MethodPost,
 	Path:          "/api/me/password",
 	Summary:       "修改自己的密码",
-	Description:   "成功后当前设备保持登录，其他设备上的登录全部失效。",
+	Description:   "成功后当前设备保持登录，其他设备上的登录全部失效，登录着的 App 也全部退出（在 App 里改的话，这台 App 不退出）。",
 	Tags:          []string{"账号"},
 	Security:      loggedIn,
 	DefaultStatus: http.StatusNoContent,
 }
 
 func (h *Handlers) ChangePassword(ctx context.Context, in *ChangePasswordInput) (*struct{}, error) {
-	user, err := h.svc.ChangePassword(ctx, currentUser(ctx), in.Body.CurrentPassword, in.Body.NewPassword)
+	// 在 App 里改的：留下这台 App 的令牌。App 的请求没有网页的会话，不用换
+	if t := currentAppToken(ctx); t != nil {
+		if _, err := h.svc.ChangePassword(ctx, currentUser(ctx), in.Body.CurrentPassword, in.Body.NewPassword, &t.ID); err != nil {
+			return nil, toHTTP(err)
+		}
+		return nil, nil
+	}
+	user, err := h.svc.ChangePassword(ctx, currentUser(ctx), in.Body.CurrentPassword, in.Body.NewPassword, nil)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

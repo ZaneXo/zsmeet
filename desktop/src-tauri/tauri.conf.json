@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "zsmeet",
+  "version": "0.1.0",
+  "identifier": "io.github.zanexo.zsmeet",
+  "build": {
+    "frontendDist": "../../web/dist-desktop",
+    "devUrl": "http://localhost:5174",
+    "beforeDevCommand": "pnpm -C ../web install --frozen-lockfile && pnpm -C ../web exec vite --mode desktop --port 5174 --strictPort",
+    "beforeBuildCommand": "pnpm -C ../web install --frozen-lockfile && pnpm -C ../web build --mode desktop"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "zsmeet",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "backgroundColor": "#F6F6F4",
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: http://127.0.0.1:*",
+        "media-src": "'self' blob: http://127.0.0.1:*",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:*",
+        "font-src": "'self' data:"
+      },
+      "devCsp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "Productivity",
+    "shortDescription": "zsmeet 会议纪要",
+    "copyright": "© 2026 zsmeet contributors · Apache License 2.0",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "14.4",
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["zsmeet"]
+      }
+    }
+  }
+}

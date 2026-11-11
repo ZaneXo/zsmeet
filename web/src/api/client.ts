@@ -19,6 +19,7 @@ export type Invite = components["schemas"]["Invite"];
 export type LinkInfo = components["schemas"]["LinkInfoOutputBody"];
 export type AskAnswer = components["schemas"]["AskOutputBody"];
 export type Citation = components["schemas"]["Citation"];
+export type Device = components["schemas"]["Device"];
 
 export const api = createClient<paths>({ baseUrl: "", credentials: "same-origin" });
 // 桌面版：请求改发给 App 里的本地代理（见 src/platform/）

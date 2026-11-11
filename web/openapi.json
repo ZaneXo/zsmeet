@@ -24,6 +24,41 @@
         ],
         "type": "object"
       },
+      "AppTokenInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "description": "授权页给的授权码",
+            "type": "string"
+          },
+          "code_verifier": {
+            "description": "PKCE 的 code_verifier（43 到 128 个字符），它的 S256 要和授权时的 code_challenge 一样",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "code_verifier"
+        ],
+        "type": "object"
+      },
+      "AppTokenOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "token": {
+            "description": "App 令牌，形如 zsm_…。之后的请求放在 Authorization: Bearer 里。只在这里出现一次，服务器上只存它的哈希",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "required": [
+          "token",
+          "user"
+        ],
+        "type": "object"
+      },
       "AskInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -84,6 +119,42 @@
           "citations",
           "meetings_searched",
           "keywords"
+        ],
+        "type": "object"
+      },
+      "AuthorizeAppInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "client": {
+            "description": "哪种 App，目前只有 desktop",
+            "type": "string"
+          },
+          "code_challenge": {
+            "description": "base64url(SHA-256(code_verifier))，不补 =，43 个字符",
+            "type": "string"
+          },
+          "device_name": {
+            "description": "设备名（电脑名），账号页上显示。去掉首尾空白后不能为空，最长 100 个字",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client",
+          "device_name",
+          "code_challenge"
+        ],
+        "type": "object"
+      },
+      "AuthorizeAppOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "description": "一次性的授权码，2 分钟内有效。网页把它带在 zsmeet://auth?code=…\u0026state=… 里交给 App",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
         ],
         "type": "object"
       },
@@ -234,9 +305,11 @@
             "type": "string"
           },
           "source": {
+            "description": "upload 是上传文件，record 是网页录音，desktop 是桌面版录音",
             "enum": [
               "upload",
-              "record"
+              "record",
+              "desktop"
             ],
             "type": "string"
           },
@@ -260,6 +333,63 @@
         },
         "required": [
           "source"
+        ],
+        "type": "object"
+      },
+      "Device": {
+        "additionalProperties": false,
+        "properties": {
+          "client": {
+            "description": "哪种 App：desktop 是桌面版",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
+          },
+          "created_at": {
+            "description": "什么时候登录的",
+            "format": "date-time",
+            "type": "string"
+          },
+          "current": {
+            "description": "是不是发这个请求的这台 App",
+            "type": "boolean"
+          },
+          "device_name": {
+            "description": "设备名（电脑名）",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "last_used_at": {
+            "description": "上次使用的时间，大约精确到分钟。登录以后还没用过时没有这一项",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "client",
+          "device_name",
+          "created_at",
+          "current"
+        ],
+        "type": "object"
+      },
+      "DevicesOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Device"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
         ],
         "type": "object"
       },
@@ -1150,11 +1280,12 @@
             "type": "number"
           },
           "source": {
-            "description": "录音从哪来：网页录音、上传文件、飞书会议",
+            "description": "录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）",
             "enum": [
               "record",
               "upload",
-              "feishu"
+              "feishu",
+              "desktop"
             ],
             "type": "string"
           },
@@ -1350,11 +1481,12 @@
             "type": "number"
           },
           "source": {
-            "description": "录音从哪来：网页录音、上传文件、飞书会议",
+            "description": "录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）",
             "enum": [
               "record",
               "upload",
-              "feishu"
+              "feishu",
+              "desktop"
             ],
             "type": "string"
           },
@@ -2033,6 +2165,11 @@
       "StatusOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "api": {
+            "description": "接口的版本号，从 1 开始。App 发现服务器的版本比自己需要的旧时，提示升级服务器",
+            "format": "int64",
+            "type": "integer"
+          },
           "feishu_login": {
             "description": "登录页上是否显示「用飞书登录」",
             "type": "boolean"
@@ -2067,7 +2204,8 @@
           "feishu_ready",
           "voiceprints",
           "feishu_login",
-          "version"
+          "version",
+          "api"
         ],
         "type": "object"
       },
@@ -2271,11 +2409,12 @@
             "type": "string"
           },
           "source": {
-            "description": "录音从哪来：网页录音、上传文件、飞书会议",
+            "description": "录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）",
             "enum": [
               "record",
               "upload",
-              "feishu"
+              "feishu",
+              "desktop"
             ],
             "type": "string"
           },
@@ -2668,6 +2807,11 @@
       }
     },
     "securitySchemes": {
+      "bearer": {
+        "description": "App 令牌（zsm_ 开头），用授权码换来，见 POST /api/apps/token",
+        "scheme": "bearer",
+        "type": "http"
+      },
       "session": {
         "in": "cookie",
         "name": "zsmeet_session",
@@ -2676,7 +2820,7 @@
     }
   },
   "info": {
-    "description": "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login 和用飞书登录的 /api/auth/feishu/… 以外都需要先登录。",
+    "description": "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login、用飞书登录的 /api/auth/feishu/… 和 App 换令牌的 /api/apps/token 以外都需要先登录。网页用登录后的 Cookie；App（桌面版）用 Authorization: Bearer 带上 App 令牌，和网页的登录一样有效。",
     "title": "zsmeet",
     "version": "dev"
   },
@@ -2766,6 +2910,125 @@
         ]
       }
     },
+    "/api/apps/authorize": {
+      "post": {
+        "description": "网页上的授权页点「允许」时调用，返回一次性的授权码（2 分钟内有效，只能用一次，和 code_challenge 绑定）。只能在网页上登录后调用，带 App 令牌调用返回 403：App 不能自己给自己发新的令牌。",
+        "operationId": "authorize-app",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizeAppInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizeAppOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "允许一个 App 登录自己的账号",
+        "tags": [
+          "App"
+        ]
+      }
+    },
+    "/api/apps/logout": {
+      "post": {
+        "description": "作废请求里带的这个 App 令牌。只能带 App 令牌调用。",
+        "operationId": "app-logout",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "App 退出登录",
+        "tags": [
+          "App"
+        ]
+      }
+    },
+    "/api/apps/token": {
+      "post": {
+        "description": "不用登录。授权码不管换没换成功都用掉了。授权码不对、过期、用过了、和 code_verifier 对不上，都返回同一个 422。",
+        "operationId": "app-token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppTokenInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppTokenOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "用授权码换 App 令牌",
+        "tags": [
+          "App"
+        ]
+      }
+    },
     "/api/ask": {
       "post": {
         "description": "用自然语言提问，管理员配置的大模型根据会议的纪要和转写回答，并给出能点的出处。不填 meeting_id 时在自己能看的所有会议里找，填了只问那一场（看不到的会议返回 404）。没配置大模型时返回 409；每人每分钟最多问 6 次，超过返回 429；大模型出错或超时返回 502。",
@@ -2805,6 +3068,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "问会议",
@@ -2979,6 +3245,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "可以发纪要的飞书群",
@@ -3028,6 +3297,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "邀请一个邮箱加入",
@@ -3068,6 +3342,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -3118,6 +3397,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -3193,6 +3477,90 @@
         ]
       }
     },
+    "/api/me/devices": {
+      "get": {
+        "description": "自己的账号在哪些 App 上登录着，新登录的在前。",
+        "operationId": "list-devices",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevicesOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "登录着的 App",
+        "tags": [
+          "App"
+        ]
+      }
+    },
+    "/api/me/devices/{id}": {
+      "delete": {
+        "description": "只能是自己的。那台 App 的令牌立刻失效，要再用得重新登录。",
+        "operationId": "delete-device",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "让一台 App 退出登录",
+        "tags": [
+          "App"
+        ]
+      }
+    },
     "/api/me/feishu": {
       "delete": {
         "description": "换了飞书账号时用：解除以后再关联新的飞书账号。",
@@ -3215,6 +3583,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "解除和飞书账号的关联",
@@ -3250,6 +3621,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "我关联的飞书账号",
@@ -3260,7 +3634,7 @@
     },
     "/api/me/feishu/link": {
       "post": {
-        "description": "核对当前密码，通过后返回飞书授权页的地址（浏览器整页打开），同时在 Cookie 里存下这次关联的 state。密码不对时返回 422。要求输入密码，是为了只拿到登录状态的人没法把自己的飞书账号关联上来。",
+        "description": "核对当前密码，通过后返回飞书授权页的地址（浏览器整页打开），同时在 Cookie 里存下这次关联的 state。密码不对时返回 422。要求输入密码，是为了只拿到登录状态的人没法把自己的飞书账号关联上来。只能在网页上调用：飞书跳回来时要认出网页上登录着的人，App 的令牌做不到。",
         "operationId": "feishu-link-start",
         "requestBody": {
           "content": {
@@ -3314,7 +3688,7 @@
     },
     "/api/me/password": {
       "post": {
-        "description": "成功后当前设备保持登录，其他设备上的登录全部失效。",
+        "description": "成功后当前设备保持登录，其他设备上的登录全部失效，登录着的 App 也全部退出（在 App 里改的话，这台 App 不退出）。",
         "operationId": "change-password",
         "requestBody": {
           "content": {
@@ -3344,6 +3718,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "修改自己的密码",
@@ -3416,6 +3793,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "会议列表",
@@ -3461,6 +3841,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "新建会议",
@@ -3502,6 +3885,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "删除会议（放进回收站）",
@@ -3547,6 +3933,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "会议详情",
@@ -3602,6 +3991,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "修改会议标题",
@@ -3650,6 +4042,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "谁能看、谁能编辑这场会议",
@@ -3706,6 +4101,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "改谁能看、谁能编辑这场会议",
@@ -3754,6 +4152,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "已经收到哪些分片",
@@ -3820,6 +4221,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "上传一个分片",
@@ -3878,6 +4282,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "上传完成，开始处理",
@@ -3965,6 +4372,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "订阅处理进度（SSE）",
@@ -4057,6 +4467,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "导出纪要或转写",
@@ -4104,6 +4517,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "这场会议发到飞书的记录",
@@ -4160,6 +4576,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "把纪要发到飞书",
@@ -4211,6 +4630,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "保存录音时标记的重点",
@@ -4271,6 +4693,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "会议纪要",
@@ -4327,6 +4752,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "保存手动修改的纪要",
@@ -4385,6 +4813,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "用大模型重新生成纪要",
@@ -4433,6 +4864,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "重新转写",
@@ -4481,6 +4915,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "重试处理失败的会议",
@@ -4539,6 +4976,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "给说话人起名字",
@@ -4587,6 +5027,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "会议转写",
@@ -4634,6 +5077,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "能发到的群机器人，和这场会议最近一次发到每个群的情况",
@@ -4690,6 +5136,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "把纪要发到群里",
@@ -4726,6 +5175,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -4788,6 +5242,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "修改成员的角色，或者停用、启用",
@@ -4831,6 +5290,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "解除成员和飞书账号的关联",
@@ -4872,6 +5336,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -4922,6 +5391,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "给成员生成重置密码的链接",
@@ -4959,6 +5433,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "团队里的人",
@@ -4995,6 +5472,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5044,6 +5526,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "保存飞书配置",
@@ -5081,6 +5568,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5132,6 +5624,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "测试飞书应用能不能连上",
@@ -5168,6 +5665,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5215,6 +5717,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5266,6 +5773,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "列出接口上可用的模型",
@@ -5308,6 +5820,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "测试大模型能不能连上",
@@ -5344,6 +5861,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5393,6 +5915,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "保存录音保留多久",
@@ -5429,6 +5956,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5477,6 +6009,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "保存 zsmeet 的访问地址",
@@ -5513,6 +6050,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5562,6 +6104,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "打开或关掉声纹",
@@ -5599,6 +6146,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5648,6 +6200,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "加一个群机器人",
@@ -5688,6 +6245,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5746,6 +6308,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "改一个群机器人",
@@ -5786,6 +6353,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -5899,6 +6471,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "可选的纪要模板",
@@ -5945,6 +6520,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "新建纪要模板",
@@ -5986,6 +6566,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -6046,6 +6631,11 @@
             "session": [
               "admin"
             ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
           }
         ],
         "summary": "修改纪要模板",
@@ -6083,6 +6673,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "回收站",
@@ -6124,6 +6717,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "彻底删除",
@@ -6171,6 +6767,9 @@
         "security": [
           {
             "session": []
+          },
+          {
+            "bearer": []
           }
         ],
         "summary": "从回收站恢复",
@@ -6201,6 +6800,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -6238,6 +6842,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }
@@ -6281,6 +6890,11 @@
         "security": [
           {
             "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
               "admin"
             ]
           }

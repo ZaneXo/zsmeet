@@ -232,6 +232,49 @@ func TestBuildDoesNotChargeDroppedSeparator(t *testing.T) {
 	}
 }
 
+// Size 正好是 Build 放下整场会议要的字数：很长的纪要小节名、纪要和转写的时间点（含超过一小时的）、三位数的编号、
+// 太长被截断的句子都要算进去。算少了，只问一场会议时以为整场放得下、不先按搜索词找，Build 却截掉了后面的内容；
+// 算多了，放得下的会议也要先提取搜索词，只给大模型一部分。
+func TestSizeIsExactlyWhatBuildNeeds(t *testing.T) {
+	section := "遗留问题与需要补充的材料（下次评审之前确认）"
+	minutes := []Line{{Start: -1, Text: "开头没有小节、没有时间点的一行。", Minutes: true}}
+	for i := range 40 {
+		minutes = append(minutes, Line{Start: float64(i * 120), Text: fmt.Sprintf("第 %d 条：接口文档下周补齐。", i), Minutes: true, Section: section})
+	}
+	var long []Line
+	for i := range 120 {
+		text := fmt.Sprintf("第 %d 句。", i)
+		if i%2 == 0 {
+			text = strings.Repeat("长", maxLineChars+5)
+		}
+		long = append(long, Line{Start: float64(3000 + i*10), Speaker: "说话人 2", Text: text})
+	}
+	short := []Line{{Start: 70, Speaker: "张敏", Text: "  我们先说报价。 "}, {Start: 75.5, Speaker: "李航", Text: "就按 12 万。"}}
+	for _, c := range []struct {
+		name string
+		src  Source
+	}{
+		{"纪要长、转写短", Source{Minutes: minutes, Transcript: [][]Line{short}}},
+		{"转写长、分几段", Source{Minutes: minutes[:3], Transcript: [][]Line{short, long, short}}},
+		{"只有纪要", Source{Minutes: minutes}},
+		{"只有转写", Source{Transcript: [][]Line{long, short}}},
+	} {
+		src := c.src
+		src.MeetingID, src.Title, src.Date = uuid.New(), "技术评审", now
+		lines := len(src.Minutes)
+		for _, seg := range src.Transcript {
+			lines += len(seg)
+		}
+		size := Size(src)
+		if m := Build([]Source{src}, size); len(m.Snippets) != lines {
+			t.Errorf("%s：预算正好是 Size（%d 字）时整场都要放进去，只放了 %d 行，一共 %d 行", c.name, size, len(m.Snippets), lines)
+		}
+		if m := Build([]Source{src}, size-1); len(m.Snippets) == lines {
+			t.Errorf("%s：Size（%d 字）算多了，少一个字也能整场放进去", c.name, size)
+		}
+	}
+}
+
 func TestCite(t *testing.T) {
 	a := uuid.New()
 	snippets := map[string]Snippet{

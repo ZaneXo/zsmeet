@@ -281,23 +281,34 @@ type Material struct {
 	Meetings int
 }
 
-// Size 估算一场会议全部放进材料要多少个字，判断整场放不放得下。
+// Size 是一场会议全部放进材料要多少个字，判断整场放不放得下。和 Build 把它当第一场会议排出来的字数一样：
+// budget 不少于 Size 时 Build 一行不落地放进去，少一个字就放不下。
 func Size(src Source) int {
-	n := utf8.RuneCountInString(src.Title) + 30
-	for _, l := range src.Minutes {
-		n += lineSize(l)
+	n := utf8.RuneCountInString(meetingHeader(1, src))
+	for i, l := range src.Minutes {
+		n += lineSize(1, i+1, l)
 	}
-	for _, part := range src.Transcript {
-		for _, l := range part {
-			n += lineSize(l)
-		}
-		n += 3
-	}
-	return n
+	return n + transcriptSize(1, len(src.Minutes), src.Transcript)
 }
 
-func lineSize(l Line) int {
-	return min(utf8.RuneCountInString(l.Text), maxLineChars) + utf8.RuneCountInString(l.Speaker) + 20
+// lineSize 是第 k 场会议的第 n 行在材料里占多少个字，连换行。
+func lineSize(k, n int, l Line) int {
+	return utf8.RuneCountInString(formatLine(lineID(k, n), l)) + 1
+}
+
+// transcriptSize 是第 k 场会议已经放了 n 行以后，接着放下全部转写片段要多少个字，连隔开片段的「……」。
+func transcriptSize(k, n int, segs [][]Line) int {
+	size := 0
+	for _, seg := range segs {
+		for i, l := range seg {
+			if i == 0 && n > 0 {
+				size += utf8.RuneCountInString(segmentGap)
+			}
+			n++
+			size += lineSize(k, n, l)
+		}
+	}
+	return size
 }
 
 // Build 把几场会议排成材料，总共不超过大约 budget 个字。排在前面的会议先放；
@@ -318,22 +329,8 @@ func Build(sources []Source, budget int) Material {
 		// 下一行前面要不要先放「……」隔开转写片段：等下一行放得下才放，免得材料末尾多一个
 		sep := false
 		add := func(l Line, limit int) bool {
-			text := truncate(l.Text, maxLineChars)
-			id := fmt.Sprintf("M%d-%d", k, n+1)
-			var line string
-			switch {
-			case l.Minutes:
-				label := "纪要"
-				if l.Section != "" {
-					label += "·" + l.Section
-				}
-				if l.Start >= 0 {
-					label += "（" + transcript.Clock(l.Start) + "）"
-				}
-				line = fmt.Sprintf("[%s] %s：%s", id, label, text)
-			default:
-				line = fmt.Sprintf("[%s] %s %s：%s", id, transcript.Clock(l.Start), l.Speaker, text)
-			}
+			id := lineID(k, n+1)
+			line := formatLine(id, l)
 			size := utf8.RuneCountInString(line) + 1
 			if sep {
 				size += utf8.RuneCountInString(segmentGap)
@@ -348,21 +345,15 @@ func Build(sources []Source, budget int) Material {
 			used += size
 			n++
 			part.WriteString(line + "\n")
-			out.Snippets[id] = Snippet{ID: id, MeetingID: src.MeetingID, Title: src.Title, Date: src.Date, Start: l.Start, Minutes: l.Minutes, Text: text}
+			out.Snippets[id] = Snippet{ID: id, MeetingID: src.MeetingID, Title: src.Title, Date: src.Date, Start: l.Start, Minutes: l.Minutes, Text: truncate(l.Text, maxLineChars)}
 			return true
 		}
-		header := fmt.Sprintf("## 会议 M%d：%s（%s）\n", k, src.Title, src.Date.Format("2006-01-02 15:04"))
+		header := meetingHeader(k, src)
 		used += utf8.RuneCountInString(header)
 		minutesLimit := share
 		if len(src.Transcript) > 0 {
-			need := 0
-			for _, seg := range src.Transcript {
-				for _, l := range seg {
-					need += lineSize(l)
-				}
-				need += 3
-			}
-			minutesLimit = max(share/2, share-need)
+			// 转写片段按排在全部纪要后面算；纪要没放完时编号短一些，实际只会比这少
+			minutesLimit = max(share/2, share-transcriptSize(k, len(src.Minutes), src.Transcript))
 		}
 		for _, l := range src.Minutes {
 			if !add(l, minutesLimit) {
@@ -398,6 +389,31 @@ func Build(sources []Source, budget int) Material {
 
 // 材料里隔开同一场会议的两段转写片段
 const segmentGap = "……\n"
+
+// meetingHeader 是材料里第 k 场会议开头的一行，带换行。
+func meetingHeader(k int, src Source) string {
+	return fmt.Sprintf("## 会议 M%d：%s（%s）\n", k, src.Title, src.Date.Format("2006-01-02 15:04"))
+}
+
+// lineID 是第 k 场会议第 n 行的编号，比如 M1-3。
+func lineID(k, n int) string { return fmt.Sprintf("M%d-%d", k, n) }
+
+// formatLine 是材料里编号为 id 的一行，不带换行：纪要的行写成「[M1-1] 纪要·结论（01:15）：……」，
+// 转写的句子写成「[M1-3] 01:15 张敏：……」，太长的截断。Build 和算字数的 Size 都用它，算出来的才和放进去的一样。
+func formatLine(id string, l Line) string {
+	text := truncate(l.Text, maxLineChars)
+	if !l.Minutes {
+		return fmt.Sprintf("[%s] %s %s：%s", id, transcript.Clock(l.Start), l.Speaker, text)
+	}
+	label := "纪要"
+	if l.Section != "" {
+		label += "·" + l.Section
+	}
+	if l.Start >= 0 {
+		label += "（" + transcript.Clock(l.Start) + "）"
+	}
+	return fmt.Sprintf("[%s] %s：%s", id, label, text)
+}
 
 func truncate(s string, n int) string {
 	s = strings.TrimSpace(s)

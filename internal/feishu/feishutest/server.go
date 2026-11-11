@@ -110,6 +110,8 @@ type Server struct {
 	Users      map[string]User
 	// 往这些群发消息时返回的错误码
 	FailChats map[string]int
+	// 给这些群、人（群的 chat_id、人的邮箱）加文档权限时返回的错误码
+	FailGrants map[string]int
 	// 每个导入任务头几次查询返回「还在处理」
 	ImportPolls int
 	// 用飞书登录：授权页上登录着飞书的是谁。为 nil 时相当于用户在授权页上点了拒绝
@@ -133,6 +135,7 @@ func New(t *testing.T) *Server {
 		Media:      map[string]*Media{},
 		Users:      map[string]User{},
 		FailChats:  map[string]int{},
+		FailGrants: map[string]int{},
 		Calls:      map[string]int{},
 		tasks:      map[string]*Import{},
 		grants:     map[string]*grant{},
@@ -362,6 +365,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			Perm       string `json:"perm"`
 		}
 		json.NewDecoder(r.Body).Decode(&in)
+		if code := s.FailGrants[in.MemberID]; code != 0 {
+			reply(w, code, "fail", nil)
+			return
+		}
 		doc := strings.TrimSuffix(strings.TrimPrefix(path, "/open-apis/drive/v1/permissions/"), "/members")
 		s.Grants = append(s.Grants, Grant{Doc: doc, MemberType: in.MemberType, MemberID: in.MemberID, Perm: in.Perm})
 		reply(w, 0, "ok", map[string]any{"member": in})

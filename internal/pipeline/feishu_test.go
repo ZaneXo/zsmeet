@@ -423,6 +423,76 @@ func TestShareDocOnlyGrantsRequester(t *testing.T) {
 	}
 }
 
+// 用以前导入的文档发到一个新的群：给这个群开文档权限失败时不能照样发卡片（群里的人打不开卡片上的文档），
+// 和新导入的文档一样，飞书繁忙的交给 River 重试，重试也没用的记下原因。以前发到过的群，再开一次失败不影响发卡片。
+func TestShareReusedDocToNewChatNeedsGrant(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fs := e.feishu(settings.Feishu{SiteURL: "https://meet.example.com"})
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	sw := &shareWorker{w: e.w}
+	newShare := func(chat string) uuid.UUID {
+		t.Helper()
+		s, err := e.q.CreateShare(ctx, sqlc.CreateShareParams{MeetingID: args.MeetingID, ChatID: chat, ChatName: "群", WithDoc: true, MinutesVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.ID
+	}
+	sentTo := func(chat string) int {
+		n := 0
+		for _, m := range fs.Sent() {
+			if m.ChatID == chat {
+				n++
+			}
+		}
+		return n
+	}
+	// 第一次发到产品组：导入文档，产品组能看
+	if err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: newShare("oc_team")}, 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 用这篇文档发到研发群，给研发群开权限时飞书限流：先不发卡片，交给 River 重试；重试时开好了权限再发
+	fs.FailGrants["oc_dev"] = 99991400
+	dev := newShare("oc_dev")
+	err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: dev}, 1))
+	if err == nil || errors.Is(err, &rivertype.JobCancelError{}) || sentTo("oc_dev") != 0 {
+		t.Fatalf("研发群还没拿到文档的权限，不能发卡片，稍后重试：%v，卡片 %+v", err, fs.Sent())
+	}
+	delete(fs.FailGrants, "oc_dev")
+	if err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: dev}, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := e.q.GetShare(ctx, dev); s.Status != "done" || sentTo("oc_dev") != 1 || len(fs.Docs()) != 1 {
+		t.Errorf("开好权限再发，用的还是那一篇文档：%+v，%d 篇文档", s, len(fs.Docs()))
+	}
+
+	// 发到另一个新的群，开权限被拦下了（重试也没用）：记下原因，不发卡片
+	fs.FailGrants["oc_ops"] = 1063003
+	ops := newShare("oc_ops")
+	if err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: ops}, 1)); !errors.Is(err, &rivertype.JobCancelError{}) {
+		t.Errorf("开不了权限，不再重试：%v", err)
+	}
+	if s, _ := e.q.GetShare(ctx, ops); s.Status != "failed" || !strings.Contains(s.Error, "设置文档权限被拦下了") || sentTo("oc_ops") != 0 {
+		t.Errorf("记成没发出去，写着原因，不发卡片：%+v %+v", s, fs.Sent())
+	}
+
+	// 再发到产品组：以前已经给过它这篇文档的权限，这次再开失败也照样发
+	fs.FailGrants["oc_team"] = 1063003
+	again := newShare("oc_team")
+	if err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: again}, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := e.q.GetShare(ctx, again); s.Status != "done" || sentTo("oc_team") != 2 {
+		t.Errorf("以前发到过的群照样发：%+v", s)
+	}
+}
+
 // 只有自己能看、指定了人的会议不自动发到群里：群里的人不一定能看。
 // 排上队以后（重试、等文档导入期间）才改成不是团队可见的，发送时也不再发。
 func TestAutoPushSkipsNonTeamMeetings(t *testing.T) {

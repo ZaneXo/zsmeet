@@ -179,7 +179,7 @@ func TestShareToFeishu(t *testing.T) {
 	c.want(c.do("GET", fmt.Sprintf("/api/meetings/%s/feishu", "00000000-0000-0000-0000-000000000000"), nil), 404)
 }
 
-// 发到飞书时，权限、纪要版本都按锁住会议以后的算：等锁的时候被收回了编辑权限的不能发；纪要重新生成了的发新的一版，
+// 发到飞书时，权限、纪要版本都按锁住会议以后的算：等锁的时候被收回了编辑权限、被停用、不再是管理员了的不能发；纪要重新生成了的发新的一版，
 // 发送记录的时间是真正记下的时间（不是开始等锁的时间）。网页带上看到的版本时，版本变了不发，说清楚现在是第几版。
 func TestShareToFeishuRechecksUnderLock(t *testing.T) {
 	c := newServer(t)
@@ -215,6 +215,28 @@ func TestShareToFeishuRechecksUnderLock(t *testing.T) {
 	})
 	if r.Status != 404 {
 		t.Errorf("等锁的时候改成了看不到，当作会议不存在：%d %s", r.Status, r.Raw)
+	}
+	// 等锁的时候他被停用了：请求带着的账号是请求开始时读的，锁住以后要按现在的再看
+	c.want(c.do("PUT", "/api/meetings/"+id+"/access", obj{"visibility": "team", "members": []obj{{"user_id": editorID, "can_edit": true}}}), 200)
+	r = c.whileLocked(lockMeeting, func() result { return editor.do("POST", base, obj{"chat_id": "oc_team"}) }, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), "UPDATE users SET disabled = true WHERE id = $1", editorID)
+		return err
+	})
+	if r.Status != 403 || !strings.Contains(r.Raw, "已被停用") {
+		t.Errorf("等锁的时候被停用了，不能再发：%d %s", r.Status, r.Raw)
+	}
+	// 等锁的时候不再是管理员了：会议不是他的，也没指定他能编辑
+	boss := c.addMember("boss@example.com", "钱多")
+	bossID := c.memberID("boss@example.com")
+	if _, err := c.pool.Exec(t.Context(), "UPDATE users SET role = 'admin' WHERE id = $1", bossID); err != nil {
+		t.Fatal(err)
+	}
+	r = c.whileLocked(lockMeeting, func() result { return boss.do("POST", base, obj{"chat_id": "oc_team"}) }, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), "UPDATE users SET role = 'member' WHERE id = $1", bossID)
+		return err
+	})
+	if r.Status != 403 {
+		t.Errorf("等锁的时候不再是管理员了，不能再发：%d %s", r.Status, r.Raw)
 	}
 	if n := c.count("SELECT count(*) FROM feishu_shares"); n != 0 {
 		t.Errorf("没有权限了，不记发送：%d", n)

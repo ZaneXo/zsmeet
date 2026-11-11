@@ -140,6 +140,25 @@ func (q *Queries) DocForVersion(ctx context.Context, arg DocForVersionParams) (D
 	return i, err
 }
 
+const docSentToChat = `-- name: DocSentToChat :one
+SELECT count(*) > 0 FROM feishu_shares
+WHERE meeting_id = $1 AND chat_id = $2 AND doc_token = $3 AND status = 'done'
+`
+
+type DocSentToChatParams struct {
+	MeetingID uuid.UUID
+	ChatID    string
+	DocToken  string
+}
+
+// 这篇文档以前有没有发到过这个群：发成功了的，群里的人已经有看它的权限（给群开权限失败就不会发成功）
+func (q *Queries) DocSentToChat(ctx context.Context, arg DocSentToChatParams) (bool, error) {
+	row := q.db.QueryRow(ctx, docSentToChat, arg.MeetingID, arg.ChatID, arg.DocToken)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const failShare = `-- name: FailShare :exec
 UPDATE feishu_shares SET status = 'failed', error = $2, finished_at = now() WHERE id = $1
 `

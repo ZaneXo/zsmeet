@@ -349,7 +349,7 @@ func (c *client) whileLocked(lock func(tx pgx.Tx) error, req func() result, chan
 	return result{}
 }
 
-// 发到群里时，权限、纪要版本都按锁住会议以后的算：等锁的时候被收回了编辑权限的不能发；纪要重新生成了的发新的一版，
+// 发到群里时，权限、纪要版本都按锁住会议以后的算：等锁的时候被收回了编辑权限、被停用了的不能发；纪要重新生成了的发新的一版，
 // 发送记录的时间是真正记下的时间（不是开始等锁的时间）。网页带上看到的版本时，版本变了不发，说清楚现在是第几版。
 func TestSendToWebhooksRechecksUnderLock(t *testing.T) {
 	c := newServer(t)
@@ -375,6 +375,15 @@ func TestSendToWebhooksRechecksUnderLock(t *testing.T) {
 	})
 	if r.Status != 403 {
 		t.Errorf("等锁的时候被收回了编辑权限，不能再发：%d %s", r.Status, r.Raw)
+	}
+	// 等锁的时候他被停用了：请求带着的账号是请求开始时读的，锁住以后要按现在的再看
+	c.want(c.do("PUT", "/api/meetings/"+id+"/access", obj{"visibility": "team", "members": []obj{{"user_id": editorID, "can_edit": true}}}), 200)
+	r = c.whileLocked(lockMeeting, func() result { return editor.do("POST", base, obj{"webhook_ids": []string{ding}}) }, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), "UPDATE users SET disabled = true WHERE id = $1", editorID)
+		return err
+	})
+	if r.Status != 403 || !strings.Contains(r.Raw, "已被停用") {
+		t.Errorf("等锁的时候被停用了，不能再发：%d %s", r.Status, r.Raw)
 	}
 	if n := c.count("SELECT count(*) FROM webhook_sends"); n != 0 {
 		t.Errorf("没有权限了，不记发送：%d", n)

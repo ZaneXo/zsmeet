@@ -49,6 +49,11 @@ WHERE meeting_id = $1 AND minutes_version = $2 AND doc_token <> ''
 ORDER BY created_at DESC
 LIMIT 1;
 
+-- name: DocSentToChat :one
+-- 这篇文档以前有没有发到过这个群：发成功了的，群里的人已经有看它的权限（给群开权限失败就不会发成功）
+SELECT count(*) > 0 FROM feishu_shares
+WHERE meeting_id = $1 AND chat_id = $2 AND doc_token = $3 AND status = 'done';
+
 -- name: GetFeishuImport :one
 SELECT * FROM feishu_imports WHERE feishu_meeting_id = $1;
 

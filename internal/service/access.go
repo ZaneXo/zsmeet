@@ -64,6 +64,19 @@ func accessIn(ctx context.Context, q *sqlc.Queries, user sqlc.User, m sqlc.Meeti
 	return accessFor(user, m, true, canEdit), nil
 }
 
+// accessNow 和 accessIn 一样，但 user 按 q 里现在的再读一遍：锁住会议以后再检查权限时用。
+// 请求带着的 user 是请求开始时读的，等锁的时候他可能已经被停用了、不再是管理员了。停用了的返回 errAccountDisabled。
+func accessNow(ctx context.Context, q *sqlc.Queries, user sqlc.User, m sqlc.Meeting) (Access, error) {
+	now, err := q.GetUser(ctx, user.ID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && now.Disabled) {
+		return Access{}, errAccountDisabled
+	}
+	if err != nil {
+		return Access{}, err
+	}
+	return accessIn(ctx, q, now, m)
+}
+
 // CanEditMeeting 查 user 现在还能不能编辑会议 m，和网页上的规则一样；停用了的人算不能。q 可以是事务里的。
 // 后台发送（发到飞书、群机器人）用：排上队以后，发起人可能被停用、被取消了编辑权限，或者会议改成了他看不到的。
 func CanEditMeeting(ctx context.Context, q *sqlc.Queries, user sqlc.User, m sqlc.Meeting) (bool, error) {

@@ -171,6 +171,9 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 				return err
 			})
 			if err != nil {
+				// 请求发出去了却没收到回复（超时、连接断了）时，飞书那边可能已经建好了导入任务，重试会再导入一篇。
+				// 导入接口不像发卡片那样能带去重的键，也没法按上传的文件查回任务号，只能接受：这种情况很少，多出来的那篇
+				// 归应用所有、谁也没给权限（放在共享的文件夹里时，看得到它的人本来也看得到正式的那篇）；不重试的话，网络抖一下就发不出去了
 				return err
 			}
 			// 马上记下任务号：之后出错重试、snooze 以后接着等这个任务，不会再导入一篇。
@@ -222,6 +225,14 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 		}
 		requester = u.Email
 	}
+	// 给文档开权限失败了还能不能照样发：用的是以前导入的文档，而且以前就发到过这个群（或者不发群）时可以，多半已经给过权限了。
+	// 用以前的文档发到一个新的群不行：群里的人还没有权限，打不开卡片上的文档链接，要和新导入的文档一样重试或者记成没发出去
+	grantedBefore := reused && share.ChatID == ""
+	if reused && share.ChatID != "" {
+		if grantedBefore, err = w.q.DocSentToChat(ctx, sqlc.DocSentToChatParams{MeetingID: m.ID, ChatID: share.ChatID, DocToken: doc.Token}); err != nil {
+			return err
+		}
+	}
 
 	// 开权限和发卡片放在同一把锁里：会议改成不能发了的话，群里既拿不到文档的权限，也收不到卡片
 	messageID := ""
@@ -229,10 +240,10 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 		// 文档归应用所有，不给权限谁都打不开：发到的群里的人能看，管理员打开了的话公司里拿到链接的人也能看
 		if doc.Token != "" && (share.WithDoc || share.ChatID != "") {
 			if err := grantDoc(ctx, client, doc.Token, share.ChatID, cfg.LinkShare); err != nil {
-				if !reused {
+				if !grantedBefore {
 					return err
 				}
-				// 以前导入的文档多半已经给过权限了，这次再给失败不影响发卡片
+				// 以前已经给过权限了，这次再给失败不影响发卡片
 				slog.Warn("给飞书文档加权限失败", "doc", doc.Token, "err", err)
 			}
 			// 发的人自己也要能打开、能再分享（按 zsmeet 账号的邮箱找飞书里的人）

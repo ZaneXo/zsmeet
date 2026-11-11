@@ -40,7 +40,7 @@
     "targets": ["app", "dmg"],
     "category": "Productivity",
     "shortDescription": "zsmeet 会议纪要",
-    "copyright": "MIT License",
+    "copyright": "© 2026 zsmeet contributors · Apache License 2.0",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

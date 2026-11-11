@@ -5,6 +5,7 @@
 //! 录音、导出、进度推送这些不缓存。
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -49,15 +50,34 @@ pub struct Entry {
     pub body: Bytes,
 }
 
+/// 离线缓存的「代」，所有缓存共用一个。退出登录清缓存时加一：退出前发出、退出后才回来的请求就不再写缓存，
+/// 免得刚删掉的目录又被建起来，留下上一个人的数据。
+#[derive(Clone, Default)]
+pub struct Generation(Arc<Mutex<u64>>);
+
+impl Generation {
+    fn current(&self) -> u64 {
+        *self.0.lock().unwrap()
+    }
+}
+
 #[derive(Clone)]
 pub struct OfflineCache {
     dir: PathBuf,
     max_bytes: u64,
+    generation: Generation,
+    /// 创建时的代。和现在的不一样了（中间退出过登录）就不再写
+    born: u64,
 }
 
 impl OfflineCache {
-    pub fn new(dir: PathBuf, max_bytes: u64) -> Self {
-        Self { dir, max_bytes }
+    pub fn new(dir: PathBuf, max_bytes: u64, generation: &Generation) -> Self {
+        Self {
+            dir,
+            max_bytes,
+            born: generation.current(),
+            generation: generation.clone(),
+        }
     }
 
     pub async fn get(&self, key: &str) -> Option<Entry> {
@@ -76,16 +96,27 @@ impl OfflineCache {
         if body.len() > MAX_ENTRY_BYTES {
             return;
         }
-        if let Err(e) = self.write(key, content_type, body).await {
-            log::warn!("离线缓存写入失败：{e}");
-            return;
-        }
         let cache = self.clone();
-        let _ = tokio::task::spawn_blocking(move || cache.evict()).await;
+        let (key, content_type, body) = (key.to_string(), content_type.to_string(), body.to_vec());
+        let _ = tokio::task::spawn_blocking(move || {
+            {
+                // 拿着锁写：clear() 要等这里写完才删目录；写之前也能确认中间没退出过登录
+                let generation = cache.generation.0.lock().unwrap();
+                if *generation != cache.born {
+                    return;
+                }
+                if let Err(e) = cache.write(&key, &content_type, &body) {
+                    log::warn!("离线缓存写入失败：{e}");
+                    return;
+                }
+            }
+            cache.evict();
+        })
+        .await;
     }
 
-    async fn write(&self, key: &str, content_type: &str, body: &[u8]) -> std::io::Result<()> {
-        tokio::fs::create_dir_all(&self.dir).await?;
+    fn write(&self, key: &str, content_type: &str, body: &[u8]) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
         let mut data = serde_json::to_vec(&Meta {
             content_type: content_type.to_string(),
         })?;
@@ -93,8 +124,8 @@ impl OfflineCache {
         data.extend_from_slice(body);
         // 先写临时文件再改名，读的时候不会读到写了一半的文件
         let tmp = self.dir.join(format!("{key}.tmp"));
-        tokio::fs::write(&tmp, &data).await?;
-        tokio::fs::rename(&tmp, self.dir.join(key)).await
+        std::fs::write(&tmp, &data)?;
+        std::fs::rename(&tmp, self.dir.join(key))
     }
 
     /// 总大小超过上限时，从最久没更新的开始删，删到上限的八成。
@@ -131,8 +162,10 @@ impl OfflineCache {
         }
     }
 
-    /// 删掉整个目录（退出登录时）。
+    /// 删掉整个目录（退出登录时）。在这之前创建的 OfflineCache 都不会再写了。
     pub fn clear(&self) {
+        let mut generation = self.generation.0.lock().unwrap();
+        *generation += 1;
         if let Err(e) = std::fs::remove_dir_all(&self.dir) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("离线缓存删除失败：{e}");
@@ -176,7 +209,7 @@ mod tests {
     #[tokio::test]
     async fn stores_and_evicts_oldest() {
         let tmp = tempfile::tempdir().unwrap();
-        let cache = OfflineCache::new(tmp.path().join("u"), 3000);
+        let cache = OfflineCache::new(tmp.path().join("u"), 3000, &Generation::default());
         assert!(cache.get("nothing").await.is_none());
 
         cache.put("a", "application/json", &[b'a'; 1000]).await;
@@ -208,5 +241,25 @@ mod tests {
         cache.clear();
         assert!(cache.get("b").await.is_none());
         cache.clear();
+    }
+
+    #[tokio::test]
+    async fn no_writes_after_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let generation = Generation::default();
+        let before = OfflineCache::new(tmp.path().join("u"), DEFAULT_MAX_BYTES, &generation);
+        before.put("a", "application/json", b"1").await;
+        assert!(before.get("a").await.is_some());
+
+        // 退出登录清掉缓存以后，之前发出的请求才回来：不能再把目录建起来
+        before.clear();
+        before.put("b", "application/json", b"2").await;
+        assert!(!tmp.path().join("u").exists());
+
+        // 重新登录以后的请求照常写
+        let after = OfflineCache::new(tmp.path().join("u"), DEFAULT_MAX_BYTES, &generation);
+        after.put("c", "application/json", b"3").await;
+        assert!(after.get("c").await.is_some());
+        assert!(after.get("a").await.is_none());
     }
 }

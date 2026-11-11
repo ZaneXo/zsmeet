@@ -1,6 +1,7 @@
 //! 直接和 zsmeet 服务器打交道的几件事：检查服务器地址、PKCE、用一次性的 code 换令牌、退出登录。
 //! 界面发出的接口请求不走这里，走本地代理（proxy.rs）。
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -9,7 +10,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use url::Url;
+use url::{Host, Url};
 
 /// App 需要的最低接口版本（`/api/status` 里的 `api`）。
 pub const MIN_API: i64 = 1;
@@ -62,53 +63,183 @@ struct Status {
     api: Option<i64>,
 }
 
-/// 检查填的地址是不是能用的 zsmeet 服务器，返回整理好的地址。
+/// 检查填的地址是不是能用的 zsmeet 服务器，返回整理好的地址（有跳转的话是跳转以后的地址）。
 pub async fn check_server(client: &reqwest::Client, input: &str) -> Result<String, String> {
     let candidates = candidates(input)?;
-    let mut last_err = String::new();
     for (i, server) in candidates.iter().enumerate() {
-        let resp = client
+        let sent = client
             .get(format!("{server}/api/status"))
             .timeout(REQUEST_TIMEOUT)
             .send()
             .await;
-        let resp = match resp {
-            Ok(r) => r,
+        let resp = match sent {
+            Ok(resp) => resp,
             Err(e) => {
-                last_err = if e.is_timeout() {
-                    format!("{server} 很久都没有响应，请检查地址和网络")
-                } else {
-                    format!("连不上 {server}，请检查地址和网络，或者确认服务器正在运行")
-                };
-                // 没写协议时 https 连不上，接着试 http
-                if i + 1 < candidates.len() && (e.is_connect() || e.is_timeout()) {
-                    continue;
+                let reach = reach(server).await;
+                let message =
+                    unreachable_message(server, e.is_timeout(), is_certificate_error(&e), reach);
+                if i + 1 == candidates.len() {
+                    return Err(message);
                 }
-                return Err(last_err);
+                // 没写协议、https 连不上：内网的服务器常常只有 http，接着试；外网的不悄悄退回不加密的 http
+                if reach == Reach::Internet {
+                    return Err(format!(
+                        "{message}。如果这台服务器只支持 http，请在地址前面写上 http://"
+                    ));
+                }
+                continue;
             }
         };
-        let not_zsmeet = || format!("{server} 不是 zsmeet 服务器，请检查地址");
-        if !resp.status().is_success() {
-            return Err(not_zsmeet());
-        }
-        let status: Status = resp.json().await.map_err(|_| not_zsmeet())?;
-        let Some(initialized) = status.initialized else {
-            return Err(not_zsmeet());
-        };
-        if !initialized {
-            return Err(format!(
-                "这台服务器还没完成初始化：请先在浏览器里打开 {server}，创建管理员账号"
-            ));
-        }
-        if status.api.unwrap_or(0) < MIN_API {
-            return Err(
-                "这台服务器的 zsmeet 版本太旧，还不支持桌面版。请让管理员把服务器升级到最新版本"
-                    .into(),
-            );
-        }
-        return Ok(server.clone());
+        return read_status(server, resp).await;
     }
-    Err(last_err)
+    Err("请填写服务器地址，比如 https://meet.example.com".into())
+}
+
+/// 看 `/api/status` 的结果，返回服务器地址。
+async fn read_status(requested: &str, resp: reqwest::Response) -> Result<String, String> {
+    let server = landed_server(requested, resp.url())?;
+    let not_zsmeet = || format!("{server} 不是 zsmeet 服务器，请检查地址");
+    if !resp.status().is_success() {
+        return Err(not_zsmeet());
+    }
+    let status: Status = resp.json().await.map_err(|_| not_zsmeet())?;
+    let Some(initialized) = status.initialized else {
+        return Err(not_zsmeet());
+    };
+    if !initialized {
+        return Err(format!(
+            "这台服务器还没完成初始化：请先在浏览器里打开 {server}，创建管理员账号"
+        ));
+    }
+    if status.api.unwrap_or(0) < MIN_API {
+        return Err(
+            "这台服务器的 zsmeet 版本太旧，还不支持桌面版。请让管理员把服务器升级到最新版本".into(),
+        );
+    }
+    Ok(server)
+}
+
+/// 请求 `{requested}/api/status` 跟着跳转最后落到了 landed，由此得出服务器地址。
+/// 要存跳转以后的地址（比如 http 跳到了 https）：本地代理不跟随跳转，存原来的地址以后每个请求都会失败。
+/// 从 https 跳到 http 不接受。
+fn landed_server(requested: &str, landed: &Url) -> Result<String, String> {
+    if requested.starts_with("https://") && landed.scheme() != "https" {
+        return Err(format!(
+            "{requested} 把 https 跳转到了不加密的 http，zsmeet 不会这样连接。请检查服务器的设置"
+        ));
+    }
+    let Some(base) = landed.path().strip_suffix("/api/status") else {
+        return Err(format!(
+            "{requested} 跳转到了 {landed}，不像是 zsmeet 服务器，请检查地址"
+        ));
+    };
+    let mut url = landed.clone();
+    url.set_path(base);
+    normalize(url.as_str())
+}
+
+/// 局域网里的服务器连不上，多半是没允许 zsmeet 访问本地网络（macOS 15 起要用户允许）。
+pub const LOCAL_NETWORK_HINT: &str = "如果服务器在局域网里，还要允许 zsmeet 访问本地网络：打开「系统设置 → 隐私与安全性 → 本地网络」，打开 zsmeet 的开关，再试一次";
+
+/// 连不上服务器时给用户看的话。timeout：等了太久；certificate：https 证书不受信任。
+fn unreachable_message(server: &str, timeout: bool, certificate: bool, reach: Reach) -> String {
+    if certificate {
+        return format!(
+            "{server} 的 https 证书不受信任，zsmeet 不能安全地连接它。如果是公司内部签发的证书，请先把它的根证书装进「钥匙串访问」并设为信任"
+        );
+    }
+    let mut message = if timeout {
+        format!("{server} 很久都没有响应，请检查地址和网络")
+    } else {
+        format!("连不上 {server}，请检查地址和网络，或者确认服务器正在运行")
+    };
+    if reach == Reach::Lan {
+        message.push('。');
+        message.push_str(LOCAL_NETWORK_HINT);
+    }
+    message
+}
+
+/// https 证书的问题。rustls 的错误藏在好几层 source 里，Debug 文本里都有，看它最省事。
+fn is_certificate_error(e: &reqwest::Error) -> bool {
+    format!("{e:?}").contains("InvalidCertificate")
+}
+
+/// 服务器在哪。局域网里的机器要用户允许 zsmeet 访问「本地网络」才连得上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// 本机
+    Loopback,
+    /// 局域网：内网地址、链路本地地址、`.local`、不带点的机器名，或者解析到内网地址的域名
+    Lan,
+    Internet,
+}
+
+fn ip_reach(ip: IpAddr) -> Reach {
+    match ip {
+        IpAddr::V4(v4) if v4.is_loopback() => Reach::Loopback,
+        IpAddr::V4(v4) if v4.is_private() || v4.is_link_local() => Reach::Lan,
+        IpAddr::V4(_) => Reach::Internet,
+        IpAddr::V6(v6) if v6.is_loopback() => Reach::Loopback,
+        IpAddr::V6(v6) if v6.is_unique_local() || v6.is_unicast_link_local() => Reach::Lan,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => ip_reach(IpAddr::V4(v4)),
+            None => Reach::Internet,
+        },
+    }
+}
+
+/// 不查 DNS 能看出来的：IP 地址、localhost、`.local`、不带点的机器名。看不出来返回 None。
+fn host_reach(host: &Host<&str>) -> Option<Reach> {
+    match host {
+        Host::Ipv4(ip) => Some(ip_reach(IpAddr::V4(*ip))),
+        Host::Ipv6(ip) => Some(ip_reach(IpAddr::V6(*ip))),
+        Host::Domain(name) => {
+            let name = name.trim_end_matches('.');
+            if name == "localhost" || name.ends_with(".localhost") {
+                Some(Reach::Loopback)
+            } else if name.ends_with(".local") || !name.contains('.') {
+                Some(Reach::Lan)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// 服务器地址在哪。域名要查一下 DNS：解析到内网地址的也算局域网；查不到当外网。
+pub async fn reach(server: &str) -> Reach {
+    let Ok(url) = Url::parse(server) else {
+        return Reach::Internet;
+    };
+    let Some(host) = url.host() else {
+        return Reach::Internet;
+    };
+    if let Some(reach) = host_reach(&host) {
+        return reach;
+    }
+    let Host::Domain(name) = host else {
+        return Reach::Internet;
+    };
+    let port = url.port_or_known_default().unwrap_or(443);
+    let lookup = tokio::net::lookup_host((name, port));
+    let Ok(Ok(addrs)) = tokio::time::timeout(Duration::from_secs(3), lookup).await else {
+        return Reach::Internet;
+    };
+    let reaches: Vec<Reach> = addrs.map(|a| ip_reach(a.ip())).collect();
+    if reaches.contains(&Reach::Lan) {
+        Reach::Lan
+    } else if reaches.contains(&Reach::Loopback) {
+        Reach::Loopback
+    } else {
+        Reach::Internet
+    }
+}
+
+/// 只看地址本身（不查 DNS）是不是局域网里的机器。
+pub fn is_lan_address(server: &str) -> bool {
+    Url::parse(server)
+        .is_ok_and(|url| url.host().and_then(|host| host_reach(&host)) == Some(Reach::Lan))
 }
 
 /// 一次「在浏览器里登录」的 PKCE 参数。
@@ -290,6 +421,79 @@ mod tests {
         assert!(candidates("ftp://host").is_err());
         assert!(candidates("https://user:pw@host").is_err());
         assert!(candidates("https://").is_err());
+    }
+
+    #[test]
+    fn works_out_where_the_server_is() {
+        let r = |s: &str| host_reach(&Url::parse(s).unwrap().host().unwrap());
+        for lan in [
+            "http://10.200.25.191:18090",
+            "http://192.168.1.5",
+            "http://172.16.0.9",
+            "http://169.254.3.4",
+            "http://[fd12::1]",
+            "http://[fe80::1]",
+            "http://[::ffff:10.0.0.1]",
+            "http://meet.local",
+            "http://Meetbox:8080",
+        ] {
+            assert_eq!(r(lan), Some(Reach::Lan), "{lan}");
+        }
+        for local in ["http://127.0.0.1:8080", "http://[::1]", "http://localhost"] {
+            assert_eq!(r(local), Some(Reach::Loopback), "{local}");
+        }
+        assert_eq!(r("http://8.8.8.8"), Some(Reach::Internet));
+        assert_eq!(r("http://[2606:4700::1111]"), Some(Reach::Internet));
+        assert_eq!(r("https://meet.example.com"), None);
+        assert!(is_lan_address("http://10.200.25.191:18090"));
+        assert!(!is_lan_address("http://127.0.0.1:8080"));
+        assert!(!is_lan_address("https://meet.example.com"));
+    }
+
+    #[tokio::test]
+    async fn reach_without_dns_for_addresses() {
+        assert_eq!(reach("http://10.1.2.3:8080").await, Reach::Lan);
+        assert_eq!(reach("http://127.0.0.1:1").await, Reach::Loopback);
+        assert_eq!(reach("not a url").await, Reach::Internet);
+    }
+
+    #[test]
+    fn keeps_the_address_after_redirects() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        assert_eq!(
+            landed_server("http://a", &u("http://a/api/status")).unwrap(),
+            "http://a"
+        );
+        assert_eq!(
+            landed_server("http://a", &u("https://a/api/status")).unwrap(),
+            "https://a"
+        );
+        assert_eq!(
+            landed_server("http://a/zs", &u("https://b:8443/zs/api/status?x=1")).unwrap(),
+            "https://b:8443/zs"
+        );
+        let err = landed_server("https://a", &u("http://a/api/status")).unwrap_err();
+        assert!(err.contains("不加密"), "{err}");
+        let err = landed_server("http://a", &u("http://a/login")).unwrap_err();
+        assert!(err.contains("不像是 zsmeet"), "{err}");
+    }
+
+    #[test]
+    fn explains_unreachable_servers() {
+        let lan = unreachable_message("http://10.0.0.5", true, false, Reach::Lan);
+        assert!(
+            lan.contains("很久都没有响应") && lan.contains("本地网络"),
+            "{lan}"
+        );
+        let far = unreachable_message("https://meet.example.com", false, false, Reach::Internet);
+        assert!(far.contains("连不上") && !far.contains("本地网络"), "{far}");
+        let local = unreachable_message("http://127.0.0.1:1", false, false, Reach::Loopback);
+        assert!(!local.contains("本地网络"), "{local}");
+        let cert = unreachable_message("https://meet.example.com", false, true, Reach::Lan);
+        assert!(
+            cert.contains("证书") && !cert.contains("本地网络"),
+            "{cert}"
+        );
     }
 
     #[test]

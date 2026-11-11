@@ -19,9 +19,11 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use bytes::{Bytes, BytesMut};
 use futures_util::{stream, StreamExt};
+use url::Url;
 
 use crate::cache::{self, MAX_ENTRY_BYTES};
 use crate::core::Core;
+use crate::server;
 
 pub const SECRET_HEADER: &str = "x-zsmeet-app";
 pub const OFFLINE_HEADER: &str = "x-zsmeet-offline";
@@ -138,6 +140,33 @@ fn same_secret(given: &[u8], secret: &str) -> bool {
             == 0
 }
 
+/// 本地代理只转发 /api/ 下面、界面要用的接口。
+fn check_path(path: &str) -> Result<(), &'static str> {
+    // 「.」「..」，还有编码过的「.」「/」「\」：转发出去规范化以后可能落到 /api/ 外面。服务器装在子路径下、
+    // 前面有反向代理时，甚至会落到同一台机器上别的程序那里，把令牌带过去。接口路径里只有 id，用不到这些
+    let lower = path.to_ascii_lowercase();
+    let sneaky = path.split('/').any(|seg| seg == "." || seg == "..")
+        || ["%2e", "%2f", "%5c", "\\"]
+            .iter()
+            .any(|s| lower.contains(s));
+    if !path.starts_with("/api/") || sneaky {
+        return Err("本地代理只转发 /api/ 下的接口");
+    }
+    // 换令牌、退出登录这些接口只有 App 自己（Rust 这边）用：界面不能借代理拿当前的令牌去调
+    if path == "/api/apps" || path.starts_with("/api/apps/") {
+        return Err("本地代理不转发登录相关的接口");
+    }
+    Ok(())
+}
+
+/// 拼出转发的地址，并确认规范化以后还在这台服务器的 /api/ 下面。
+fn target_url(server: &str, path_and_query: &str) -> Option<Url> {
+    let base = Url::parse(server).ok()?;
+    let url = Url::parse(&format!("{server}{path_and_query}")).ok()?;
+    let api = format!("{}/api/", base.path().trim_end_matches('/'));
+    (url.origin() == base.origin() && url.path().starts_with(&api)).then_some(url)
+}
+
 /// 录音接口：GET/HEAD /api/meetings/{id}/audio
 fn is_audio(method: &Method, path: &str) -> bool {
     if method != Method::GET && method != Method::HEAD {
@@ -218,10 +247,8 @@ async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
         return problem(StatusCode::FORBIDDEN, "只接受发给 127.0.0.1 的请求");
     }
     let path = req.uri().path().to_string();
-    // 「..」「.」这样的段转发出去会落到 /api/ 外面
-    let dotted = path.split('/').any(|seg| seg == "." || seg == "..");
-    if !path.starts_with("/api/") || dotted {
-        return problem(StatusCode::NOT_FOUND, "本地代理只转发 /api/ 下的接口");
+    if let Err(detail) = check_path(&path) {
+        return problem(StatusCode::NOT_FOUND, detail);
     }
     let (query_secret, query) = if is_audio(req.method(), &path) {
         split_secret(req.uri().query())
@@ -256,12 +283,12 @@ async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
         .clone()
         .filter(|_| cache::cacheable(method.as_str(), &path));
     let cache_key = cache::key(&path_and_query);
+    let Some(target) = target_url(&upstream.server, &path_and_query) else {
+        return problem(StatusCode::NOT_FOUND, "本地代理只转发 /api/ 下的接口");
+    };
 
     // 转发请求
-    let mut builder = proxy.client.request(
-        method.clone(),
-        format!("{}{}", upstream.server, path_and_query),
-    );
+    let mut builder = proxy.client.request(method.clone(), target);
     for (name, value) in req.headers() {
         if !SKIP_REQUEST.contains(&name.as_str()) {
             builder = builder.header(name, value);
@@ -299,13 +326,15 @@ async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
                     return resp;
                 }
             }
-            let mut resp = problem(
-                StatusCode::BAD_GATEWAY,
-                &format!(
-                    "连不上服务器 {}，请检查网络，或者确认服务器正在运行",
-                    upstream.server
-                ),
+            let mut detail = format!(
+                "连不上服务器 {}，请检查网络，或者确认服务器正在运行",
+                upstream.server
             );
+            if server::is_lan_address(&upstream.server) {
+                detail.push('。');
+                detail.push_str(server::LOCAL_NETWORK_HINT);
+            }
+            let mut resp = problem(StatusCode::BAD_GATEWAY, &detail);
             resp.headers_mut()
                 .insert(OFFLINE_HEADER, HeaderValue::from_static("1"));
             return resp;
@@ -394,4 +423,54 @@ async fn tee_into_cache(
     let stored = body.clone();
     tokio::spawn(async move { cache.put(&key, &content_type, &stored).await });
     Body::from(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_api_paths() {
+        for ok in [
+            "/api/status",
+            "/api/meetings/0b5e2c1a-7d3f-4c1e-9a55-2f0d6c1b9e77/audio",
+            "/api/me/devices",
+        ] {
+            assert_eq!(check_path(ok), Ok(()), "{ok}");
+        }
+        for bad in [
+            "/",
+            "/index.html",
+            "/api",
+            "/api/../app/authorize",
+            "/api/./status",
+            "/api/%2e%2e/app",
+            "/api/meetings/%2E%2E/%2e./x",
+            "/api/x%2f..%2f..%2fother",
+            "/api/x%5c..%5cother",
+            "/api/x\\..\\other",
+            "/api/apps/logout",
+            "/api/apps/token",
+            "/api/apps",
+        ] {
+            assert!(check_path(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn target_stays_under_api() {
+        let t = |server: &str, path: &str| target_url(server, path).map(String::from);
+        assert_eq!(
+            t("http://h:8080", "/api/meetings?q=%E5%91%A8").as_deref(),
+            Some("http://h:8080/api/meetings?q=%E5%91%A8")
+        );
+        assert_eq!(
+            t("https://h/zs", "/api/status").as_deref(),
+            Some("https://h/zs/api/status")
+        );
+        // 规范化以后跑到 /api/ 外面、跑到别的主机：不转发
+        assert_eq!(t("https://h/zs", "/api/%2e%2e/%2e%2e/other"), None);
+        assert_eq!(t("https://h", "/api/../app"), None);
+        assert_eq!(t("https://h", "@evil.example/api/x"), None);
+    }
 }

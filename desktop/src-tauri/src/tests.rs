@@ -304,7 +304,21 @@ async fn forwards_with_token_and_requires_secret() {
     let resp = h.get("/api/../app/authorize").send().await.unwrap();
     assert_eq!(resp.status(), 404);
     let resp = h.get("/api/%2e%2e/app").send().await.unwrap();
-    assert_ne!(resp.status(), 200);
+    assert_eq!(resp.status(), 404);
+    let resp = h.get("/api/x%2F..%2F..%2Fapp").send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+    // 换令牌、退出登录的接口界面不能借代理调用：不转发，服务器上的令牌也没被作废
+    let resp = h
+        .http
+        .post(format!("{}/api/apps/logout", h.proxy))
+        .header(proxy::SECRET_HEADER, "s3cret")
+        .header(header::ORIGIN, ORIGIN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    assert_eq!(*h.up.seen.logout_auth.lock().unwrap(), None);
+    assert_eq!(h.up.seen.auth.lock().unwrap().len(), before);
 
     // 别的域名解析到 127.0.0.1（DNS rebinding）：Host 不对，拒绝
     let resp = h
@@ -566,6 +580,38 @@ async fn set_server_checks_status() {
         serde_json::from_slice(&std::fs::read(f.dir.path().join("settings.json")).unwrap())
             .unwrap();
     assert_eq!(saved["server"], up.url.as_str());
+}
+
+/// 一台只会把 /api/status 跳转到 to 的服务器，返回它的地址。
+async fn redirector(to: String) -> String {
+    let app = Router::new().route(
+        "/api/status",
+        get(move || {
+            let to = to.clone();
+            async move { axum::response::Redirect::permanent(&to) }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
+}
+
+#[tokio::test]
+async fn set_server_keeps_the_address_after_redirects() {
+    let up = upstream().await;
+    let f = fixture("http://127.0.0.1:1");
+
+    // 旧地址跳到新地址：存新地址（本地代理不跟随跳转，存旧的以后每个请求都会失败）
+    let old = redirector(format!("{}/api/status", up.url)).await;
+    let state = f.core.set_server(&old).await.unwrap();
+    assert_eq!(state.server.as_deref(), Some(up.url.as_str()));
+
+    // 跳到别的页面（比如统一登录页）：不是 zsmeet 服务器
+    let login = redirector(format!("{}/login", up.url)).await;
+    let err = f.core.set_server(&login).await.unwrap_err();
+    assert!(err.contains("不像是 zsmeet"), "{err}");
+    assert_eq!(f.core.state().server.as_deref(), Some(up.url.as_str()));
 }
 
 #[tokio::test]

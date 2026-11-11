@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::cache::{OfflineCache, DEFAULT_MAX_BYTES};
+use crate::cache::{Generation, OfflineCache, DEFAULT_MAX_BYTES};
 use crate::server::{self, Pkce};
 use crate::token::TokenStore;
 
@@ -88,6 +88,7 @@ pub struct Core {
     tokens: Arc<dyn TokenStore>,
     events: Arc<dyn Events>,
     client: reqwest::Client,
+    cache_generation: Generation,
     inner: Mutex<Inner>,
 }
 
@@ -115,6 +116,7 @@ impl Core {
             tokens,
             events,
             client,
+            cache_generation: Generation::default(),
             inner: Mutex::new(Inner {
                 settings,
                 token,
@@ -180,7 +182,11 @@ impl Core {
     fn cache_for(&self, server: &str, user: &Value) -> OfflineCache {
         let id = server::user_id(user).unwrap_or_default();
         let digest = hex::encode(Sha256::digest(format!("{server}\n{id}").as_bytes()));
-        OfflineCache::new(self.opts.cache_root.join(&digest[..24]), DEFAULT_MAX_BYTES)
+        OfflineCache::new(
+            self.opts.cache_root.join(&digest[..24]),
+            DEFAULT_MAX_BYTES,
+            &self.cache_generation,
+        )
     }
 
     fn save(&self, settings: &Settings) {

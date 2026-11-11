@@ -40,7 +40,7 @@ export function sentenceAt(segments: Segment[], sec: number): number {
 
 /**
  * 转写：按段落显示，每一句都能点，点了从那句开始播放；正在播放的那句高亮。
- * focus 是从搜索结果跳过来时要定位的时间点：滚到那时正在说的那一句并标出来。
+ * focus 是从搜索结果跳过来时要定位的时间点：滚到那时正在说的那一句并标出来。focusTick 变了也重新滚过去（又点了同一句的出处）。
  */
 export function TranscriptPane({
   segments,
@@ -49,6 +49,7 @@ export function TranscriptPane({
   canSeek,
   onSeek,
   focus,
+  focusTick,
   names,
 }: {
   segments: Segment[];
@@ -57,6 +58,7 @@ export function TranscriptPane({
   canSeek: boolean;
   onSeek: (sec: number) => void;
   focus?: number;
+  focusTick?: number;
   /** 给说话人起的名字 */
   names?: Record<string, string>;
 }) {
@@ -68,7 +70,7 @@ export function TranscriptPane({
   // 跳过来的那一句滚到中间
   useEffect(() => {
     if (focused >= 0) refs.current.get(focused)?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [focused, segments.length]);
+  }, [focused, focusTick, segments.length]);
 
   if (loading) return <Spinner label="正在加载转写…" />;
   if (segments.length === 0) {

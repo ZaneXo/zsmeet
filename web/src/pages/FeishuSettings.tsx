@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { components } from "../api/schema";
@@ -7,6 +7,7 @@ import { AppLink } from "../components/AppLink";
 import { Button, buttonClass, Card, Chip, Field, Input, Notice, Select, Spinner } from "../components/ui";
 import type { Tone } from "../components/ui";
 import { dateTime } from "../lib/format";
+import { localOnly } from "../lib/site";
 
 type Saved = components["schemas"]["FeishuSettings"];
 type Chat = components["schemas"]["FeishuChat"];
@@ -14,7 +15,7 @@ type RunStatus = components["schemas"]["FeishuStatusOutputBody"];
 type Import = components["schemas"]["FeishuImport"];
 
 /** 表单里的值：和保存的配置一一对应，再加一个新填的 App Secret（已保存的 Secret 拿不回来）。 */
-type Form = Omit<Saved, "app_secret_set" | "console_url"> & { app_secret: string };
+type Form = Omit<Saved, "app_secret_set" | "console_url" | "login_redirect_url"> & { app_secret: string };
 
 function formFrom(s: Saved): Form {
   return {
@@ -30,17 +31,26 @@ function formFrom(s: Saved): Form {
     doc_folder: s.doc_folder,
     link_share: s.link_share,
     import_recordings: s.import_recordings,
+    login: s.login,
+    login_auto_join: s.login_auto_join,
   };
 }
 
-/** 只有这台电脑自己能打开的地址。卡片上的链接用它拼的话，同事点了打不开。 */
-function localOnly(url: string): boolean {
+// 飞书登录完跳回 zsmeet 的路径，和后端的 service.FeishuCallbackPath 一致
+const CALLBACK_PATH = "/api/auth/feishu/callback";
+// 用飞书登录要向用户申请的权限，和后端的 feishu.LoginScopes 一致
+const LOGIN_SCOPES = ["contact:user.email:readonly", "contact:user.employee:readonly"];
+
+/** 要填进飞书应用「重定向 URL」的地址：访问地址加回调路径。访问地址还没填好时为空。 */
+function redirectURL(siteURL: string): string {
+  const site = siteURL.trim().replace(/\/+$/, "");
   try {
-    const host = new URL(url).hostname;
-    return host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "0.0.0.0" || host === "[::1]";
+    const u = new URL(site);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
   } catch {
-    return false;
+    return "";
   }
+  return site + CALLBACK_PATH;
 }
 
 /**
@@ -112,6 +122,8 @@ function FeishuForm({ saved }: { saved: Saved }) {
       void queryClient.invalidateQueries({ queryKey: ["status"] });
       const refetchType = data.app_id ? "active" : "none";
       void queryClient.invalidateQueries({ queryKey: ["feishu"], refetchType });
+      // 访问地址和「设置 → 群机器人」里的是同一个
+      void queryClient.invalidateQueries({ queryKey: ["settings", "site"] });
     },
   });
 
@@ -265,7 +277,7 @@ function FeishuForm({ saved }: { saved: Saved }) {
               localOnly(form.site_url) ? (
                 <span className="text-warn">这个地址只有这台电脑自己能打开，同事点卡片上的链接会打不开。请改成大家都能打开的地址。</span>
               ) : (
-                "卡片和飞书文档里的链接用它拼，要填同事们都能打开的地址"
+                "卡片和飞书文档里的链接、飞书登录完跳回来的地址都用它，要填同事们都能打开的地址。和「设置 → 群机器人」里的访问地址是同一个"
               )
             }
           >
@@ -355,6 +367,45 @@ function FeishuForm({ saved }: { saved: Saved }) {
         {ready && <ImportStatus on={saved.import_recordings} />}
       </Card>
 
+      <Card className="flex flex-col gap-4 p-6">
+        <div className="flex flex-col gap-1">
+          <h2 className="text-lg font-bold">用飞书登录</h2>
+          <p className="text-[13px] leading-relaxed text-muted">
+            登录页上多一个「用飞书登录」：用飞书扫码，或者在飞书网页版已经登录时点一下就行。按飞书里的企业邮箱对应到 zsmeet 的成员，第一次对应上以后记住这个飞书账号；成员也可以在「设置 → 账号」里自己关联。
+          </p>
+        </div>
+        {needApp}
+        <fieldset disabled={!appID} className="flex min-w-0 flex-col gap-4 disabled:opacity-60">
+          <Check
+            id="feishu-login"
+            label="允许用飞书登录"
+            hint="原来的邮箱和密码照样能用。停用的成员用飞书也登录不了。"
+            checked={form.login}
+            onChange={(v) => edit({ login: v })}
+          />
+          <div role="radiogroup" aria-label="飞书账号还不是成员时" className="flex flex-col gap-2 pl-6.5">
+            <span className="text-xs font-medium text-ink-2">飞书账号还不是成员时</span>
+            <Radio
+              name="feishu-login-join"
+              label="不让登录，请管理员先邀请（推荐）"
+              hint="登录页上会提示他找管理员邀请。邀请发到他的飞书企业邮箱的话，他用飞书登录就直接加入了，角色按邀请里的。"
+              checked={!form.login_auto_join}
+              disabled={!form.login}
+              onChange={() => edit({ login_auto_join: false })}
+            />
+            <Radio
+              name="feishu-login-join"
+              label="自动创建成员账号"
+              hint="公司里能用这个飞书应用的人都能直接进来，角色是成员，看得到团队里所有人都能看的会议。账号的邮箱用他的企业邮箱，没有时用通讯录里的邮箱。"
+              checked={form.login_auto_join}
+              disabled={!form.login}
+              onChange={() => edit({ login_auto_join: true })}
+            />
+          </div>
+          {form.login && <LoginGuide siteURL={form.site_url} />}
+        </fieldset>
+      </Card>
+
       <div className="flex flex-col gap-3">
         {save.isError && <Notice tone="bad">{errorMessage(save.error)}</Notice>}
         {save.isSuccess && <Notice tone="ok">{saved.app_id ? "已保存。" : "已停用飞书，飞书的配置都清掉了。"}</Notice>}
@@ -387,7 +438,7 @@ function FeishuForm({ saved }: { saved: Saved }) {
 }
 
 /** 勾选框加一行说明。说明不放进 label：读屏时先念名字，说明作为补充。 */
-function Check({
+export function Check({
   id,
   label,
   hint,
@@ -430,6 +481,103 @@ function ExternalLink({ href, children }: { href: string; children: ReactNode })
     <a href={href} target="_blank" rel="noreferrer" className="font-medium text-brand underline hover:text-brand-hover">
       {children}
     </a>
+  );
+}
+
+/** 单选项加一行说明。 */
+function Radio({
+  name,
+  label,
+  hint,
+  checked,
+  disabled,
+  onChange,
+}: {
+  name: string;
+  label: string;
+  hint: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-2.5 text-sm has-disabled:cursor-not-allowed has-disabled:text-muted">
+      <input
+        type="radio"
+        name={name}
+        className="mt-0.5 size-4 shrink-0 cursor-pointer accent-brand disabled:cursor-not-allowed"
+        checked={checked}
+        disabled={disabled}
+        onChange={onChange}
+      />
+      <span className="flex flex-col gap-0.5">
+        <span className="font-medium">{label}</span>
+        <span className="text-xs leading-relaxed text-muted">{hint}</span>
+      </span>
+    </label>
+  );
+}
+
+/** 打开飞书登录以后，管理员还要在飞书开发者后台做的几件事。 */
+function LoginGuide({ siteURL }: { siteURL: string }) {
+  const url = redirectURL(siteURL);
+  return (
+    <div className="flex flex-col gap-3 rounded-xl bg-canvas px-4 py-3 text-[13px] leading-relaxed text-ink-2">
+      <b className="font-semibold text-ink">还要在飞书开发者后台做三件事，然后发布新版本：</b>
+      <ol className="flex list-decimal flex-col gap-3 pl-5 marker:text-muted">
+        <li className="flex flex-col gap-1.5">
+          <span>在「安全设置 → 重定向 URL」里添加下面这个地址（和上面的访问地址一起变）：</span>
+          {url ? <CopyField key={url} value={url} label="重定向 URL" /> : <span className="text-warn">先在上面填好 zsmeet 的访问地址。</span>}
+          {localOnly(siteURL) && <span className="text-warn">这个地址只有这台电脑自己能打开，别的同事用飞书登录完会回不来。</span>}
+        </li>
+        <li className="flex flex-col gap-1.5">
+          <span>在「权限管理」里开通这两个权限（没开通的话，同事在飞书的授权页上会看到报错）：</span>
+          <Scopes names={LOGIN_SCOPES} />
+          <span className="text-xs leading-relaxed text-muted">
+            <Code>contact:user.employee:readonly</Code> 用来读企业邮箱（公司发的飞书邮箱，飞书验证过），zsmeet 只按它自动对应成员、接受发到这个邮箱的邀请。
+            <Code>contact:user.email:readonly</Code> 读的是通讯录里的邮箱，它是飞书管理员填的、没有经过本人验证，不会拿来登录已有的账号。
+          </span>
+        </li>
+        <li>在「版本管理与发布」里把应用的可用范围设成要用 zsmeet 的同事（不在范围里的人用飞书登录不了），创建版本并发布。</li>
+      </ol>
+      <span className="text-xs text-muted">
+        两个权限都要开通并发布新版本，否则同事在飞书的授权页上会看到 20027 报错，用飞书登录和关联飞书都用不了。
+        公司没用飞书邮箱时拿不到企业邮箱：成员先用邮箱和密码登录（新同事先用邀请链接创建账号），再在「设置 → 账号」里输入密码、点「关联飞书」，以后就能用飞书登录了。
+      </span>
+    </div>
+  );
+}
+
+/** 一段要原样复制的文字，带复制按钮。浏览器不让自动复制时（没用 HTTPS），选中文字让用户自己复制。 */
+function CopyField({ value, label }: { value: string; label: string }) {
+  const input = useRef<HTMLInputElement>(null);
+  const [state, setState] = useState<"idle" | "copied" | "manual">("idle");
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setState("copied");
+    } catch {
+      input.current?.select();
+      setState("manual");
+    }
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex gap-2">
+        <Input
+          ref={input}
+          readOnly
+          value={value}
+          aria-label={label}
+          onFocus={(e) => e.currentTarget.select()}
+          className="bg-white font-mono text-xs"
+        />
+        <Button size="sm" onClick={copy}>
+          {state === "copied" ? "已复制" : "复制"}
+        </Button>
+      </div>
+      {state === "manual" && <span className="text-xs text-warn">浏览器不允许自动复制。地址已经选中，按 Ctrl+C（Mac 上是 ⌘C）复制。</span>}
+    </div>
   );
 }
 

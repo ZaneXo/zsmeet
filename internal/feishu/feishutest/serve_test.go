@@ -18,6 +18,7 @@ import (
 //
 // 假应用的凭证是 AppID / AppSecret。机器人在「产品组」「研发群」两个群里；飞书会议 demo-1 有云录制，
 // 内容是 FEISHU_MOCK_MEDIA 这个文件，组织者 ou_demo 的邮箱是 FEISHU_MOCK_EMAIL。
+// 用飞书登录时，授权页上登录着的也是 ou_demo，企业邮箱是 FEISHU_MOCK_EMAIL（浏览器要能打开 FEISHU_MOCK_URL）。
 func TestServeForBrowser(t *testing.T) {
 	addr := os.Getenv("FEISHU_MOCK_ADDR")
 	if addr == "" {
@@ -32,7 +33,11 @@ func TestServeForBrowser(t *testing.T) {
 		FailChats:  map[string]int{},
 		Calls:      map[string]int{},
 		tasks:      map[string]*Import{},
-		Chats:      [][2]string{{"oc_demo_team", "产品组"}, {"oc_demo_dev", "研发群"}},
+		grants:     map[string]*grant{},
+		userTokens: map[string]userGrant{},
+		// 用飞书登录时，授权页上登录着的是演示用户
+		LoginAs: &LoginUser{OpenID: "ou_demo", UnionID: "on_demo", Name: "演示用户", EnterpriseEmail: os.Getenv("FEISHU_MOCK_EMAIL")},
+		Chats:   [][2]string{{"oc_demo_team", "产品组"}, {"oc_demo_dev", "研发群"}},
 	}
 	if path := os.Getenv("FEISHU_MOCK_MEDIA"); path != "" {
 		data, err := os.ReadFile(path)

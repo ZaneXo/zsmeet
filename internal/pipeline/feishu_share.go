@@ -246,7 +246,11 @@ func (sw *shareWorker) NextRetry(job *river.Job[queue.FeishuShareArgs]) time.Tim
 
 // retryWord 是第 attempt 次失败以后，网页上说的「多久以后重试」。
 func retryWord(attempt int) string {
-	d := shareRetryDelays[min(max(attempt, 1), len(shareRetryDelays))-1]
+	return durationWord(shareRetryDelays[min(max(attempt, 1), len(shareRetryDelays))-1])
+}
+
+// durationWord 是网页上说的「多久」：不到一分钟的说几秒，其他的说几分钟。
+func durationWord(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%d 秒", int(d.Seconds()))
 	}

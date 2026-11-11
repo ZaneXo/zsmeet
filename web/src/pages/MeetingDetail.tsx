@@ -4,14 +4,17 @@ import type { FormEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
-import type { Meeting, Segment, User } from "../api/client";
+import type { Citation, Meeting, Segment, User } from "../api/client";
 import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings";
 import { Button, buttonClass, Card, Chip, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
+import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
 import { AccessDialog, VISIBILITY_LABEL } from "./AccessDialog";
+import { AskPanel } from "./Ask";
 import { FeishuShareDialog, LatestFeishuShare } from "./FeishuShare";
+import { LatestWebhookSends, useMeetingWebhooks, WebhookShareDialog } from "./WebhookShare";
 import { meetingChip, recordingLive } from "./Meetings";
 import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
@@ -34,7 +37,20 @@ function useMeetingEvents(id: string, active: boolean) {
   }, [id, active]);
 }
 
-export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { user: User; llmReady: boolean; feishuReady: boolean; isAdmin: boolean }) {
+export function MeetingDetailPage({
+  user,
+  llmReady,
+  feishuReady,
+  voiceprints,
+  isAdmin,
+}: {
+  user: User;
+  llmReady: boolean;
+  feishuReady: boolean;
+  /** 管理员打开了声纹：改过名的人之后的会议按声音认出 */
+  voiceprints: boolean;
+  isAdmin: boolean;
+}) {
   const { id = "" } = useParams();
   const meeting = useQuery({
     queryKey: ["meeting", id],
@@ -62,18 +78,28 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
   }, [id, step]);
 
   // 从搜索结果点过来时带着 ?t=秒数：打开转写、定位到那一句，从那附近开始播放
-  const [params] = useSearchParams();
-  const jump = jumpTarget(params.get("t"));
+  const [params, setParams] = useSearchParams();
+  const jump = parseJump(params.get("t"));
   const jumpSec = jump?.sec;
   const [tab, setTab] = useState<"minutes" | "transcript">(jump === undefined ? "minutes" : "transcript");
   useEffect(() => {
     if (jumpSec !== undefined) setTab("transcript");
   }, [jumpSec]);
   const audio = useRef<HTMLAudioElement>(null);
+  // 点出处时已经直接播放了的时间点：随后网址里的 ?t= 跟着变，下面跟着网址跳转的效果就不用再跳一次
+  const cited = useRef<number | undefined>(undefined);
+  // 每点一次出处加一：点的还是同一句时，转写也重新滚到那一句
+  const [focusTick, setFocusTick] = useState(0);
   const [now, setNow] = useState(0);
   // 「发到飞书」「谁能看」的弹窗开着没有
   const [sharing, setSharing] = useState(false);
   const [access, setAccess] = useState(false);
+  // 「问这场会议」的框开着没有
+  const [asking, setAsking] = useState(false);
+  // 「发到群里」（钉钉、企业微信、Slack 的群机器人）的弹窗开着没有
+  const [posting, setPosting] = useState(false);
+  const webhooks = useMeetingWebhooks(id, m?.minutes_version);
+  const hooks = webhooks.data?.items ?? [];
   const seek = useCallback((sec: number) => {
     const el = audio.current;
     if (!el) return;
@@ -85,9 +111,13 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
   const hasAudio = meeting.data?.has_audio;
   useEffect(() => {
     const el = audio.current;
+    if (jumpSec !== undefined && cited.current === jumpSec) {
+      cited.current = undefined;
+      return;
+    }
     if (jumpSec === undefined || !el) return;
     const go = () => {
-      el.currentTime = Math.max(0, jumpSec - 3);
+      el.currentTime = Math.max(0, jumpSec - LEAD_IN);
       void el.play().catch(() => {});
     };
     if (el.readyState >= 1) {
@@ -97,6 +127,27 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
     el.addEventListener("loadedmetadata", go, { once: true });
     return () => el.removeEventListener("loadedmetadata", go);
   }, [jumpSec, hasAudio]);
+
+  // 点了回答里的出处：在原地跳到那句话（和从搜索结果点过来一样，打开转写、定位、从前 3 秒开始播放）。
+  // 总是在这里直接播放，不靠网址变化触发：网址里的时间点数值没变时（哪怕写法不同，「70」和「70.0」）上面的效果不会再跳。
+  // 网址统一改成出处时间点的写法，转写按它定位，刷新页面也还在这里。
+  // 纪要里没标时间的行就打开纪要，并去掉网址里的 ?t=，刷新页面也停在纪要
+  const cite = (c: Citation) => {
+    if (c.at < 0) {
+      setTab("minutes");
+      const next = withoutJump(params);
+      if (next) setParams(next, { replace: true });
+      return;
+    }
+    const j = citeJump(params.get("t"), c.at, c.source === "transcript");
+    setTab("transcript");
+    setFocusTick((n) => n + 1);
+    seek(j.seek);
+    if (j.param !== undefined) {
+      if (j.moved) cited.current = j.focus.sec;
+      setParams({ t: j.param }, { replace: true });
+    }
+  };
 
   if (meeting.isPending) return <Spinner label="正在加载会议…" />;
   if (meeting.isError || !m) {
@@ -112,6 +163,10 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
   const hasTranscript = segments.length > 0;
   // 管理员配置了飞书、已经有纪要时，能编辑的人可以把纪要发到飞书
   const canShare = feishuReady && m.can_edit && m.minutes_version > 0;
+  // 配置了大模型、有转写或纪要时可以问这场会议
+  const canAsk = llmReady && (hasTranscript || m.minutes_version > 0);
+  // 管理员加了群机器人、已经有纪要时，能编辑的人可以把纪要发到群里
+  const canPost = hooks.length > 0 && m.can_edit && m.minutes_version > 0;
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4">
@@ -134,13 +189,26 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
             )}
           </div>
           {feishuReady && <LatestFeishuShare meeting={m} onOpen={canShare ? () => setSharing(true) : undefined} />}
+          <LatestWebhookSends hooks={hooks} meeting={m} onOpen={canPost ? () => setPosting(true) : undefined} />
         </div>
         <span className="flex items-center gap-2">
           <Chip tone={chip.tone}>{chip.text}</Chip>
+          {canAsk && (
+            <Button size="sm" variant="ghost" aria-expanded={asking} onClick={() => setAsking(!asking)}>
+              <Icon name="ask" size={15} />
+              问这场会议
+            </Button>
+          )}
           {canShare && (
             <Button size="sm" variant="ghost" onClick={() => setSharing(true)}>
               <Icon name="upload" size={15} />
               发到飞书
+            </Button>
+          )}
+          {canPost && (
+            <Button size="sm" variant="ghost" onClick={() => setPosting(true)}>
+              <Icon name="upload" size={15} />
+              发到群里
             </Button>
           )}
           <ExportMenu meeting={m} hasTranscript={hasTranscript} />
@@ -148,7 +216,8 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
         </span>
       </div>
       {sharing && <FeishuShareDialog meeting={m} onClose={() => setSharing(false)} />}
-      {access && <AccessDialog meeting={m} isOwner={m.owner_id === user.id} feishu={feishuReady} onClose={() => setAccess(false)} />}
+      {posting && <WebhookShareDialog meeting={m} hooks={hooks} onClose={() => setPosting(false)} />}
+      {access && <AccessDialog meeting={m} isOwner={m.owner_id === user.id} feishu={feishuReady} groups={hooks.length > 0} onClose={() => setAccess(false)} />}
 
       {m.status !== "done" && <ProcessingPanel meeting={m} user={user} minutesOnly={hasTranscript} />}
 
@@ -170,6 +239,18 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
         <p className="rounded-xl border border-line bg-white px-4 py-3 text-[13px] leading-relaxed text-muted">
           录音已经过了保留期，在 {dateTime(m.audio_deleted_at)} 删除了。转写和纪要都还在，只是不能再回放、重新转写。
         </p>
+      )}
+
+      {canAsk && asking && (
+        <Card className="flex flex-col gap-3 px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">问这场会议</h2>
+            <Button variant="ghost" size="sm" aria-label="收起" onClick={() => setAsking(false)}>
+              <Icon name="close" />
+            </Button>
+          </div>
+          <AskPanel meetingId={m.id} onCite={cite} />
+        </Card>
       )}
 
       {(m.marks ?? []).length > 0 && <MarksCard marks={m.marks ?? []} segments={segments} canSeek={m.has_audio} onSeek={seek} />}
@@ -205,7 +286,7 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
             <MinutesPane meeting={m} hasTranscript={hasTranscript} llmReady={llmReady} isAdmin={isAdmin} canSeek={m.has_audio} onSeek={seek} />
           ) : (
             <>
-              {hasTranscript && <Speakers meeting={m} segments={segments} />}
+              {hasTranscript && <Speakers meeting={m} segments={segments} voiceprints={voiceprints} isAdmin={isAdmin} />}
               <TranscriptPane
                 segments={segments}
                 loading={transcript.isPending}
@@ -213,6 +294,7 @@ export function MeetingDetailPage({ user, llmReady, feishuReady, isAdmin }: { us
                 canSeek={m.has_audio}
                 onSeek={seek}
                 focus={jump && jump.sec + jump.slack}
+                focusTick={focusTick}
                 names={m.speakers}
               />
             </>
@@ -546,18 +628,6 @@ function MarksCard({ marks, segments, canSeek, onSeek }: { marks: number[]; segm
 }
 
 
-/**
- * 网址里 ?t= 的秒数；没有或者不是合法的数字时返回 undefined。
- * slack 是定位句子时的余量：转写里的句子时间带小数，是准的；纪要里的时间点只到秒，
- * 那句话可能晚不到一秒才开始，所以多给一秒。
- */
-function jumpTarget(raw: string | null): { sec: number; slack: number } | undefined {
-  if (raw === null || raw.trim() === "") return undefined;
-  const sec = Number(raw);
-  if (!Number.isFinite(sec) || sec < 0) return undefined;
-  return { sec, slack: raw.includes(".") ? 0.05 : 0.99 };
-}
-
 /** 用现在的识别模型重新转写（换模型以前转写的会议，用它得到逐句的时间）。先确认一次。 */
 function Retranscribe({ meeting: m }: { meeting: Meeting }) {
   const [confirming, setConfirming] = useState(false);
@@ -633,8 +703,9 @@ function DeleteMeeting({ meeting: m }: { meeting: Meeting }) {
 /**
  * 说话人：每人一个色块、名字和说话时长的占比。创建者和管理员可以改名，
  * 改完转写和搜索结果马上用新名字，纪要里的「说话人 N」也换成名字（作为新版本）。
+ * 按声音认出的名字标着「按声音认出」，认对了点改名再保存一次就算确认。
  */
-function Speakers({ meeting: m, segments }: { meeting: Meeting; segments: Segment[] }) {
+function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Meeting; segments: Segment[]; voiceprints: boolean; isAdmin: boolean }) {
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const rename = useMutation({
@@ -693,6 +764,14 @@ function Speakers({ meeting: m, segments }: { meeting: Meeting; segments: Segmen
             <span key={sp} className="flex items-center gap-1.5 rounded-full bg-canvas px-3 py-1 text-[13px]">
               <span className="size-2 rounded-full" style={{ background: speakerColor(sp) }} aria-hidden="true" />
               <span className="font-medium">{speakerName(sp, m.speakers)}</span>
+              {m.auto_speakers.includes(sp) && (
+                <span
+                  className="rounded-full bg-brand-tint px-1.5 text-[11px] font-medium text-brand-ink"
+                  title="这个名字是按声音和以前会议里的名字比对出来的，可能认错。认错了点「改名」改过来"
+                >
+                  按声音认出
+                </span>
+              )}
               <span className="text-muted">{total > 0 ? Math.round(((talk.get(sp) ?? 0) / total) * 100) : 0}%</span>
               {m.can_edit && (
                 <button
@@ -713,7 +792,26 @@ function Speakers({ meeting: m, segments }: { meeting: Meeting; segments: Segmen
       </div>
       {rename.isError && <Notice tone="bad">{errorMessage(rename.error)}</Notice>}
       {m.can_edit && editing !== null && (
-        <span className="text-xs text-muted">改完以后，转写和搜索结果马上用新名字；当前纪要里的「{speakerName(editing)}」也会换成新名字，作为一个新版本保存。留空表示去掉名字。</span>
+        <span className="text-xs text-muted">
+          {m.auto_speakers.includes(editing) && "这个名字是按声音认出的：认对了直接保存就算确认，认错了改成对的名字。"}
+          改完以后，转写和搜索结果马上用新名字；当前纪要里的「{speakerName(editing)}」也会换成新名字，作为一个新版本保存。留空表示去掉名字。
+          {voiceprints && "之后的会议会按声音认出这个人。"}
+        </span>
+      )}
+      {m.can_edit && editing !== null && !voiceprints && (
+        <span className="text-xs text-muted">
+          {isAdmin ? (
+            <>
+              在
+              <AppLink to="/settings/voiceprints" className="text-brand hover:text-brand-hover">
+                「设置 → 声纹」
+              </AppLink>
+              里打开以后，改过名的人在之后的会议里能按声音自动认出。
+            </>
+          ) : (
+            "管理员在「设置 → 声纹」里打开以后，改过名的人在之后的会议里能按声音自动认出。"
+          )}
+        </span>
       )}
     </div>
   );

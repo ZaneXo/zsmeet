@@ -11,6 +11,9 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, setupOp, h.Setup)
 	huma.Register(api, loginOp, h.Login)
 	huma.Register(api, logoutOp, h.Logout)
+	huma.Register(api, feishuLoginStartOp, h.FeishuLoginStart)
+	huma.Register(api, feishuLinkStartOp, h.FeishuLinkStart)
+	huma.Register(api, feishuLoginCallbackOp, h.FeishuLoginCallback)
 
 	huma.Register(api, listTemplatesOp, h.ListTemplates)
 	huma.Register(api, createTemplateOp, h.CreateTemplate)
@@ -31,6 +34,7 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, listTrashOp, h.ListTrash)
 	huma.Register(api, restoreMeetingOp, h.RestoreMeeting)
 	huma.Register(api, purgeMeetingOp, h.PurgeMeeting)
+	huma.Register(api, askOp, h.Ask)
 	sse.Register(api, meetingEventsOp, map[string]any{"meeting": Meeting{}}, h.MeetingEvents)
 
 	huma.Register(api, putChunkOp, h.PutChunk)
@@ -46,11 +50,14 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, lookupLinkOp, h.LookupLink)
 	huma.Register(api, acceptLinkOp, h.AcceptLink)
 	huma.Register(api, changePasswordOp, h.ChangePassword)
+	huma.Register(api, getFeishuLinkOp, h.GetFeishuLink)
+	huma.Register(api, unlinkFeishuOp, h.UnlinkFeishu)
 
 	huma.Register(api, listMembersOp, h.ListMembers)
 	huma.Register(api, updateMemberOp, h.UpdateMember)
 	huma.Register(api, createResetLinkOp, h.CreateResetLink)
 	huma.Register(api, revokeResetLinkOp, h.RevokeResetLink)
+	huma.Register(api, unlinkMemberFeishuOp, h.UnlinkMemberFeishu)
 	huma.Register(api, createInviteOp, h.CreateInvite)
 	huma.Register(api, renewInviteOp, h.RenewInvite)
 	huma.Register(api, revokeInviteOp, h.RevokeInvite)
@@ -63,6 +70,12 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, getRetentionOp, h.GetRetention)
 	huma.Register(api, putRetentionOp, h.PutRetention)
 
+	huma.Register(api, getVoiceprintSettingsOp, h.GetVoiceprintSettings)
+	huma.Register(api, putVoiceprintSettingsOp, h.PutVoiceprintSettings)
+	huma.Register(api, listVoiceprintsOp, h.ListVoiceprints)
+	huma.Register(api, deleteVoiceprintOp, h.DeleteVoiceprint)
+	huma.Register(api, deleteAllVoiceprintsOp, h.DeleteAllVoiceprints)
+
 	huma.Register(api, getFeishuSettingsOp, h.GetFeishuSettings)
 	huma.Register(api, putFeishuSettingsOp, h.PutFeishuSettings)
 	huma.Register(api, testFeishuOp, h.TestFeishu)
@@ -70,5 +83,14 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, listFeishuChatsOp, h.ListFeishuChats)
 	huma.Register(api, shareToFeishuOp, h.ShareToFeishu)
 	huma.Register(api, listFeishuSharesOp, h.ListFeishuShares)
+	huma.Register(api, getSiteSettingsOp, h.GetSiteSettings)
+	huma.Register(api, putSiteSettingsOp, h.PutSiteSettings)
+	huma.Register(api, listWebhooksOp, h.ListWebhooks)
+	huma.Register(api, createWebhookOp, h.CreateWebhook)
+	huma.Register(api, updateWebhookOp, h.UpdateWebhook)
+	huma.Register(api, deleteWebhookOp, h.DeleteWebhook)
+	huma.Register(api, testWebhookOp, h.TestWebhook)
+	huma.Register(api, listMeetingWebhooksOp, h.ListMeetingWebhooks)
+	huma.Register(api, sendToWebhooksOp, h.SendToWebhooks)
 	// gen:routes —— make api 会在这一行上面插入新接口，别删
 }

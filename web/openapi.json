@@ -24,6 +24,69 @@
         ],
         "type": "object"
       },
+      "AskInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "meeting_id": {
+            "description": "只问这一场会议（会议的 ID）；不填表示在自己能看的所有会议里找",
+            "type": "string"
+          },
+          "question": {
+            "description": "要问的问题，最多 300 个字，例如「上周关于报价定了什么？」",
+            "maxLength": 2000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "type": "object"
+      },
+      "AskOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "description": "大模型的回答，纯文本；[n] 对应 citations 里的出处。会议记录里没找到时也是一段说明",
+            "type": "string"
+          },
+          "citations": {
+            "description": "回答引用的出处，按 n 排列。回答里引用了材料里没有的编号时直接去掉，不会出现在这里",
+            "items": {
+              "$ref": "#/components/schemas/Citation"
+            },
+            "type": "array"
+          },
+          "from": {
+            "description": "问题限定的开始日期（含），没限定时没有这一项",
+            "format": "date",
+            "type": "string"
+          },
+          "keywords": {
+            "description": "实际拿去搜索的词：大模型从问题里提取的，大模型没给出时从问题里拆出来的。只问一场会议、整场都交给了大模型时为空",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "meetings_searched": {
+            "description": "交给大模型的材料来自几场会议（按问题找到的最相关的几场，最多 6 场）",
+            "format": "int64",
+            "type": "integer"
+          },
+          "to": {
+            "description": "问题限定的结束日期（含），没限定时没有这一项",
+            "format": "date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer",
+          "citations",
+          "meetings_searched",
+          "keywords"
+        ],
+        "type": "object"
+      },
       "ChangePasswordInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -59,6 +122,56 @@
         },
         "required": [
           "received"
+        ],
+        "type": "object"
+      },
+      "Citation": {
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "description": "引用的那句话从录音开头算的秒数；-1 表示没有时间点（纪要里没标时间的行）",
+            "format": "double",
+            "type": "number"
+          },
+          "date": {
+            "description": "会议时间",
+            "format": "date-time",
+            "type": "string"
+          },
+          "meeting_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "n": {
+            "description": "回答里写成 [n] 的序号，从 1 开始",
+            "format": "int64",
+            "type": "integer"
+          },
+          "quote": {
+            "description": "引用的原文（太长的截断）",
+            "type": "string"
+          },
+          "source": {
+            "description": "引用的是转写里的一句，还是纪要里的一行。纪要里的时间点只精确到秒",
+            "enum": [
+              "transcript",
+              "minutes"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "description": "会议标题",
+            "type": "string"
+          }
+        },
+        "required": [
+          "n",
+          "meeting_id",
+          "title",
+          "date",
+          "at",
+          "source",
+          "quote"
         ],
         "type": "object"
       },
@@ -330,6 +443,57 @@
         ],
         "type": "object"
       },
+      "FeishuLinkOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "description": "管理员打开了飞书登录（能关联飞书账号）",
+            "type": "boolean"
+          },
+          "linked": {
+            "description": "是否关联了飞书账号",
+            "type": "boolean"
+          },
+          "linked_at": {
+            "description": "什么时候关联的",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "linked"
+        ],
+        "type": "object"
+      },
+      "FeishuLinkStartInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "description": "当前的密码",
+            "maxLength": 200,
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "type": "object"
+      },
+      "FeishuLinkStartOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "description": "发起不了时的原因代号（和回调地址里的 feishu_error 一样），比如管理员没打开飞书登录",
+            "type": "string"
+          },
+          "url": {
+            "description": "飞书授权页的地址，浏览器整页打开它",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "FeishuSettings": {
         "additionalProperties": false,
         "properties": {
@@ -375,6 +539,18 @@
             "description": "公司里拿到文档链接的人都能看",
             "type": "boolean"
           },
+          "login": {
+            "description": "允许成员用飞书登录",
+            "type": "boolean"
+          },
+          "login_auto_join": {
+            "description": "飞书账号还不是成员时自动创建成员账号；否则只有已经是成员的人能用飞书登录",
+            "type": "boolean"
+          },
+          "login_redirect_url": {
+            "description": "用飞书登录要填进飞书应用「安全设置 → 重定向 URL」的地址，没填访问地址时为空",
+            "type": "string"
+          },
           "site_url": {
             "description": "zsmeet 的访问地址，卡片上的链接用它拼",
             "type": "string"
@@ -396,7 +572,10 @@
           "doc_folder",
           "link_share",
           "import_recordings",
-          "console_url"
+          "login",
+          "login_auto_join",
+          "console_url",
+          "login_redirect_url"
         ],
         "type": "object"
       },
@@ -440,6 +619,14 @@
             "type": "boolean"
           },
           "link_share": {
+            "type": "boolean"
+          },
+          "login": {
+            "description": "允许成员用飞书登录",
+            "type": "boolean"
+          },
+          "login_auto_join": {
+            "description": "飞书账号还不是成员时自动创建成员账号",
             "type": "boolean"
           },
           "site_url": {
@@ -888,6 +1075,14 @@
             "format": "date-time",
             "type": "string"
           },
+          "auto_speakers": {
+            "description": "哪几位说话人（编号）的名字是按声音认出、自动起的（声纹）。有人改过名、或者照原样保存过以后就不在里面了",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
           "can_edit": {
             "description": "当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口",
             "type": "boolean"
@@ -1031,6 +1226,7 @@
           "can_manage",
           "marks",
           "speakers",
+          "auto_speakers",
           "owner_id",
           "owner_name",
           "created_at",
@@ -1071,6 +1267,14 @@
             "description": "录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项",
             "format": "date-time",
             "type": "string"
+          },
+          "auto_speakers": {
+            "description": "哪几位说话人（编号）的名字是按声音认出、自动起的（声纹）。有人改过名、或者照原样保存过以后就不在里面了",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
           },
           "can_edit": {
             "description": "当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口",
@@ -1223,6 +1427,7 @@
           "can_manage",
           "marks",
           "speakers",
+          "auto_speakers",
           "owner_id",
           "owner_name",
           "created_at",
@@ -1261,6 +1466,51 @@
         ],
         "type": "object"
       },
+      "MeetingWebhook": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "latest": {
+            "$ref": "#/components/schemas/WebhookSend",
+            "description": "这场会议最近一次发到这个群的记录，没发过时没有"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "dingtalk",
+              "wecom",
+              "slack"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "platform"
+        ],
+        "type": "object"
+      },
+      "MeetingWebhooksOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "管理员加的群机器人；一个都没有时会议页上不显示「发到群里」",
+            "items": {
+              "$ref": "#/components/schemas/MeetingWebhook"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "Member": {
         "additionalProperties": false,
         "properties": {
@@ -1274,6 +1524,10 @@
           },
           "email": {
             "type": "string"
+          },
+          "feishu_linked": {
+            "description": "关联了飞书账号，能用飞书登录",
+            "type": "boolean"
           },
           "id": {
             "format": "uuid",
@@ -1300,7 +1554,8 @@
           "name",
           "role",
           "disabled",
-          "created_at"
+          "created_at",
+          "feishu_linked"
         ],
         "type": "object"
       },
@@ -1648,6 +1903,33 @@
         ],
         "type": "object"
       },
+      "SendToWebhooksInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "minutes_version": {
+            "description": "网页上看到的纪要版本：当前版本已经不是它时返回 409、不发。不传表示发当前版本，不检查",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "webhook_ids": {
+            "description": "发到哪几个群机器人",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "webhook_ids"
+        ],
+        "type": "object"
+      },
       "SetMeetingAccessInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1716,9 +1998,45 @@
         },
         "type": "object"
       },
+      "SiteSettingsInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "description": "例如 https://meet.example.com。为空表示不填",
+            "maxLength": 500,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "SiteSettingsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "feishu_url": {
+            "description": "飞书配置里填的访问地址。上面没填时用它",
+            "type": "string"
+          },
+          "url": {
+            "description": "zsmeet 的访问地址，发到群里的消息用它链接回会议；为空表示没填",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "feishu_url"
+        ],
+        "type": "object"
+      },
       "StatusOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "feishu_login": {
+            "description": "登录页上是否显示「用飞书登录」",
+            "type": "boolean"
+          },
           "feishu_ready": {
             "description": "是否配置了飞书（可以把纪要发到飞书）；只对登录用户有意义",
             "type": "boolean"
@@ -1737,12 +2055,18 @@
           },
           "version": {
             "type": "string"
+          },
+          "voiceprints": {
+            "description": "管理员是否打开了声纹（给说话人改过名字以后，之后的会议按声音认出这个人）；只对登录用户有意义",
+            "type": "boolean"
           }
         },
         "required": [
           "initialized",
           "llm_ready",
           "feishu_ready",
+          "voiceprints",
+          "feishu_login",
           "version"
         ],
         "type": "object"
@@ -1857,6 +2181,14 @@
             "description": "录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项",
             "format": "date-time",
             "type": "string"
+          },
+          "auto_speakers": {
+            "description": "哪几位说话人（编号）的名字是按声音认出、自动起的（声纹）。有人改过名、或者照原样保存过以后就不在里面了",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
           },
           "can_edit": {
             "description": "当前登录的人能不能修改这场会议（改标题、编辑纪要、重新生成、给说话人改名、发到飞书）：创建者、管理员和被指定能编辑的人可以。界面据此决定显不显示编辑入口",
@@ -2018,6 +2350,7 @@
           "can_manage",
           "marks",
           "speakers",
+          "auto_speakers",
           "owner_id",
           "owner_name",
           "created_at",
@@ -2071,6 +2404,267 @@
           "role"
         ],
         "type": "object"
+      },
+      "Voiceprint": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "meetings": {
+            "description": "从几场会议里学到的",
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "seconds": {
+            "description": "学到的说话一共多少秒",
+            "format": "double",
+            "type": "number"
+          },
+          "updated_at": {
+            "description": "最近一次学到或去掉样本的时间",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "meetings",
+          "seconds",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "VoiceprintSettingsInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "VoiceprintSettingsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "description": "是否记住说话人：给说话人改过名字以后，之后的会议按声音认出这个人、自动用这个名字。默认关着",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "VoiceprintsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Voiceprint"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Webhook": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_push": {
+            "description": "纪要第一次生成后自动发到这个群（只发团队里所有人都能看的会议）",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "description": "钉钉、企业微信或 Slack",
+            "enum": [
+              "dingtalk",
+              "wecom",
+              "slack"
+            ],
+            "type": "string"
+          },
+          "secret_set": {
+            "description": "钉钉是否开了加签；密钥本身不会返回",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "url_masked": {
+            "description": "打了码的 Webhook 地址，密钥只留最后 4 位",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "platform",
+          "name",
+          "url_masked",
+          "secret_set",
+          "auto_push",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WebhookBody": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_push": {
+            "type": "boolean"
+          },
+          "clear_secret": {
+            "description": "钉钉不再加签，清掉保存的密钥",
+            "type": "boolean"
+          },
+          "name": {
+            "maxLength": 100,
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "dingtalk",
+              "wecom",
+              "slack"
+            ],
+            "type": "string"
+          },
+          "secret": {
+            "description": "钉钉「加签」的密钥（SEC 开头）。留空表示沿用已保存的",
+            "maxLength": 200,
+            "type": "string"
+          },
+          "url": {
+            "description": "Webhook 地址。改的时候留空表示沿用已保存的",
+            "maxLength": 1000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "name"
+        ],
+        "type": "object"
+      },
+      "WebhookSend": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "error": {
+            "description": "失败的原因；发送中时是上一次没发出去的原因",
+            "type": "string"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "minutes_version": {
+            "description": "发的是第几版纪要",
+            "format": "int32",
+            "type": "integer"
+          },
+          "platform": {
+            "enum": [
+              "dingtalk",
+              "wecom",
+              "slack"
+            ],
+            "type": "string"
+          },
+          "requested_by_name": {
+            "description": "谁发的；纪要生成后自动发的为空",
+            "type": "string"
+          },
+          "status": {
+            "description": "pending 发送中；done 已发送；failed 失败。发送中超过半小时的（后台任务丢了）也报成 failed，可以重新发",
+            "enum": [
+              "pending",
+              "done",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "webhook_id": {
+            "description": "群机器人已经删掉时为空",
+            "type": "string"
+          },
+          "webhook_name": {
+            "description": "发送时群机器人的名字",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "webhook_id",
+          "webhook_name",
+          "platform",
+          "minutes_version",
+          "status",
+          "error",
+          "requested_by_name",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "WebhookSendsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WebhookSend"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "WebhooksOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Webhook"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -2082,7 +2676,7 @@
     }
   },
   "info": {
-    "description": "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login 以外都需要先登录。",
+    "description": "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login 和用飞书登录的 /api/auth/feishu/… 以外都需要先登录。",
     "title": "zsmeet",
     "version": "dev"
   },
@@ -2167,6 +2761,190 @@
           }
         },
         "summary": "查看一个邀请或重置链接",
+        "tags": [
+          "账号"
+        ]
+      }
+    },
+    "/api/ask": {
+      "post": {
+        "description": "用自然语言提问，管理员配置的大模型根据会议的纪要和转写回答，并给出能点的出处。不填 meeting_id 时在自己能看的所有会议里找，填了只问那一场（看不到的会议返回 404）。没配置大模型时返回 409；每人每分钟最多问 6 次，超过返回 429；大模型出错或超时返回 502。",
+        "operationId": "ask",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "问会议",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
+    "/api/auth/feishu/callback": {
+      "get": {
+        "description": "飞书的授权页跳回这里。核对 state（只能用一次，10 分钟内有效），用授权码换出飞书账号：登录时对应到 zsmeet 的账号后登录，回到首页；关联时关联到当前登录的账号，回到账号页（地址里带 feishu=linked）。失败时跳回登录页或者账号页，地址里的 feishu_error 是原因。",
+        "operationId": "feishu-login-callback",
+        "parameters": [
+          {
+            "description": "飞书给的授权码",
+            "explode": false,
+            "in": "query",
+            "name": "code",
+            "schema": {
+              "description": "飞书给的授权码",
+              "type": "string"
+            }
+          },
+          {
+            "description": "发起登录时的 state，原样带回来",
+            "explode": false,
+            "in": "query",
+            "name": "state",
+            "schema": {
+              "description": "发起登录时的 state，原样带回来",
+              "type": "string"
+            }
+          },
+          {
+            "description": "用户在授权页上拒绝时是 access_denied",
+            "explode": false,
+            "in": "query",
+            "name": "error",
+            "schema": {
+              "description": "用户在授权页上拒绝时是 access_denied",
+              "type": "string"
+            }
+          },
+          {
+            "description": "发起时存下的 state（加密的）",
+            "in": "cookie",
+            "name": "zsmeet_feishu_state",
+            "schema": {
+              "description": "发起时存下的 state（加密的）",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Found",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "飞书登录完跳回来",
+        "tags": [
+          "账号"
+        ]
+      }
+    },
+    "/api/auth/feishu/start": {
+      "get": {
+        "description": "浏览器整页打开这个地址，会被带到飞书的授权页（扫码，或者在飞书网页版已登录时点一下）。管理员没打开飞书登录、系统还没初始化时直接跳回登录页（关联时是账号页），地址里的 feishu_error 是原因。不写会话。",
+        "operationId": "feishu-login-start",
+        "parameters": [
+          {
+            "description": "不用填。以前的 link（关联飞书）不再从这里发起，要在账号页上输入密码（POST /api/me/feishu/link）",
+            "explode": false,
+            "in": "query",
+            "name": "mode",
+            "schema": {
+              "description": "不用填。以前的 link（关联飞书）不再从这里发起，要在账号页上输入密码（POST /api/me/feishu/link）",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Found",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "用飞书登录，或者关联飞书账号",
         "tags": [
           "账号"
         ]
@@ -2410,6 +3188,125 @@
           }
         },
         "summary": "退出登录",
+        "tags": [
+          "账号"
+        ]
+      }
+    },
+    "/api/me/feishu": {
+      "delete": {
+        "description": "换了飞书账号时用：解除以后再关联新的飞书账号。",
+        "operationId": "unlink-feishu",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "解除和飞书账号的关联",
+        "tags": [
+          "账号"
+        ]
+      },
+      "get": {
+        "description": "要关联飞书账号，先用 POST /api/me/feishu/link 核对当前密码，再在浏览器里整页打开返回的飞书授权页地址。",
+        "operationId": "get-feishu-link",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuLinkOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "我关联的飞书账号",
+        "tags": [
+          "账号"
+        ]
+      }
+    },
+    "/api/me/feishu/link": {
+      "post": {
+        "description": "核对当前密码，通过后返回飞书授权页的地址（浏览器整页打开），同时在 Cookie 里存下这次关联的 state。密码不对时返回 422。要求输入密码，是为了只拿到登录状态的人没法把自己的飞书账号关联上来。",
+        "operationId": "feishu-link-start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeishuLinkStartInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuLinkStartOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "关联飞书：输入密码后发起",
         "tags": [
           "账号"
         ]
@@ -3594,7 +4491,7 @@
     },
     "/api/meetings/{id}/speakers": {
       "put": {
-        "description": "转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。",
+        "description": "转写和搜索结果马上显示新名字；当前纪要里的「说话人 N」换成名字，作为一个新版本保存（旧版本保留）。以后重新生成纪要时也用名字。管理员打开了声纹时，名字连同这位说话人的声音特征记进声纹库，之后的会议按声音认出他；按声音认出的名字照原样提交一次算确认。",
         "operationId": "rename-speakers",
         "parameters": [
           {
@@ -3698,6 +4595,109 @@
         ]
       }
     },
+    "/api/meetings/{id}/webhooks": {
+      "get": {
+        "operationId": "list-meeting-webhooks",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingWebhooksOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "能发到的群机器人，和这场会议最近一次发到每个群的情况",
+        "tags": [
+          "群机器人"
+        ]
+      },
+      "post": {
+        "description": "把当前版本的纪要（摘要、待办和链接）发到选的钉钉、企业微信、Slack 群机器人。后台发送，状态看 GET 同一个地址。能编辑这场会议的人可以发。",
+        "operationId": "send-to-webhooks",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendToWebhooksInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookSendsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "summary": "把纪要发到群里",
+        "tags": [
+          "群机器人"
+        ]
+      }
+    },
     "/api/members": {
       "get": {
         "operationId": "list-members",
@@ -3791,6 +4791,49 @@
           }
         ],
         "summary": "修改成员的角色，或者停用、启用",
+        "tags": [
+          "成员"
+        ]
+      }
+    },
+    "/api/members/{id}/feishu": {
+      "delete": {
+        "description": "成员换了飞书账号、自己又登录不了（比如用飞书自动创建的账号不知道密码）时，管理员在这里解除。解除以后他用新的飞书账号登录时，重新按企业邮箱对应。",
+        "operationId": "unlink-member-feishu",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "解除成员和飞书账号的关联",
         "tags": [
           "成员"
         ]
@@ -4358,6 +5401,401 @@
         ]
       }
     },
+    "/api/settings/site": {
+      "get": {
+        "operationId": "get-site-settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteSettingsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "zsmeet 的访问地址",
+        "tags": [
+          "设置"
+        ]
+      },
+      "put": {
+        "operationId": "put-site-settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteSettingsInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteSettingsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "保存 zsmeet 的访问地址",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
+    "/api/settings/voiceprints": {
+      "get": {
+        "operationId": "get-voiceprint-settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoiceprintSettingsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "声纹设置",
+        "tags": [
+          "设置"
+        ]
+      },
+      "put": {
+        "description": "关掉以后不再收集、不再比对声音特征，已经记下的声纹留着，要删的话调用「删除全部声纹」。",
+        "operationId": "put-voiceprint-settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VoiceprintSettingsInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoiceprintSettingsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "打开或关掉声纹",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
+    "/api/settings/webhooks": {
+      "get": {
+        "description": "钉钉、企业微信、Slack 群里的自定义机器人，纪要可以发到这些群里。",
+        "operationId": "list-webhooks",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhooksOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "群机器人",
+        "tags": [
+          "设置"
+        ]
+      },
+      "post": {
+        "description": "只接受各平台官方的 Webhook 地址（https://oapi.dingtalk.com、https://qyapi.weixin.qq.com、https://hooks.slack.com）。地址和加签的密钥加密后保存。",
+        "operationId": "create-webhook",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "加一个群机器人",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
+    "/api/settings/webhooks/{id}": {
+      "delete": {
+        "description": "已经发到群里的消息不会撤回。发送记录留着。",
+        "operationId": "delete-webhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "删掉一个群机器人",
+        "tags": [
+          "设置"
+        ]
+      },
+      "put": {
+        "operationId": "update-webhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "改一个群机器人",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
+    "/api/settings/webhooks/{id}/test": {
+      "post": {
+        "description": "等发完才返回。地址失效、关键词或加签不对时返回 422，detail 里是原因和改法。",
+        "operationId": "test-webhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "往群机器人发一条测试消息",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
     "/api/setup": {
       "post": {
         "description": "只在系统里还没有任何用户时可用，成功后直接登录。",
@@ -4738,6 +6176,118 @@
         "summary": "从回收站恢复",
         "tags": [
           "会议"
+        ]
+      }
+    },
+    "/api/voiceprints": {
+      "delete": {
+        "description": "删除声纹库，以及每场会议里存的说话人声音特征，不能恢复。会议里已经起好的名字不变。",
+        "operationId": "delete-all-voiceprints",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "删除全部声纹",
+        "tags": [
+          "设置"
+        ]
+      },
+      "get": {
+        "description": "最近更新的在前。只说从几场会议里学到的，不列是哪几场。",
+        "operationId": "list-voiceprints",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoiceprintsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "声纹库里的人",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
+    "/api/voiceprints/{id}": {
+      "delete": {
+        "description": "连同学到的全部样本一起删除，不能恢复。会议里已经起好的名字不变；以后有人再把说话人改成这个名字，会重新开始学。",
+        "operationId": "delete-voiceprint",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "删除一个人的声纹",
+        "tags": [
+          "设置"
         ]
       }
     }

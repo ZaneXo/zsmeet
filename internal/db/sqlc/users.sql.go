@@ -205,6 +205,24 @@ func (q *Queries) PutSetting(ctx context.Context, arg PutSettingParams) error {
 	return err
 }
 
+const putSettingIfNoURL = `-- name: PutSettingIfNoURL :exec
+INSERT INTO settings (key, value) VALUES ($1, $2)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+WHERE coalesce(settings.value->>'url', '') = ''
+`
+
+type PutSettingIfNoURLParams struct {
+	Key   string
+	Value []byte
+}
+
+// 只在这项配置还没有地址（没有这一行，或者 url 是空的）时写入。判断和写入在同一条语句里：
+// 同时有人保存了新地址的话，这里看到的是他保存的，不会盖掉
+func (q *Queries) PutSettingIfNoURL(ctx context.Context, arg PutSettingIfNoURLParams) error {
+	_, err := q.db.Exec(ctx, putSettingIfNoURL, arg.Key, arg.Value)
+	return err
+}
+
 const releaseLoginAttempt = `-- name: ReleaseLoginAttempt :exec
 UPDATE login_failures SET failures = greatest(failures - 1, 0) WHERE key = $1
 `

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/secret"
 )
 
 type StatusOutput struct {
@@ -17,6 +19,8 @@ type StatusOutput struct {
 		User        *User  `json:"user,omitempty" doc:"当前登录的用户，没登录时没有这个字段"`
 		LLMReady    bool   `json:"llm_ready" doc:"是否配置了大模型；只对登录用户有意义"`
 		FeishuReady bool   `json:"feishu_ready" doc:"是否配置了飞书（可以把纪要发到飞书）；只对登录用户有意义"`
+		Voiceprints bool   `json:"voiceprints" doc:"管理员是否打开了声纹（给说话人改过名字以后，之后的会议按声音认出这个人）；只对登录用户有意义"`
+		FeishuLogin bool   `json:"feishu_login" doc:"登录页上是否显示「用飞书登录」"`
 		Version     string `json:"version"`
 	}
 }
@@ -38,18 +42,28 @@ func (h *Handlers) Status(ctx context.Context, _ *struct{}) (*StatusOutput, erro
 		return nil, toHTTP(err)
 	}
 	out.Body.Initialized = initialized
+	if out.Body.FeishuLogin, err = h.svc.FeishuLoginEnabled(ctx); err != nil {
+		return nil, toHTTP(err)
+	}
 	if user, err := h.sessionUser(ctx); err == nil {
 		out.Body.User = new(toUser(user))
+		// 保存的 API Key、App Secret 解不开（ZSMEET_SECRET_KEY 改过）时当作没配置好，不让整个网页打不开：
+		// 管理员到设置里重新填就好
 		cfg, err := h.svc.LLMSettings(ctx)
-		if err != nil {
+		if err != nil && !errors.Is(err, secret.ErrDecrypt) {
 			return nil, toHTTP(err)
 		}
-		out.Body.LLMReady = cfg.Ready()
+		out.Body.LLMReady = err == nil && cfg.Ready()
 		fs, err := h.svc.FeishuSettings(ctx)
+		if err != nil && !errors.Is(err, secret.ErrDecrypt) {
+			return nil, toHTTP(err)
+		}
+		out.Body.FeishuReady = err == nil && fs.Ready()
+		vp, err := h.svc.VoiceprintSettings(ctx)
 		if err != nil {
 			return nil, toHTTP(err)
 		}
-		out.Body.FeishuReady = fs.Ready()
+		out.Body.Voiceprints = vp.Enabled
 	}
 	return out, nil
 }

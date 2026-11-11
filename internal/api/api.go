@@ -72,7 +72,7 @@ type Handlers struct {
 // newHandlers 在 mux 上注册所有接口。svc 和 sess 传 nil 时只能用来导出接口文档。
 func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionManager, proxies []netip.Prefix, version string) *Handlers {
 	cfg := huma.DefaultConfig("zsmeet", version)
-	cfg.Info.Description = "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login 以外都需要先登录。"
+	cfg.Info.Description = "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login 和用飞书登录的 /api/auth/feishu/… 以外都需要先登录。"
 	cfg.OpenAPIPath = "/api/openapi"
 	cfg.DocsPath = "/api/docs"
 	cfg.SchemasPath = "/api/schemas"
@@ -246,6 +246,8 @@ func status(err error) (int, string) {
 			return http.StatusUnauthorized, e.Msg
 		case service.TooManyRequests:
 			return http.StatusTooManyRequests, e.Msg
+		case service.Unavailable:
+			return http.StatusBadGateway, e.Msg
 		}
 	}
 	if !errors.Is(err, context.Canceled) {

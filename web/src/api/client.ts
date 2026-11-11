@@ -16,6 +16,8 @@ export type Status = components["schemas"]["StatusOutputBody"];
 export type Member = components["schemas"]["Member"];
 export type Invite = components["schemas"]["Invite"];
 export type LinkInfo = components["schemas"]["LinkInfoOutputBody"];
+export type AskAnswer = components["schemas"]["AskOutputBody"];
+export type Citation = components["schemas"]["Citation"];
 
 export const api = createClient<paths>({ baseUrl: "", credentials: "same-origin" });
 

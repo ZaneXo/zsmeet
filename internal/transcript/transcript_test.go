@@ -15,12 +15,21 @@ func TestAssignSpeakers(t *testing.T) {
 		{Start: 4.5, End: 9, Speaker: 3},
 		{Start: 9.6, End: 12, Speaker: 3},
 	}
-	AssignSpeakers(segs, turns)
+	ids := AssignSpeakers(segs, turns)
 	want := []int{0, 1, 1, -1}
 	for i, w := range want {
 		if segs[i].Speaker != w {
 			t.Errorf("第 %d 句的说话人是 %d，应该是 %d", i, segs[i].Speaker, w)
 		}
+	}
+	if len(ids) != 2 || ids[7] != 0 || ids[3] != 1 {
+		t.Errorf("编号的对应关系不对：%v", ids)
+	}
+
+	// 时间段换成转写里的编号；一句话都没分到的人（9）的时间段去掉
+	got := RenumberTurns(append(turns, Turn{Start: 20, End: 25, Speaker: 9}), ids)
+	if len(got) != 3 || got[0].Speaker != 0 || got[1].Speaker != 1 || got[2].Speaker != 1 || got[2].Start != 9.6 {
+		t.Errorf("时间段的编号不对：%+v", got)
 	}
 }
 

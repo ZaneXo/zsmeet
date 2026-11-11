@@ -6,10 +6,12 @@ import type { Meeting, MeetingListItem, SearchHit } from "../api/client";
 import { Button, buttonClass, Chip, Icon, Input, Notice, Spinner } from "../components/ui";
 import type { Tone } from "../components/ui";
 import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName, STAGE_LABEL } from "../lib/format";
+import { jumpParam } from "../lib/jump";
 import { useTicker } from "../lib/useTicker";
 import { TrashList } from "./Trash";
 import { UploadDialog } from "./UploadDialog";
 import { VISIBILITY_LABEL } from "./AccessDialog";
+import { AskPanel } from "./Ask";
 
 /** 网页录音的会议多久没收到新的分片，就不再显示「录音中」（录音的网页可能关掉了、断网了，或者暂停着）。 */
 const RECORDING_STALE_MS = 90_000;
@@ -43,8 +45,10 @@ export function meetingChip(m: Meeting): { tone: Tone; text: string } {
 const isActive = (m: Meeting) => m.status === "queued" || m.status === "processing";
 const isRecording = (m: Meeting) => m.source === "record" && m.status === "uploading";
 
-export function MeetingsPage() {
+export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
   const [input, setInput] = useState("");
+  // 「问会议」的面板开着没有
+  const [asking, setAsking] = useState(false);
   const [q, setQ] = useState("");
   const [uploading, setUploading] = useState(false);
   const [mine, setMine] = useState(false);
@@ -102,6 +106,12 @@ export function MeetingsPage() {
             </span>
             <Input type="search" className="pl-10" placeholder="搜索标题、纪要、转写原文" aria-label="搜索会议" value={input} onChange={(e) => setInput(e.target.value)} maxLength={100} />
           </label>
+          {llmReady && (
+            <Button aria-expanded={asking} onClick={() => setAsking(!asking)} title="用一句话提问，大模型根据会议记录回答并给出出处">
+              <Icon name="ask" />
+              问会议
+            </Button>
+          )}
           <AppLink to="/record" className={buttonClass("primary")}>
             <Icon name="mic" />
             开始录音
@@ -112,6 +122,18 @@ export function MeetingsPage() {
           </Button>
         </div>
       </div>
+
+      {llmReady && asking && (
+        <section aria-label="问会议" className="flex flex-col gap-3 rounded-2xl border border-line bg-white px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">问会议</h2>
+            <Button variant="ghost" size="sm" aria-label="收起" onClick={() => setAsking(false)}>
+              <Icon name="close" />
+            </Button>
+          </div>
+          <AskPanel initial={input.trim()} />
+        </section>
+      )}
 
       <div role="tablist" className="flex border-b border-line">
         {(
@@ -250,7 +272,7 @@ function Hits({ meetingId, hits, names }: { meetingId: string; hits: SearchHit[]
           <li key={i}>
             <AppLink
               // 转写里的句子时间带一位小数（取整的话可能落在上一句里）；纪要里的时间点只到秒
-              to={h.start < 0 ? `/meetings/${meetingId}` : `/meetings/${meetingId}?t=${h.source === "transcript" ? h.start.toFixed(1) : Math.floor(h.start)}`}
+              to={h.start < 0 ? `/meetings/${meetingId}` : `/meetings/${meetingId}?t=${jumpParam(h.start, h.source === "transcript")}`}
               className="flex gap-3 rounded-lg px-2 py-1.5 text-[13px] leading-relaxed hover:bg-canvas"
             >
               <span className="w-11 shrink-0 tabular-nums text-brand">{h.start >= 0 ? clock(h.start) : ""}</span>

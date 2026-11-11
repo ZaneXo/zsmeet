@@ -210,7 +210,8 @@ function MemberRow({
 }) {
   // 停用和改角色都不是小事（踢下线、给出或收回管理权限、他发出去的链接作废），而且下拉框很容易手滑选错，
   // 所以点了以后先在这一行里再确认一次。值是要确认的操作：停用，或者要改成的角色
-  const [confirming, setConfirming] = useState<"disable" | Member["role"] | null>(null);
+  // unlink 是解除他和飞书账号的关联
+  const [confirming, setConfirming] = useState<"disable" | "unlink" | Member["role"] | null>(null);
   // 确认以后、还在保存的时候，下拉框先显示新角色；保存完、列表刷新回来以后以服务器的结果为准
   const [savingRole, setSavingRole] = useState<Member["role"] | null>(null);
   useEffect(() => {
@@ -229,6 +230,8 @@ function MemberRow({
     setConfirming(null);
     if (what === "disable") {
       update({ disabled: true });
+    } else if (what === "unlink") {
+      run(() => unwrap(api.DELETE("/api/members/{id}/feishu", path)));
     } else if (what) {
       setSavingRole(what);
       update({ role: what });
@@ -241,7 +244,9 @@ function MemberRow({
     disable: "停用后他会立刻被退出登录，不能再登录。",
     member: "降为成员后，他不能再管理成员和配置大模型。",
     admin: "设为管理员后，他可以管理成员、配置大模型，并修改任何一场会议。",
+    unlink: "解除后他不能再用这个飞书账号登录。之后他用飞书登录时会按企业邮箱重新对应，也可以用邮箱和密码登录后在「设置 → 账号」里重新关联。",
   };
+  const changingRole = confirming === "admin" || confirming === "member";
 
   return (
     <tr className="border-b border-line/70 align-top last:border-b-0">
@@ -257,7 +262,7 @@ function MemberRow({
           <Select
             aria-label={`${m.name} 的角色`}
             className="w-28 min-h-8 py-1"
-            value={confirming && confirming !== "disable" ? confirming : (savingRole ?? m.role)}
+            value={changingRole ? confirming : (savingRole ?? m.role)}
             disabled={busy}
             // 选回现在的角色，就是不改了
             onChange={(e) => setConfirming(e.target.value === m.role ? null : (e.target.value as Member["role"]))}
@@ -267,7 +272,12 @@ function MemberRow({
           </Select>
         )}
       </td>
-      <td className="px-3 py-3">{m.disabled ? <Chip tone="mute">已停用</Chip> : <Chip tone="ok">正常</Chip>}</td>
+      <td className="px-3 py-3">
+        <div className="flex flex-wrap gap-1.5">
+          {m.disabled ? <Chip tone="mute">已停用</Chip> : <Chip tone="ok">正常</Chip>}
+          {m.feishu_linked && <Chip tone="mute">已关联飞书</Chip>}
+        </div>
+      </td>
       <td className="px-3 py-3">
         <div className="flex flex-col items-end gap-2">
           {isMe ? (
@@ -278,10 +288,10 @@ function MemberRow({
             <div className="flex flex-wrap items-center justify-end gap-2">
               <span className="max-w-xs text-right text-xs leading-relaxed text-muted">
                 {consequence[confirming]}
-                {activeAdmin && confirming !== "admin" && "他生成的、还没被用掉的邀请和重置密码链接也会失效；邀请可以在下面重新生成。"}
+                {activeAdmin && (confirming === "disable" || confirming === "member") && "他生成的、还没被用掉的邀请和重置密码链接也会失效；邀请可以在下面重新生成。"}
               </span>
               <Button size="sm" variant={confirming === "admin" ? "primary" : "danger"} disabled={busy} onClick={confirm}>
-                {{ disable: "确定停用", member: "确定降为成员", admin: "确定设为管理员" }[confirming]}
+                {{ disable: "确定停用", member: "确定降为成员", admin: "确定设为管理员", unlink: "确定解除" }[confirming]}
               </Button>
               <Button size="sm" onClick={() => setConfirming(null)}>
                 取消
@@ -319,6 +329,13 @@ function MemberRow({
                 停用
               </Button>
             </div>
+          )}
+
+          {/* 他换了飞书账号、自己又进不来（比如用飞书自动创建的账号不知道密码）时，管理员替他解除。自己的在账号页上解除 */}
+          {m.feishu_linked && !isMe && !confirming && (
+            <Button size="sm" title="他换了飞书账号时用。解除后他用新的飞书账号登录时，按企业邮箱重新对应" disabled={busy} onClick={() => setConfirming("unlink")}>
+              解除飞书关联
+            </Button>
           )}
 
           {/* 拿到重置链接的人能直接进这个账号，所以谁名下有一个还没用的，要让管理员看得到、撤得掉 */}

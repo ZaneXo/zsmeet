@@ -57,3 +57,29 @@ func (b *Box) Open(sealed string) (string, error) {
 	}
 	return string(plain), nil
 }
+
+// SealFor 加密一段只在浏览器里存一会儿的东西（比如用飞书登录时的 state），返回 URL 安全的 base64，
+// 可以直接放进 Cookie。purpose 说明它是做什么用的，一起参与校验：同一把钥匙加密的别的东西
+// （数据库里的凭证、另一种用途的 Cookie）换到这里来是解不开的。
+func (b *Box) SealFor(purpose, plain string) string {
+	nonce := make([]byte, b.aead.NonceSize())
+	rand.Read(nonce)
+	return base64.RawURLEncoding.EncodeToString(b.aead.Seal(nonce, nonce, []byte(plain), []byte(purpose)))
+}
+
+// ErrTampered 表示 SealFor 加密的东西被改过、用途不对，或者根本不是它加密的。
+var ErrTampered = errors.New("内容被改过，或者不是这个用途的")
+
+// OpenFor 解开 SealFor 加密的东西。purpose 要和加密时的一样。
+func (b *Box) OpenFor(purpose, sealed string) (string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(sealed)
+	n := b.aead.NonceSize()
+	if err != nil || len(raw) < n {
+		return "", ErrTampered
+	}
+	plain, err := b.aead.Open(nil, raw[:n], raw[n:], []byte(purpose))
+	if err != nil {
+		return "", ErrTampered
+	}
+	return string(plain), nil
+}

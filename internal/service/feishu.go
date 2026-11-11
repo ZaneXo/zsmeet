@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -35,6 +34,8 @@ type FeishuInput struct {
 	DocFolder        string
 	LinkShare        bool
 	ImportRecordings bool
+	Login            bool
+	LoginAutoJoin    bool
 }
 
 // feishuCreds 检查凭证：App Secret 留空、App ID 没变时用已保存的。
@@ -99,13 +100,12 @@ func (s *Service) resolveFeishu(ctx context.Context, in FeishuInput) (settings.F
 		// App ID 清空表示不用飞书了，其他配置一起清掉
 		return settings.Feishu{Domain: cfg.Domain}, err
 	}
-	// 卡片和文档里的链接都用它拼，不填的话从飞书点不回 zsmeet
-	cfg.SiteURL = strings.TrimRight(strings.TrimSpace(in.SiteURL), "/")
+	// 卡片和文档里的链接都用它拼，不填的话从飞书点不回 zsmeet。它和「设置 → 群机器人」里的是同一个（见 settings.Store.SaveFeishu）
+	if cfg.SiteURL, err = cleanSiteURL(in.SiteURL); err != nil {
+		return settings.Feishu{}, err
+	}
 	if cfg.SiteURL == "" {
 		return settings.Feishu{}, invalid("请填写 zsmeet 的访问地址：群里的卡片和飞书文档要用它链接回会议")
-	}
-	if u, err := url.Parse(cfg.SiteURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return settings.Feishu{}, invalid("zsmeet 的访问地址要以 http:// 或 https:// 开头，例如 https://meet.example.com")
 	}
 	cfg.ChatID, cfg.ChatName = strings.TrimSpace(in.ChatID), strings.TrimSpace(in.ChatName)
 	cfg.AutoPush, cfg.WithDoc, cfg.LinkShare = in.AutoPush, in.WithDoc, in.LinkShare
@@ -116,6 +116,7 @@ func (s *Service) resolveFeishu(ctx context.Context, in FeishuInput) (settings.F
 		return settings.Feishu{}, err
 	}
 	cfg.ImportRecordings = in.ImportRecordings
+	cfg.Login, cfg.LoginAutoJoin = in.Login, in.LoginAutoJoin
 	return cfg, nil
 }
 

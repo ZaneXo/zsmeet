@@ -209,7 +209,11 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	transcript.AssignSpeakers(segs, turns)
+	ids := transcript.AssignSpeakers(segs, turns)
+	voices, err := r.voices(ctx, engine, samples, transcript.RenumberTurns(turns, ids))
+	if err != nil {
+		return nil, err
+	}
 	// 按句存：搜索命中、点击跳转、播放高亮都精确到句。页面上显示时再合成段落
 
 	raw, err := json.Marshal(segs)
@@ -223,20 +227,10 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 		if err := q.ClearRetranscribe(ctx, id); err != nil {
 			return err
 		}
-		// 重新转写以后说话人的编号可能变了：以前起的名字跟着人走，对不上的去掉。
-		// 用锁住的这一行里的名字，转写期间有人改过名（包括全部去掉）也算上
-		if old != nil {
-			r.m.Speakers = m.Speakers
-		}
-		if names := transcript.ParseNames(m.Speakers); old != nil && len(names) > 0 {
-			stored, err := transcript.RemapNames(old, segs, names).Marshal()
-			if err != nil {
-				return err
-			}
-			if err := q.SetMeetingSpeakers(ctx, sqlc.SetMeetingSpeakersParams{ID: id, Speakers: stored}); err != nil {
-				return err
-			}
-			r.m.Speakers = stored
+		// 重新转写以后说话人的编号可能变了：以前起的名字跟着人走，对不上的去掉；
+		// 再按声音认出声纹库里的人。用锁住的这一行里的名字，转写期间有人改过名（包括全部去掉）也算上
+		if err := r.nameSpeakers(ctx, q, m, old, segs, voices); err != nil {
+			return err
 		}
 		return search.Reindex(ctx, q, id)
 	})
@@ -355,6 +349,12 @@ func (r *run) writeMinutes(ctx context.Context, segs []transcript.Segment) error
 		// 只发团队里所有人都能看的会议：指定了人、只有自己能看的会议不能自动发到群里
 		if source == "auto" && m.Visibility == service.VisibilityTeam && feishuCfg.Ready() && feishuCfg.AutoPush && feishuCfg.ChatID != "" {
 			if err := w.queueShare(ctx, tx, q, id, version, feishuCfg); err != nil {
+				return err
+			}
+		}
+		// 钉钉、企业微信、Slack 的群机器人也一样：只在第一份纪要生成后、只发团队里所有人都能看的会议
+		if source == "auto" && m.Visibility == service.VisibilityTeam {
+			if err := w.queueWebhookSends(ctx, tx, q, id, version); err != nil {
 				return err
 			}
 		}

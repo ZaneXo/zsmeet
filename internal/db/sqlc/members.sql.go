@@ -83,6 +83,29 @@ func (q *Queries) GetLinkByToken(ctx context.Context, tokenHash []byte) (Account
 	return i, err
 }
 
+const getPendingInviteByEmail = `-- name: GetPendingInviteByEmail :one
+SELECT id, kind, token_hash, email, role, user_id, created_by, created_at, expires_at, used_at FROM account_links WHERE kind = 'invite' AND email = $1 AND used_at IS NULL
+`
+
+// 这个邮箱还没被接受的邀请（每个邮箱最多一个）。可能已经过期，要用 usable 再检查
+func (q *Queries) GetPendingInviteByEmail(ctx context.Context, email *string) (AccountLink, error) {
+	row := q.db.QueryRow(ctx, getPendingInviteByEmail, email)
+	var i AccountLink
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.TokenHash,
+		&i.Email,
+		&i.Role,
+		&i.UserID,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.UsedAt,
+	)
+	return i, err
+}
+
 const listPendingInvites = `-- name: ListPendingInvites :many
 SELECT l.id, l.kind, l.token_hash, l.email, l.role, l.user_id, l.created_by, l.created_at, l.expires_at, l.used_at, u.name AS invited_by, (u.role = 'admin' AND NOT u.disabled)::boolean AS issuer_is_admin
 FROM account_links l JOIN users u ON u.id = l.created_by
@@ -201,6 +224,28 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockLinkByID = `-- name: LockLinkByID :one
+SELECT id, kind, token_hash, email, role, user_id, created_by, created_at, expires_at, used_at FROM account_links WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockLinkByID(ctx context.Context, id uuid.UUID) (AccountLink, error) {
+	row := q.db.QueryRow(ctx, lockLinkByID, id)
+	var i AccountLink
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.TokenHash,
+		&i.Email,
+		&i.Role,
+		&i.UserID,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.UsedAt,
+	)
+	return i, err
 }
 
 const lockLinkByToken = `-- name: LockLinkByToken :one

@@ -151,6 +151,7 @@ const ICONS = {
   stop: "M7 7h10v10H7z",
   flag: "M5 21V4M5 4h11l-2 4 2 4H5",
   download: "M12 4v12M7 11l5 5 5-5M5 20h14",
+  ask: "M21 12a8 8 0 0 1-11.6 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12zM9.5 9.5a2.5 2.5 0 1 1 3.3 2.4c-.5.2-.8.6-.8 1.1M12 15.5h.01",
 } as const;
 
 export function Icon({ name, size = 18 }: { name: keyof typeof ICONS; size?: number }) {

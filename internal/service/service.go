@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,13 +24,17 @@ type Service struct {
 	settings *settings.Store
 	queue    *queue.Client
 	feishu   *feishu.Pool
+	// 问会议的限流
+	asks *rateLimit
 
 	// FeishuBaseURL 是飞书开放平台的地址。一般为空，按设置里选的飞书 / Lark 决定；私有化部署和测试时才设
 	FeishuBaseURL string
+	// WebhookTestHost 只在测试里设：允许群机器人的地址指向这个 http 的假服务器（host:port），见 webhook.CheckURL
+	WebhookTestHost string
 }
 
 func New(pool *pgxpool.Pool, store *storage.Local, st *settings.Store, qc *queue.Client) *Service {
-	return &Service{pool: pool, q: sqlc.New(pool), store: store, settings: st, queue: qc, feishu: &feishu.Pool{}}
+	return &Service{pool: pool, q: sqlc.New(pool), store: store, settings: st, queue: qc, feishu: &feishu.Pool{}, asks: newRateLimit(askPerMinute, time.Minute)}
 }
 
 // tx 在一个事务里执行 fn，fn 返回错误就回滚。
@@ -56,6 +61,8 @@ const (
 	Unauthorized
 	// TooManyRequests：太频繁了（比如登录失败次数太多），过一会儿再试
 	TooManyRequests
+	// Unavailable：依赖的外部服务（比如大模型）没有正常响应
+	Unavailable
 )
 
 // Error 是可以原样展示给用户的业务错误。其他类型的 error 都算内部错误。

@@ -42,15 +42,23 @@ export function App() {
     );
   }
   if (!data.initialized) return <SetupPage />;
-  if (!data.user) return <LoginPage />;
+  if (!data.user) return <LoginPage feishuLogin={data.feishu_login} />;
 
   return (
     <Shell user={data.user}>
       <Routes>
-        <Route path="/" element={<MeetingsPage />} />
+        <Route path="/" element={<MeetingsPage llmReady={data.llm_ready} />} />
         <Route
           path="/meetings/:id"
-          element={<MeetingDetailPage user={data.user} llmReady={data.llm_ready} feishuReady={data.feishu_ready} isAdmin={data.user.role === "admin"} />}
+          element={
+            <MeetingDetailPage
+              user={data.user}
+              llmReady={data.llm_ready}
+              feishuReady={data.feishu_ready}
+              voiceprints={data.voiceprints}
+              isAdmin={data.user.role === "admin"}
+            />
+          }
         />
         <Route path="/record" element={<RecordPage user={data.user} />} />
         <Route path="/settings/:section?" element={<SettingsPage user={data.user} />} />

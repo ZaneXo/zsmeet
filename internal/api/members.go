@@ -23,7 +23,8 @@ type Member struct {
 	Disabled  bool      `json:"disabled" doc:"已停用的成员不能登录"`
 	CreatedAt time.Time `json:"created_at"`
 	// 拿到重置链接的人能直接接管这个账号，所以列表里要看得到谁名下有一个
-	ResetLink *PendingReset `json:"reset_link,omitempty" doc:"这个成员名下还没用过的重置密码链接；没有的话没有这个字段"`
+	ResetLink    *PendingReset `json:"reset_link,omitempty" doc:"这个成员名下还没用过的重置密码链接；没有的话没有这个字段"`
+	FeishuLinked bool          `json:"feishu_linked" doc:"关联了飞书账号，能用飞书登录"`
 }
 
 type PendingReset struct {
@@ -80,6 +81,7 @@ func (h *Handlers) ListMembers(ctx context.Context, _ *struct{}) (*MembersOutput
 	out.Body.Members = make([]Member, len(users))
 	for i, u := range users {
 		m := toMember(u.User)
+		m.FeishuLinked = u.FeishuLinked
 		if u.Reset != nil {
 			m.ResetLink = &PendingReset{ExpiresAt: u.Reset.ExpiresAt, CreatedBy: u.Reset.CreatedBy, FromServer: u.Reset.FromServer}
 		}

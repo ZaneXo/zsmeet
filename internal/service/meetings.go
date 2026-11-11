@@ -139,12 +139,22 @@ func (s *Service) ListMeetings(ctx context.Context, viewer sqlc.User, query stri
 		return MeetingList{Items: out}, nil
 	}
 
+	return s.searchMeetings(ctx, viewer, query, owner, limit, period{})
+}
+
+// period 是按会议时间筛选的范围：from 含、to 不含，nil 表示不限。
+type period struct {
+	from, to *time.Time
+}
+
+// searchMeetings 在 viewer 能看的、时间在 within 里的会议中搜索 query，见 ListMeetings。
+func (s *Service) searchMeetings(ctx context.Context, viewer sqlc.User, query string, owner *uuid.UUID, limit int, within period) (MeetingList, error) {
 	spellings, err := s.spellings(ctx, viewer, query)
 	if err != nil {
 		return MeetingList{}, err
 	}
 	list := MeetingList{Items: []Meeting{}, Spellings: spellings}
-	sc := &searchScan{s: s, viewer: viewer, owner: owner, spellings: spellings, limit: limit, list: &list, seen: map[uuid.UUID]bool{}}
+	sc := &searchScan{s: s, viewer: viewer, owner: owner, within: within, spellings: spellings, limit: limit, list: &list, seen: map[uuid.UUID]bool{}}
 	// 搜的全是标点符号之类切不出词的东西时什么都匹配不上，tsquery 是空的
 	if exact := search.TSQuery(spellings); exact != "" {
 		if _, err := sc.run(ctx, exact, 0, func(r search.Result) bool { return r.Matched }); err != nil {
@@ -170,6 +180,7 @@ type searchScan struct {
 	s         *Service
 	viewer    sqlc.User
 	owner     *uuid.UUID
+	within    period
 	spellings []string
 	limit     int
 	list      *MeetingList
@@ -183,11 +194,22 @@ func (sc *searchScan) run(ctx context.Context, tsq string, budget int, keep func
 	params := sqlc.ListMeetingsParams{
 		Viewer: sc.viewer.ID, IsAdmin: sc.viewer.Role == "admin", Query: &tsq, Owner: sc.owner, MaxRows: searchPage,
 	}
+	if sc.within.to != nil {
+		// (created_at, id) < (to, 全零的 id)：正好是 created_at < to
+		params.BeforeAt, params.BeforeID = sc.within.to, &uuid.Nil
+	}
 	checked := 0
 	for len(sc.list.Items) < sc.limit {
-		rows, err := sc.s.q.ListMeetings(ctx, params)
+		page, err := sc.s.q.ListMeetings(ctx, params)
 		if err != nil {
 			return false, err
+		}
+		// 按时间倒序取的，早于 from 的会议后面都是，不用再往下翻
+		rows := page
+		if sc.within.from != nil {
+			if i := slices.IndexFunc(page, func(r sqlc.ListMeetingsRow) bool { return r.Meeting.CreatedAt.Before(*sc.within.from) }); i >= 0 {
+				rows = page[:i]
+			}
 		}
 		var ids []uuid.UUID
 		for _, r := range rows {
@@ -217,7 +239,7 @@ func (sc *searchScan) run(ctx context.Context, tsq string, budget int, keep func
 				return false, nil
 			}
 		}
-		if len(rows) < searchPage {
+		if len(page) < searchPage || len(rows) < len(page) {
 			return false, nil
 		}
 		if budget > 0 && checked >= budget {

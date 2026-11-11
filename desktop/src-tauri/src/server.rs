@@ -63,40 +63,137 @@ struct Status {
     api: Option<i64>,
 }
 
+/// 最多跟着跳转几次。
+const MAX_REDIRECTS: usize = 10;
+
+/// App 自己发请求（检查服务器、换令牌、退出登录、导出）用的 HTTP 客户端。界面的请求走本地代理，不用它。
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .redirect(redirect_policy())
+        .build()
+        .expect("HTTP 客户端初始化失败")
+}
+
+/// 跟着跳转的规则：
+/// - 哪一跳都不能从 https 跳到 http（只看最后落到哪里的话，中间降级的那一跳可能被人改过）
+/// - 只跟着同一台主机上的跳转（http 换 https、换端口、换路径）。跳到别的主机就停下，把这次跳转原样交回去：
+///   不加密的那一跳谁都能改，悄悄换成别的主机，以后的请求和令牌就都发到别人那里去了
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let previous = attempt.previous();
+        let next = attempt.url();
+        let too_many = previous.len() > MAX_REDIRECTS;
+        let downgrade =
+            previous.last().is_some_and(|u| u.scheme() == "https") && next.scheme() != "https";
+        let same_host = previous
+            .first()
+            .is_none_or(|u| u.host_str() == next.host_str());
+        if too_many {
+            attempt.error(RedirectRefused::TooMany)
+        } else if downgrade {
+            attempt.error(RedirectRefused::Downgrade)
+        } else if same_host {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
+#[derive(Debug)]
+enum RedirectRefused {
+    TooMany,
+    Downgrade,
+}
+
+impl std::fmt::Display for RedirectRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RedirectRefused::TooMany => "跳转的次数太多了",
+            RedirectRefused::Downgrade => "把 https 跳转到了不加密的 http，zsmeet 不会这样连接",
+        })
+    }
+}
+
+impl std::error::Error for RedirectRefused {}
+
+/// 请求是不是因为跳转规则（见 redirect_policy）被拦下的。
+fn redirect_refused(e: &reqwest::Error) -> Option<&RedirectRefused> {
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        if let Some(refused) = s.downcast_ref::<RedirectRefused>() {
+            return Some(refused);
+        }
+        source = s.source();
+    }
+    None
+}
+
 /// 检查填的地址是不是能用的 zsmeet 服务器，返回整理好的地址（有跳转的话是跳转以后的地址）。
 pub async fn check_server(client: &reqwest::Client, input: &str) -> Result<String, String> {
     let candidates = candidates(input)?;
+    // https 的证书不受信任、退回 http 也连不上时，说证书的问题比说 http 连不上有用
+    let mut certificate = None;
     for (i, server) in candidates.iter().enumerate() {
         let sent = client
             .get(format!("{server}/api/status"))
             .timeout(REQUEST_TIMEOUT)
             .send()
             .await;
-        let resp = match sent {
-            Ok(resp) => resp,
-            Err(e) => {
-                let reach = reach(server).await;
-                let message =
-                    unreachable_message(server, e.is_timeout(), is_certificate_error(&e), reach);
-                if i + 1 == candidates.len() {
-                    return Err(message);
-                }
-                // 没写协议、https 连不上：内网的服务器常常只有 http，接着试；外网的不悄悄退回不加密的 http
-                if reach == Reach::Internet {
-                    return Err(format!(
-                        "{message}。如果这台服务器只支持 http，请在地址前面写上 http://"
-                    ));
-                }
-                continue;
-            }
+        let e = match sent {
+            Ok(resp) => return read_status(server, resp).await,
+            Err(e) => e,
         };
-        return read_status(server, resp).await;
+        if let Some(refused) = redirect_refused(&e) {
+            return Err(format!("{server} {refused}，请检查服务器的设置"));
+        }
+        let last = i + 1 == candidates.len();
+        // 没写协议、https 不行时退回 http：只限填的本来就是内网、本机的地址（内网的服务器常常只有 http）。
+        // 只看填的地址本身、不查 DNS：DNS 可能被人改过，不能靠它决定要不要放弃加密
+        let fallback = !last && matches!(literal_reach(server), Some(Reach::Lan | Reach::Loopback));
+        if is_certificate_error(&e) {
+            let message = certificate_message(server);
+            if !fallback {
+                return Err(message);
+            }
+            certificate = Some(message);
+            continue;
+        }
+        if fallback {
+            continue;
+        }
+        if let Some(message) = certificate {
+            return Err(message);
+        }
+        let lan = reach(server).await == Reach::Lan;
+        let message = unreachable_message(server, e.is_timeout(), lan);
+        return Err(if last {
+            message
+        } else {
+            format!("{message}。如果这台服务器只支持 http，请在地址前面写上 http://")
+        });
     }
     Err("请填写服务器地址，比如 https://meet.example.com".into())
 }
 
 /// 看 `/api/status` 的结果，返回服务器地址。
 async fn read_status(requested: &str, resp: reqwest::Response) -> Result<String, String> {
+    // 跳到了别的主机（见 redirect_policy）：不悄悄换过去，告诉用户新地址，让他确认以后自己填
+    if resp.status().is_redirection() {
+        let to = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|l| resp.url().join(l).ok());
+        return Err(match to {
+            Some(to) => format!(
+                "{requested} 跳转到了另一台服务器 {}。如果这就是你们的 zsmeet 服务器，请直接填写这个地址",
+                suggested_address(&to)
+            ),
+            None => format!("{requested} 不是 zsmeet 服务器，请检查地址"),
+        });
+    }
     let server = landed_server(requested, resp.url())?;
     let not_zsmeet = || format!("{server} 不是 zsmeet 服务器，请检查地址");
     if !resp.status().is_success() {
@@ -138,26 +235,40 @@ fn landed_server(requested: &str, landed: &Url) -> Result<String, String> {
     normalize(url.as_str())
 }
 
+/// 跳转的目标是 `…/api/status` 的话给出它的服务器地址，不然给出它的 scheme://host:port。
+fn suggested_address(to: &Url) -> String {
+    let origin = || to.origin().ascii_serialization();
+    match to.path().strip_suffix("/api/status") {
+        Some(base) => {
+            let mut url = to.clone();
+            url.set_path(base);
+            normalize(url.as_str()).unwrap_or_else(|_| origin())
+        }
+        None => origin(),
+    }
+}
+
 /// 局域网里的服务器连不上，多半是没允许 zsmeet 访问本地网络（macOS 15 起要用户允许）。
 pub const LOCAL_NETWORK_HINT: &str = "如果服务器在局域网里，还要允许 zsmeet 访问本地网络：打开「系统设置 → 隐私与安全性 → 本地网络」，打开 zsmeet 的开关，再试一次";
 
-/// 连不上服务器时给用户看的话。timeout：等了太久；certificate：https 证书不受信任。
-fn unreachable_message(server: &str, timeout: bool, certificate: bool, reach: Reach) -> String {
-    if certificate {
-        return format!(
-            "{server} 的 https 证书不受信任，zsmeet 不能安全地连接它。如果是公司内部签发的证书，请先把它的根证书装进「钥匙串访问」并设为信任"
-        );
-    }
+/// 连不上服务器时给用户看的话。timeout：等了太久；lan：服务器在局域网里，提醒看看「本地网络」权限。
+fn unreachable_message(server: &str, timeout: bool, lan: bool) -> String {
     let mut message = if timeout {
         format!("{server} 很久都没有响应，请检查地址和网络")
     } else {
         format!("连不上 {server}，请检查地址和网络，或者确认服务器正在运行")
     };
-    if reach == Reach::Lan {
+    if lan {
         message.push('。');
         message.push_str(LOCAL_NETWORK_HINT);
     }
     message
+}
+
+fn certificate_message(server: &str) -> String {
+    format!(
+        "{server} 的 https 证书不受信任，zsmeet 不能安全地连接它。如果是公司内部签发的证书，请先把它的根证书装进「钥匙串访问」并设为信任"
+    )
 }
 
 /// https 证书的问题。rustls 的错误藏在好几层 source 里，Debug 文本里都有，看它最省事。
@@ -236,10 +347,36 @@ pub async fn reach(server: &str) -> Reach {
     }
 }
 
+/// 只看地址本身（不查 DNS）能看出来的位置，看不出来返回 None。
+fn literal_reach(server: &str) -> Option<Reach> {
+    let url = Url::parse(server).ok()?;
+    host_reach(&url.host()?)
+}
+
 /// 只看地址本身（不查 DNS）是不是局域网里的机器。
 pub fn is_lan_address(server: &str) -> bool {
-    Url::parse(server)
-        .is_ok_and(|url| url.host().and_then(|host| host_reach(&host)) == Some(Reach::Lan))
+    literal_reach(server) == Some(Reach::Lan)
+}
+
+/// 接口路径 `/api/…` 在 /api/ 后面的各段。每段都只能是字母、数字、「-」「_」（接口路径里只有固定的词和 id），
+/// 不然返回 None：编码过的字符（%61、%2e）、空段（//）、「.」「..」、反斜杠转发出去以后，
+/// 服务器或者前面的反向代理可能把它解释成另一个路径（甚至同一台机器上的别的程序）。
+pub fn api_segments(path: &str) -> Option<Vec<&str>> {
+    let segments: Vec<&str> = path.strip_prefix("/api/")?.split('/').collect();
+    let safe = |s: &&str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    segments.iter().all(safe).then_some(segments)
+}
+
+/// 服务器上一个接口的完整地址，并确认规范化以后还在这台服务器的 /api/ 下面。
+pub fn api_url(server: &str, path_and_query: &str) -> Option<Url> {
+    let base = Url::parse(server).ok()?;
+    let url = Url::parse(&format!("{server}{path_and_query}")).ok()?;
+    let api = format!("{}/api/", base.path().trim_end_matches('/'));
+    (url.origin() == base.origin() && url.path().starts_with(&api)).then_some(url)
 }
 
 /// 一次「在浏览器里登录」的 PKCE 参数。
@@ -480,19 +617,79 @@ mod tests {
 
     #[test]
     fn explains_unreachable_servers() {
-        let lan = unreachable_message("http://10.0.0.5", true, false, Reach::Lan);
+        let lan = unreachable_message("http://10.0.0.5", true, true);
         assert!(
             lan.contains("很久都没有响应") && lan.contains("本地网络"),
             "{lan}"
         );
-        let far = unreachable_message("https://meet.example.com", false, false, Reach::Internet);
+        let far = unreachable_message("https://meet.example.com", false, false);
         assert!(far.contains("连不上") && !far.contains("本地网络"), "{far}");
-        let local = unreachable_message("http://127.0.0.1:1", false, false, Reach::Loopback);
-        assert!(!local.contains("本地网络"), "{local}");
-        let cert = unreachable_message("https://meet.example.com", false, true, Reach::Lan);
-        assert!(
-            cert.contains("证书") && !cert.contains("本地网络"),
-            "{cert}"
+        let cert = certificate_message("https://meet.example.com");
+        assert!(cert.contains("证书") && !cert.contains("http://"), "{cert}");
+    }
+
+    #[test]
+    fn only_plain_api_segments() {
+        assert_eq!(
+            api_segments("/api/meetings/0b5e2c1a-7d3f-4c1e-9a55-2f0d6c1b9e77/chunks/12"),
+            Some(vec![
+                "meetings",
+                "0b5e2c1a-7d3f-4c1e-9a55-2f0d6c1b9e77",
+                "chunks",
+                "12"
+            ])
+        );
+        assert_eq!(
+            api_segments("/api/members/u_1/reset-link"),
+            Some(vec!["members", "u_1", "reset-link"])
+        );
+        for bad in [
+            "/api/",
+            "/api",
+            "/apix/status",
+            "/api//apps/logout",
+            "/api/meetings/",
+            "/api/%61pps/logout",
+            "/api/app%73/token",
+            "/api/../app",
+            "/api/./status",
+            "/api/x%2f..%2f..%2fother",
+            "/api/meetings/%2e%2e\\%2e%2e/export",
+            "/api/meetings/.\t./export",
+            "/api/meetings/a.b/export",
+        ] {
+            assert_eq!(api_segments(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn api_url_stays_under_api() {
+        let u = |server: &str, path: &str| api_url(server, path).map(String::from);
+        assert_eq!(
+            u("http://h:8080", "/api/meetings?q=%E5%91%A8").as_deref(),
+            Some("http://h:8080/api/meetings?q=%E5%91%A8")
+        );
+        assert_eq!(
+            u("https://h/zs", "/api/status").as_deref(),
+            Some("https://h/zs/api/status")
+        );
+        // 规范化以后跑到 /api/ 外面、跑到别的主机：不要
+        assert_eq!(u("https://h/zs", "/api/%2e%2e/%2e%2e/other"), None);
+        assert_eq!(u("https://h/zs", "/api/x\\..\\..\\other"), None);
+        assert_eq!(u("https://h", "/api/../app"), None);
+        assert_eq!(u("https://h", "@evil.example/api/x"), None);
+    }
+
+    #[test]
+    fn suggests_where_a_redirect_went() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        assert_eq!(
+            suggested_address(&u("https://new.example.com/zs/api/status")),
+            "https://new.example.com/zs"
+        );
+        assert_eq!(
+            suggested_address(&u("https://sso.example.com/login?next=x")),
+            "https://sso.example.com"
         );
     }
 

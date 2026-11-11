@@ -422,7 +422,7 @@ pub mod testing {
             },
             tokens.clone(),
             events.clone(),
-            reqwest::Client::new(),
+            crate::server::http_client(),
         ));
         Fixture {
             core,
@@ -457,7 +457,7 @@ pub mod testing {
                 },
                 f.tokens.clone(),
                 f.events.clone(),
-                reqwest::Client::new(),
+                crate::server::http_client(),
             ));
             Fixture { core, ..f }
         }

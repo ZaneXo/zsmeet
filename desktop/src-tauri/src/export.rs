@@ -2,16 +2,21 @@
 
 use percent_encoding::percent_decode_str;
 
+use crate::server;
+
 /// 导出文件最大多少（Word 文档带不了录音，几 MB 就很大了）。
 const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
-/// 只允许 `/api/meetings/{id}/export?…`，界面传不了别的路径进来。
+/// 只允许 `/api/meetings/{id}/export?…`，界面传不了别的路径进来。id 只能是普通的字母数字（见 server::api_segments），
+/// 编码过的「..」、反斜杠这些转发出去以后可能落到别的路径上，把令牌带过去。
 pub fn valid_path(path_and_query: &str) -> bool {
     let path = path_and_query
         .split_once('?')
         .map_or(path_and_query, |(p, _)| p);
-    let parts: Vec<&str> = path.split('/').collect();
-    matches!(parts.as_slice(), ["", "api", "meetings", id, "export"] if !id.is_empty() && !id.contains(".."))
+    matches!(
+        server::api_segments(path).as_deref(),
+        Some(["meetings", _, "export"])
+    )
 }
 
 /// 从 Content-Disposition 里取文件名：优先 `filename*=UTF-8''…`，其次 `filename="…"`。
@@ -60,7 +65,10 @@ pub async fn fetch(
     token: Option<&str>,
     path_and_query: &str,
 ) -> Result<(String, Vec<u8>), (u16, String)> {
-    let mut req = client.get(format!("{server}{path_and_query}"));
+    let Some(url) = server::api_url(server, path_and_query) else {
+        return Err((0, "导出的地址不对，没能导出".to_string()));
+    };
+    let mut req = client.get(url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
@@ -114,6 +122,12 @@ mod tests {
         assert!(!valid_path("/api/meetings/../export"));
         assert!(!valid_path("https://evil/api/meetings/a/export"));
         assert!(!valid_path("/api/settings/llm"));
+        // 编码过的「..」、反斜杠、被丢掉的控制字符：规范化以后会落到别的路径上
+        assert!(!valid_path(
+            "/api/meetings/%2e%2e\\%2e%2e\\%2e%2e\\other-app/export"
+        ));
+        assert!(!valid_path("/api/meetings/.\t./export"));
+        assert!(!valid_path("/api/meetings/a%2fb/export"));
     }
 
     #[test]

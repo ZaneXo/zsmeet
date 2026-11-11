@@ -134,9 +134,7 @@ pub fn run() {
                 },
                 Arc::new(token::KeychainStore::new(&app.config().identifier)),
                 Arc::new(TauriEvents(handle.clone())),
-                reqwest::Client::builder()
-                    .connect_timeout(std::time::Duration::from_secs(8))
-                    .build()?,
+                server::http_client(),
             ));
             app.manage(core.clone());
 

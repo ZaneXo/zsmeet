@@ -612,6 +612,22 @@ async fn set_server_keeps_the_address_after_redirects() {
     let err = f.core.set_server(&login).await.unwrap_err();
     assert!(err.contains("不像是 zsmeet"), "{err}");
     assert_eq!(f.core.state().server.as_deref(), Some(up.url.as_str()));
+
+    // 跳到另一台主机：不跟过去、不保存，告诉用户新地址让他自己填（不加密的那一跳谁都能改）
+    let elsewhere = up.url.replace("127.0.0.1", "localhost");
+    let moved = redirector(format!("{elsewhere}/api/status")).await;
+    let asked = up.seen.auth.lock().unwrap().len();
+    let err = f.core.set_server(&moved).await.unwrap_err();
+    assert!(
+        err.contains("另一台服务器") && err.contains(&elsewhere),
+        "{err}"
+    );
+    assert_eq!(f.core.state().server.as_deref(), Some(up.url.as_str()));
+    assert_eq!(
+        up.seen.auth.lock().unwrap().len(),
+        asked,
+        "不该跟着跳到另一台主机"
+    );
 }
 
 #[tokio::test]

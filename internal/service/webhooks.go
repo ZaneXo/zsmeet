@@ -313,8 +313,9 @@ func (s *Service) SendToWebhooks(ctx context.Context, user sqlc.User, id uuid.UU
 		if err != nil {
 			return err
 		}
-		// 上面的检查是在锁外面做的：等锁的时候权限可能被收回了、纪要可能重新生成了，锁住以后按现在的再看一遍
-		access, err := accessIn(ctx, q, user, m)
+		// 上面的检查是在锁外面做的：等锁的时候权限可能被收回了、纪要可能重新生成了，
+		// 发的人可能被停用了、不再是管理员了，锁住以后按现在的再看一遍
+		access, err := accessNow(ctx, q, user, m)
 		if err != nil {
 			return err
 		}

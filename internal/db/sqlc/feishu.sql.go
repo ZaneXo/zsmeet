@@ -69,8 +69,8 @@ func (q *Queries) CreateImportedMeeting(ctx context.Context, arg CreateImportedM
 }
 
 const createShare = `-- name: CreateShare :one
-INSERT INTO feishu_shares (meeting_id, chat_id, chat_name, with_doc, minutes_version, requested_by)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO feishu_shares (meeting_id, chat_id, chat_name, with_doc, minutes_version, requested_by, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
 RETURNING id, meeting_id, chat_id, chat_name, with_doc, minutes_version, status, error, import_ticket, doc_token, doc_url, message_id, requested_by, created_at, finished_at
 `
 
@@ -83,6 +83,8 @@ type CreateShareParams struct {
 	RequestedBy    *uuid.UUID
 }
 
+// created_at 用写入时的时间（clock_timestamp），不用事务开始的时间（now）：网页上发送是锁住会议以后才写，
+// 等锁的那一段不算进去，记录才按真正的先后排、「发送中」的期限才从真正开始发算起（和 CreateWebhookSend 一样）
 func (q *Queries) CreateShare(ctx context.Context, arg CreateShareParams) (FeishuShare, error) {
 	row := q.db.QueryRow(ctx, createShare,
 		arg.MeetingID,
@@ -136,6 +138,25 @@ func (q *Queries) DocForVersion(ctx context.Context, arg DocForVersionParams) (D
 	var i DocForVersionRow
 	err := row.Scan(&i.DocToken, &i.DocUrl)
 	return i, err
+}
+
+const docSentToChat = `-- name: DocSentToChat :one
+SELECT count(*) > 0 FROM feishu_shares
+WHERE meeting_id = $1 AND chat_id = $2 AND doc_token = $3 AND status = 'done'
+`
+
+type DocSentToChatParams struct {
+	MeetingID uuid.UUID
+	ChatID    string
+	DocToken  string
+}
+
+// 这篇文档以前有没有发到过这个群：发成功了的，群里的人已经有看它的权限（给群开权限失败就不会发成功）
+func (q *Queries) DocSentToChat(ctx context.Context, arg DocSentToChatParams) (bool, error) {
+	row := q.db.QueryRow(ctx, docSentToChat, arg.MeetingID, arg.ChatID, arg.DocToken)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const failShare = `-- name: FailShare :exec
@@ -324,7 +345,7 @@ func (q *Queries) NoteShareRetry(ctx context.Context, arg NoteShareRetryParams) 
 
 const pendingShare = `-- name: PendingShare :one
 SELECT count(*) FROM feishu_shares
-WHERE meeting_id = $1 AND status = 'pending' AND created_at > now() - interval '30 minutes'
+WHERE meeting_id = $1 AND status = 'pending' AND created_at > clock_timestamp() - interval '30 minutes'
 `
 
 // 这场会议有没有还没发完的。半小时还没发完的不算（重试早该结束了，多半是后台任务丢了），免得一直卡住不让发

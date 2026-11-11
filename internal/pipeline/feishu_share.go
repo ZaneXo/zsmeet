@@ -97,7 +97,7 @@ func (sw *shareWorker) Work(ctx context.Context, job *river.Job[queue.FeishuShar
 // send 发一条。返回 nil 表示已经发出去了（卡片发到了群里、文档开好了权限），之后不管怎样都不能再让 River 重试。
 //
 // 会把纪要发出去的几步（把纪要传给飞书导入成文档；给群、公司里的人和发送的人开文档的权限并发卡片）各自在 locked 里做：
-// 拿着会议这一行的共享锁，按锁住时的会议再检查一遍（删了没有，自动发送的还是不是团队可见），再调飞书。
+// 拿着会议这一行的共享锁，按锁住时的会议再检查一遍（删了没有，自动发送的还是不是团队可见，手动发的发起人还能不能编辑），再调飞书。
 // 改可见范围、删除会议都要先锁住会议，只能排在这一步前面（这里就看得到，不发）或者后面（发的时候确实是可以发的）。
 // 等飞书导入文档可能要好几分钟、中间还要 snooze，不能一直拿着锁：等导入结果的时候不拿锁，下一步发之前重新锁、重新检查。
 func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
@@ -115,7 +115,7 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 	}
 	m := row.Meeting
 	// 先不拿锁看一遍：明显不用发的不必再去建文件夹、读纪要。真正发之前 locked 里还会再看
-	if err := shareAllowed(share, m); err != nil {
+	if err := shareAllowed(ctx, w.q, share, m); err != nil {
 		return err
 	}
 	mv, err := w.q.GetMinutesVersion(ctx, sqlc.GetMinutesVersionParams{MeetingID: m.ID, Version: share.MinutesVersion})
@@ -264,8 +264,8 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 	return nil
 }
 
-// shareAllowed 检查会议 m 现在还能不能照着 share 发。
-func shareAllowed(share sqlc.FeishuShare, m sqlc.Meeting) error {
+// shareAllowed 检查会议 m 现在还能不能照着 share 发。q 可以是事务里的（locked 里用锁住会议的那个事务）。
+func shareAllowed(ctx context.Context, q *sqlc.Queries, share sqlc.FeishuShare, m sqlc.Meeting) error {
 	if m.DeletedAt != nil {
 		return permanent("会议已经删除了")
 	}
@@ -273,13 +273,40 @@ func shareAllowed(share sqlc.FeishuShare, m sqlc.Meeting) error {
 	if share.RequestedBy == nil && m.Visibility != service.VisibilityTeam {
 		return permanent("会议已经改成不是团队所有人可见，不再自动发到群里")
 	}
+	return requesterAllowed(ctx, q, share.RequestedBy, m)
+}
+
+// requesterAllowed 检查手动发送的发起人（requestedBy，自动发送的是 nil，不用查）现在还能不能编辑会议 m：
+// 排上队以后（重试、等文档导入期间，最长半小时）他可能被停用、被取消了编辑权限，或者会议改成了他看不到的，
+// 这时不能再替他把纪要发出去。和网页上「发到飞书」「发到群里」要的权限一样（service.CanEditMeeting）。
+func requesterAllowed(ctx context.Context, q *sqlc.Queries, requestedBy *uuid.UUID, m sqlc.Meeting) error {
+	if requestedBy == nil {
+		return nil
+	}
+	user, err := q.GetUser(ctx, *requestedBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return permanent("发起人的账号已经不在了，不再发送")
+	}
+	if err != nil {
+		return err
+	}
+	if user.Disabled {
+		return permanent("发起人的账号已经停用了，不再发送")
+	}
+	ok, err := service.CanEditMeeting(ctx, q, user, m)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return permanent("发起人已经不能编辑这场会议了，不再发送")
+	}
 	return nil
 }
 
 // 拿着会议的锁调飞书时，最多调这么久：改可见范围、删除会议、重新生成纪要最多为这一步等这么久
 const shareStepTimeout = 30 * time.Second
 
-// locked 拿着会议这一行的共享锁（ShareLockMeeting），按锁住时的会议检查还能不能发（shareAllowed），再做 step。
+// locked 拿着会议这一行的共享锁（ShareLockMeeting），按锁住时的会议和发起人的权限检查还能不能发（shareAllowed），再做 step。
 // step 是会把纪要发出去的一步（调飞书），限时 shareStepTimeout；做完就放开锁。
 //
 // 代价是这段时间里改会议的操作（包括改标题、重新生成纪要）要等它做完，最多 shareStepTimeout，一般一两秒；
@@ -292,14 +319,15 @@ func (sw *shareWorker) locked(ctx context.Context, share sqlc.FeishuShare, step 
 	}
 	// 事务里只读过，回滚就是放开锁
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	m, err := w.q.WithTx(tx).ShareLockMeeting(ctx, share.MeetingID)
+	q := w.q.WithTx(tx)
+	m, err := q.ShareLockMeeting(ctx, share.MeetingID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return permanent("会议已经删除了")
 	}
 	if err != nil {
 		return err
 	}
-	if err := shareAllowed(share, m); err != nil {
+	if err := shareAllowed(ctx, q, share, m); err != nil {
 		return err
 	}
 	sctx, cancel := context.WithTimeout(ctx, shareStepTimeout)

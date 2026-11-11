@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -637,4 +638,83 @@ CREATE TRIGGER test_fail_share BEFORE UPDATE ON feishu_shares FOR EACH ROW EXECU
 	e.t.Cleanup(func() {
 		_, _ = e.pool.Exec(context.Background(), "DROP TRIGGER test_fail_share ON feishu_shares; DROP FUNCTION test_fail_share()")
 	})
+}
+
+// editor 加一个普通成员，指定他能编辑会议 meeting（团队可见的会议上，普通成员只有被指定了才能编辑）。
+func (e *env) editor(meeting uuid.UUID, email string) sqlc.User {
+	e.t.Helper()
+	u, err := e.q.CreateUser(e.t.Context(), sqlc.CreateUserParams{Email: email, Name: "李雷", PasswordHash: "x", Role: "member"})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(e.t.Context(), "INSERT INTO meeting_members (meeting_id, user_id, can_edit) VALUES ($1, $2, true)", meeting, u.ID); err != nil {
+		e.t.Fatal(err)
+	}
+	return u
+}
+
+// 发起人能编辑时才会把纪要发出去。手动发到飞书以后，等文档导入期间发起人被取消了编辑权限、被停用、
+// 或者会议改成了他看不到的，就不再给群开文档权限、也不发卡片，记成没发出去。
+func TestShareStopsWhenRequesterLosesAccess(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fs := e.feishu(settings.Feishu{SiteURL: "https://meet.example.com"})
+	ctx := t.Context()
+	sw := &shareWorker{w: e.w}
+	restore := feishu.SetImportTiming(0, time.Millisecond)
+	defer restore()
+
+	cases := []struct {
+		name, change, reason string
+	}{
+		{"还能编辑", "", ""},
+		{"取消了编辑权限", "UPDATE meeting_members SET can_edit = false WHERE user_id = $1 AND meeting_id = $2", "发起人已经不能编辑这场会议了"},
+		{"不再指定", "DELETE FROM meeting_members WHERE user_id = $1 AND meeting_id = $2", "发起人已经不能编辑这场会议了"},
+		{"会议改成只有创建者能看", "UPDATE meetings SET visibility = 'private' WHERE id = $2 AND owner_id <> $1", "发起人已经不能编辑这场会议了"},
+		{"停用了", "UPDATE users u SET disabled = true FROM meeting_members mm WHERE u.id = $1 AND mm.user_id = u.id AND mm.meeting_id = $2", "发起人的账号已经停用了"},
+	}
+	for i, c := range cases {
+		args := e.upload(wav())
+		if err := e.work(args); err != nil {
+			t.Fatal(err)
+		}
+		requester := e.editor(args.MeetingID, fmt.Sprintf("editor%d@example.com", i))
+		share, err := e.q.CreateShare(ctx, sqlc.CreateShareParams{
+			MeetingID: args.MeetingID, ChatID: "oc_team", ChatName: "产品组", WithDoc: true, MinutesVersion: 1, RequestedBy: &requester.ID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 飞书还在导入文档：过一会儿接着等
+		fs.ImportPolls = 1
+		feishu.SetImportTiming(0, time.Millisecond)
+		var snooze *rivertype.JobSnoozeError
+		if err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: share.ID}, 1)); !errors.As(err, &snooze) {
+			t.Fatalf("%s：飞书还在导入时过一会儿接着等：%v", c.name, err)
+		}
+		if c.change != "" {
+			if tag, err := e.pool.Exec(ctx, c.change, requester.ID, args.MeetingID); err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("%s：%v %v", c.name, tag, err)
+			}
+		}
+		grants, sent := len(fs.Grants), len(fs.Sent())
+		feishu.SetImportTiming(time.Minute, time.Millisecond)
+		err = sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: share.ID}, 1))
+		s, _ := e.q.GetShare(ctx, share.ID)
+		if c.reason == "" {
+			if err != nil || s.Status != "done" || len(fs.Grants) == grants || len(fs.Sent()) != sent+1 {
+				t.Errorf("%s：照常发出去：%v %+v", c.name, err, s)
+			}
+			continue
+		}
+		if !errors.Is(err, &rivertype.JobCancelError{}) {
+			t.Errorf("%s：不再发，也不再重试：%v", c.name, err)
+		}
+		if s.Status != "failed" || !strings.Contains(s.Error, c.reason) {
+			t.Errorf("%s：记成没发出去，写着原因：%+v", c.name, s)
+		}
+		if len(fs.Grants) != grants || len(fs.Sent()) != sent {
+			t.Errorf("%s：不给群开文档权限、不发卡片：%+v %+v", c.name, fs.Grants[grants:], fs.Sent()[sent:])
+		}
+	}
 }

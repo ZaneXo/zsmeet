@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -479,5 +480,68 @@ CREATE TRIGGER test_fail_done BEFORE UPDATE ON webhook_sends FOR EACH ROW EXECUT
 	}
 	if got := fake.Received(); len(got) != 1 {
 		t.Errorf("群里只收到一条：%d", len(got))
+	}
+}
+
+// 和发到飞书一样：手动发到群机器人以后，等着重试（这里是被限流）期间发起人被取消了编辑权限、被停用，
+// 就不再发，记成没发出去。
+func TestWebhookSendStopsWhenRequesterLosesAccess(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fake := e.hooks()
+	ctx := t.Context()
+	ww := &webhookWorker{w: e.w}
+
+	cases := []struct {
+		name, change, reason string
+	}{
+		{"还能编辑", "", ""},
+		{"取消了编辑权限", "UPDATE meeting_members SET can_edit = false WHERE user_id = $1 AND meeting_id = $2", "发起人已经不能编辑这场会议了"},
+		{"会议改成只有创建者能看", "UPDATE meetings SET visibility = 'private' WHERE id = $2 AND owner_id <> $1", "发起人已经不能编辑这场会议了"},
+		{"停用了", "UPDATE users u SET disabled = true FROM meeting_members mm WHERE u.id = $1 AND mm.user_id = u.id AND mm.meeting_id = $2", "发起人的账号已经停用了"},
+	}
+	for i, c := range cases {
+		args := e.upload(wav())
+		if err := e.work(args); err != nil {
+			t.Fatal(err)
+		}
+		requester := e.editor(args.MeetingID, fmt.Sprintf("hookeditor%d@example.com", i))
+		token := fmt.Sprintf("losetoken%d0123456789", i)
+		h := e.addHook(fake, webhook.WeCom, token, "产品群"+c.name, false)
+		send, err := e.q.CreateWebhookSend(ctx, sqlc.CreateWebhookSendParams{
+			MeetingID: args.MeetingID, WebhookID: &h.ID, WebhookName: h.Name, Platform: h.Platform, MinutesVersion: 1, RequestedBy: &requester.ID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 被限流了：等 1 分钟再试
+		fake.Replies[token] = webhooktest.Reply{Status: 200, Body: `{"errcode":45009,"errmsg":"api freq out of limit"}`}
+		if _, ok := errors.AsType[*rivertype.JobSnoozeError](ww.Work(ctx, jobOf(queue.WebhookSendArgs{SendID: send.ID}, 1))); !ok {
+			t.Fatalf("%s：限流以后过一会儿再试", c.name)
+		}
+		delete(fake.Replies, token)
+		if c.change != "" {
+			if tag, err := e.pool.Exec(ctx, c.change, requester.ID, args.MeetingID); err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("%s：%v %v", c.name, tag, err)
+			}
+		}
+		received := len(fake.Received())
+		err = ww.Work(ctx, jobOf(queue.WebhookSendArgs{SendID: send.ID}, 1))
+		got, _ := e.q.GetWebhookSend(ctx, send.ID)
+		if c.reason == "" {
+			if err != nil || got.Status != "done" || len(fake.Received()) != received+1 {
+				t.Errorf("%s：照常发出去：%v %+v", c.name, err, got)
+			}
+			continue
+		}
+		if !errors.Is(err, &rivertype.JobCancelError{}) {
+			t.Errorf("%s：不再发，也不再重试：%v", c.name, err)
+		}
+		if got.Status != "failed" || !strings.Contains(got.Error, c.reason) {
+			t.Errorf("%s：记成没发出去，写着原因：%+v", c.name, got)
+		}
+		if n := len(fake.Received()); n != received {
+			t.Errorf("%s：群里收不到：多收到 %d 条", c.name, n-received)
+		}
 	}
 }

@@ -143,7 +143,7 @@ func sendMessage(err error) string {
 
 // send 发一条。返回 nil 表示群机器人已经收下了，之后不管怎样都不能再让 River 重试（群里会收到两条一样的）。
 //
-// 从检查会议到发完，一直拿着会议这一行的共享锁（ShareLockMeeting）：改可见范围、删除会议都要先锁住会议，
+// 从检查会议（还有手动发送的发起人还能不能编辑）到发完，一直拿着会议这一行的共享锁（ShareLockMeeting）：改可见范围、删除会议都要先锁住会议，
 // 只能排在这次发送前面（这里就看得到，不发）或者后面（发的时候确实是团队可见的）。代价是这段时间里改会议的操作
 // 要等这一条发完，最多等 webhook.SendTimeout（15 秒），一般一秒以内；webhook 队列一次只发一条，也只占一个数据库连接。
 func (ww *webhookWorker) send(ctx context.Context, send sqlc.WebhookSend) error {
@@ -188,6 +188,10 @@ func (ww *webhookWorker) send(ctx context.Context, send sqlc.WebhookSend) error 
 		if !hook.AutoPush {
 			return permanent("管理员关掉了这个群的自动发送")
 		}
+	}
+	// 手动发送：发起人排上队以后（重试、限流等待期间）可能被停用、被取消了编辑权限，那就不再替他发
+	if err := requesterAllowed(ctx, q, send.RequestedBy, m); err != nil {
+		return err
 	}
 	mv, err := q.GetMinutesVersion(ctx, sqlc.GetMinutesVersionParams{MeetingID: m.ID, Version: send.MinutesVersion})
 	if err != nil {

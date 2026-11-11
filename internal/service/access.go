@@ -64,6 +64,16 @@ func accessIn(ctx context.Context, q *sqlc.Queries, user sqlc.User, m sqlc.Meeti
 	return accessFor(user, m, true, canEdit), nil
 }
 
+// CanEditMeeting 查 user 现在还能不能编辑会议 m，和网页上的规则一样；停用了的人算不能。q 可以是事务里的。
+// 后台发送（发到飞书、群机器人）用：排上队以后，发起人可能被停用、被取消了编辑权限，或者会议改成了他看不到的。
+func CanEditMeeting(ctx context.Context, q *sqlc.Queries, user sqlc.User, m sqlc.Meeting) (bool, error) {
+	if user.Disabled {
+		return false, nil
+	}
+	a, err := accessIn(ctx, q, user, m)
+	return a.Edit, err
+}
+
 var (
 	errNotAllowed = &Error{Forbidden, "你不能修改这场会议：只有创建者、管理员和被指定能编辑的人能改"}
 	errNotManager = &Error{Forbidden, "只有这场会议的创建者和管理员能做这件事"}

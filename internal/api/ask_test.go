@@ -333,3 +333,47 @@ func TestAskValidationAndLimits(t *testing.T) {
 	}
 	c.want(c.ask(obj{"question": "报价？"}), 200)
 }
+
+// 问会议的材料有多少字跟着上下文长度走：同一场会，32K 时整场交给大模型，8K 时放不下，先提取搜索词、只带命中的片段。
+func TestAskBudgetFollowsContextLength(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	llm := c.useFakeLLM()
+
+	// 200 句，约 7000 字：比 32K 时的 1.2 万字少，比 8K 时的 2000 字多
+	segs := make([]transcript.Segment, 0, 200)
+	for i := range 200 {
+		segs = append(segs, transcript.Segment{Start: float64(i * 10), End: float64(i*10 + 5), Text: fmt.Sprintf("第 %d 句，闲聊一些别的事情。", i)})
+	}
+	segs[100].Text = "合同的报价定为十二万。"
+	m := c.processed("长会", segs, "## 摘要\n聊了很多。", `[]`)
+
+	llm.set(`{"keywords": ["报价"]}`, "报价十二万 [M1-2]。")
+	planned, _ := llm.counts()
+	c.want(c.ask(obj{"question": "报价多少？", "meeting_id": m}), 200)
+	if p, _ := llm.counts(); p != planned {
+		t.Error("32K 时整场放得下，不用先提取搜索词")
+	}
+	if prompt := llm.last(); !strings.Contains(prompt, "第 0 句") || !strings.Contains(prompt, "第 199 句") {
+		t.Error("32K 时整场转写都交给大模型")
+	}
+
+	cfg, err := c.svc.LLMSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.svc.SaveLLM(t.Context(), service.LLMInput{BaseURL: cfg.BaseURL, Model: cfg.Model, ContextTokens: 8_192}); err != nil {
+		t.Fatal(err)
+	}
+	c.want(c.ask(obj{"question": "报价多少？", "meeting_id": m}), 200)
+	if p, _ := llm.counts(); p != planned+1 {
+		t.Error("8K 时整场放不下，要先提取搜索词")
+	}
+	prompt := llm.last()
+	if !strings.Contains(prompt, "合同的报价定为十二万") || strings.Contains(prompt, "第 0 句") || strings.Contains(prompt, "第 199 句") {
+		t.Errorf("8K 时只带命中的片段：\n%s", prompt)
+	}
+	if n := len([]rune(prompt)); n > 4_000 {
+		t.Errorf("8K 时材料不超过 2000 字，整个提示词也不该有 %d 字", n)
+	}
+}

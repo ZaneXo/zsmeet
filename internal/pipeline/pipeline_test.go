@@ -46,12 +46,17 @@ type fakeEngine struct {
 	turns []transcript.Turn
 	// 算声纹时顺便做的事（模拟这时有人改了设置）
 	onEmbed func()
+	// 不为空时转写结果是它，否则是固定的两句
+	segs []transcript.Segment
 }
 
 func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
 	e.transcribed.Add(1)
 	e.samples.Store(int64(len(samples)))
 	progress(1)
+	if e.segs != nil {
+		return e.segs, nil
+	}
 	return []transcript.Segment{
 		{Start: 0, End: 0.9, Speaker: -1, Text: "一期只做网页端。"},
 		{Start: 1.1, End: 1.9, Speaker: -1, Text: "同意，录音器放到二期。"},
@@ -217,6 +222,37 @@ func (e *env) llm(fail *atomic.Bool) (calls *atomic.Int32) {
 		e.t.Fatal(err)
 	}
 	return calls
+}
+
+// 写纪要时每段放多少字按设置的上下文长度算：同样约 9000 字的转写，默认（32K）一次写完，8K 时分段写再汇总。
+func TestWorkSplitsMinutesByContextLength(t *testing.T) {
+	for _, tc := range []struct {
+		tokens, calls int
+	}{{0, 1}, {8_192, 5}} {
+		e := newEnv(t)
+		for i := range 60 {
+			e.engine.segs = append(e.engine.segs, transcript.Segment{Start: float64(i) * 0.03, End: float64(i)*0.03 + 0.02, Speaker: -1, Text: strings.Repeat("讨论一期范围。", 20)})
+		}
+		calls := e.llm(nil)
+		cfg, err := e.w.settings.LLM(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.ContextTokens = tc.tokens
+		if err := e.w.settings.SaveLLM(t.Context(), cfg); err != nil {
+			t.Fatal(err)
+		}
+		args := e.upload(wav())
+		if err := e.work(args); err != nil {
+			t.Fatal(err)
+		}
+		if m := e.meeting(args.MeetingID); m.Status != "done" || m.CurrentVersion != 1 {
+			t.Fatalf("%d：会议应该处理完、生成纪要：%s %q", tc.tokens, m.Status, m.Error)
+		}
+		if got := calls.Load(); got != int32(tc.calls) {
+			t.Errorf("上下文 %d 时应该调用大模型 %d 次，实际 %d 次", tc.tokens, tc.calls, got)
+		}
+	}
 }
 
 func TestWorkTranscribesAndWritesMinutes(t *testing.T) {

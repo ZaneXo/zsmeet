@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZaneXo/zsmeet/internal/llm"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
@@ -72,6 +73,45 @@ func TestGenerateLongMeetingSplits(t *testing.T) {
 	}
 	if out.Content != "## 摘要\n汇总。" {
 		t.Errorf("输出不对：%+v", out)
+	}
+}
+
+// 每段放多少字跟着 Input.MaxChars 走：同一场会，上下文 32K（每段 2 万字）时一次写完，8K（每段 3000 字）时要分段
+func TestGenerateSplitsByMaxChars(t *testing.T) {
+	calls := func(maxChars int) (n int, longest int) {
+		chat := func(_ context.Context, system, user string) (string, error) {
+			n++
+			if strings.Contains(system, "长会议转写的第") {
+				longest = max(longest, len([]rune(user)))
+			}
+			return "## 摘要\n定了一期范围。", nil
+		}
+		in := input(60) // 每句约 150 字，60 句约 9000 字
+		in.MaxChars = maxChars
+		if _, err := Generate(t.Context(), chat, in, nil); err != nil {
+			t.Fatal(err)
+		}
+		return n, longest
+	}
+	if n, _ := calls(0); n != 1 {
+		t.Errorf("没给 MaxChars 时按每段 2 万字，9000 字的会一次写完，实际调用 %d 次", n)
+	}
+	if n, _ := calls(20_000); n != 1 {
+		t.Errorf("每段 2 万字时一次写完，实际调用 %d 次", n)
+	}
+	n, longest := calls(3_000)
+	if n != 5 {
+		t.Errorf("每段 3000 字时应该分成 4 段再汇总，共 5 次，实际 %d 次", n)
+	}
+	if longest == 0 || longest > 3_000 {
+		t.Errorf("每段的转写不能超过 3000 字，最长的一段 %d 字", longest)
+	}
+}
+
+// 没给 MaxChars 时和没设置上下文长度（按 32K）时算出来的一样
+func TestDefaultMaxCharsMatchesDefaultContext(t *testing.T) {
+	if got := llm.TranscriptChars(0); got != defaultMaxChars {
+		t.Errorf("默认每段 %d 字，按默认上下文算出来是 %d 字", defaultMaxChars, got)
 	}
 }
 

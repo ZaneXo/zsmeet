@@ -261,6 +261,16 @@ function ChangePasswordCard({ email }: { email: string }) {
   );
 }
 
+// 上下文长度能选的几档（token 数），和后端的 settings.ContextChoices 一致
+const CONTEXT_CHOICES = [
+  [8192, "8K"],
+  [16384, "16K"],
+  [32768, "32K（默认）"],
+  [65536, "64K"],
+  [131072, "128K"],
+  [200000, "200K 及以上"],
+] as const;
+
 /** 大模型配置：全团队共用，只有管理员能看、能改。 */
 function LLMSettingsCard() {
   const saved = useQuery({
@@ -271,17 +281,19 @@ function LLMSettingsCard() {
   const [baseURL, setBaseURL] = useState("");
   const [model, setModel] = useState("");
   const [apiKey, setAPIKey] = useState("");
+  const [contextTokens, setContextTokens] = useState(32768);
   // 表单只在第一次拿到已保存的值时填充，之后不覆盖用户正在改的内容
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     if (saved.data && !loaded) {
       setBaseURL(saved.data.base_url);
       setModel(saved.data.model);
+      setContextTokens(saved.data.context_tokens);
       setLoaded(true);
     }
   }, [saved.data, loaded]);
 
-  const body = { base_url: baseURL, model, api_key: apiKey || undefined };
+  const body = { base_url: baseURL, model, api_key: apiKey || undefined, context_tokens: contextTokens };
 
   const test = useMutation({
     mutationFn: () => unwrap(api.POST("/api/settings/llm/test", { body })),
@@ -395,6 +407,28 @@ function LLMSettingsCard() {
             )}
             {models.isError && <Notice tone="warn">{errorMessage(models.error)}</Notice>}
           </div>
+        </Field>
+        <Field
+          label="上下文长度"
+          htmlFor="llm-context"
+          hint="模型一次能读多少内容，看模型的说明（常写作 context length）。Ollama 的本地模型没调大 num_ctx 的话一般只有 8K 到 32K。长会议会按它分段写纪要，拿不准就选小一点的。"
+        >
+          <Select
+            id="llm-context"
+            className="max-w-xs"
+            value={contextTokens}
+            onChange={(e) => {
+              setContextTokens(Number(e.target.value));
+              edited();
+            }}
+          >
+            {!CONTEXT_CHOICES.some(([n]) => n === contextTokens) && <option value={contextTokens}>{contextTokens} tokens</option>}
+            {CONTEXT_CHOICES.map(([n, label]) => (
+              <option key={n} value={n}>
+                {label}
+              </option>
+            ))}
+          </Select>
         </Field>
 
         {test.isSuccess && <Notice tone="ok">连接正常，模型有响应。记得点「保存」。</Notice>}

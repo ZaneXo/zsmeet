@@ -477,6 +477,53 @@ func TestSettingsAreAdminOnly(t *testing.T) {
 	}
 }
 
+// 上下文长度：以前保存的配置里没有这一项，按 32K 算；只能选列表里的几档；保存以后读出来。
+func TestLLMContextTokens(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	contextOf := func(r result) any { return r.Body["context_tokens"] }
+
+	// 老版本存的配置没有 context_tokens
+	if _, err := c.pool.Exec(t.Context(), `INSERT INTO settings (key, value) VALUES ('llm', '{"base_url":"http://llm.example/v1","model":"qwen","api_key":""}')`); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.want(c.do("GET", "/api/settings/llm", nil), 200); contextOf(r) != float64(32_768) {
+		t.Errorf("没设置过时按 32K：%s", r.Raw)
+	}
+	if cfg, err := c.svc.LLMSettings(t.Context()); err != nil || cfg.ContextTokens != 0 || cfg.Context() != 32_768 {
+		t.Errorf("老配置读出来按 32K 算：%+v %v", cfg, err)
+	}
+
+	body := func(tokens any) obj {
+		return obj{"base_url": "http://llm.example/v1", "model": "qwen", "context_tokens": tokens}
+	}
+	for _, bad := range []any{1, 4_096, 32_000, 1_000_000, -8_192} {
+		r := c.want(c.do("PUT", "/api/settings/llm", body(bad)), 422)
+		if !strings.Contains(r.Raw, "上下文长度只能从列表里选") {
+			t.Errorf("%v：不在列表里的要说清楚：%s", bad, r.Raw)
+		}
+		c.want(c.do("POST", "/api/settings/llm/test", body(bad)), 422)
+	}
+	if r := c.want(c.do("GET", "/api/settings/llm", nil), 200); contextOf(r) != float64(32_768) {
+		t.Errorf("不合法的值不能存进去：%s", r.Raw)
+	}
+
+	if r := c.want(c.do("PUT", "/api/settings/llm", body(8_192)), 200); contextOf(r) != float64(8_192) {
+		t.Errorf("保存的结果：%s", r.Raw)
+	}
+	if r := c.want(c.do("GET", "/api/settings/llm", nil), 200); contextOf(r) != float64(8_192) {
+		t.Errorf("保存以后读出来：%s", r.Raw)
+	}
+	if cfg, err := c.svc.LLMSettings(t.Context()); err != nil || cfg.Context() != 8_192 {
+		t.Errorf("写纪要、问会议用的配置：%+v %v", cfg, err)
+	}
+
+	// 不填（老的脚本）按默认的 32K
+	if r := c.want(c.do("PUT", "/api/settings/llm", obj{"base_url": "http://llm.example/v1", "model": "qwen"}), 200); contextOf(r) != float64(32_768) {
+		t.Errorf("不填时按 32K：%s", r.Raw)
+	}
+}
+
 func TestWebAndUnknownAPIPaths(t *testing.T) {
 	c := newServer(t)
 

@@ -14,7 +14,8 @@ type LLMSettings struct {
 	BaseURL string `json:"base_url"`
 	Model   string `json:"model"`
 	// 已保存的 Key 不会返回给网页，只说有没有
-	APIKeySet bool `json:"api_key_set" doc:"是否已经保存了 API Key；Key 本身不会返回"`
+	APIKeySet     bool `json:"api_key_set" doc:"是否已经保存了 API Key；Key 本身不会返回"`
+	ContextTokens int  `json:"context_tokens" doc:"模型的上下文长度（token 数）。没设置过时是默认的 32768"`
 }
 
 type LLMSettingsOutput struct {
@@ -22,7 +23,7 @@ type LLMSettingsOutput struct {
 }
 
 func toLLMSettings(cfg settings.LLM) *LLMSettingsOutput {
-	return &LLMSettingsOutput{Body: LLMSettings{BaseURL: cfg.BaseURL, Model: cfg.Model, APIKeySet: cfg.APIKey != ""}}
+	return &LLMSettingsOutput{Body: LLMSettings{BaseURL: cfg.BaseURL, Model: cfg.Model, APIKeySet: cfg.APIKey != "", ContextTokens: cfg.Context()}}
 }
 
 var getLLMSettingsOp = huma.Operation{
@@ -44,14 +45,15 @@ func (h *Handlers) GetLLMSettings(ctx context.Context, _ *struct{}) (*LLMSetting
 
 type LLMSettingsInput struct {
 	Body struct {
-		BaseURL string `json:"base_url" maxLength:"500" doc:"OpenAI 兼容接口的地址，一般以 /v1 结尾"`
-		Model   string `json:"model" minLength:"1" maxLength:"200"`
-		APIKey  string `json:"api_key,omitempty" maxLength:"500" doc:"留空表示沿用已保存的 Key"`
+		BaseURL       string `json:"base_url" maxLength:"500" doc:"OpenAI 兼容接口的地址，一般以 /v1 结尾"`
+		Model         string `json:"model" minLength:"1" maxLength:"200"`
+		APIKey        string `json:"api_key,omitempty" maxLength:"500" doc:"留空表示沿用已保存的 Key"`
+		ContextTokens int    `json:"context_tokens,omitempty" doc:"模型的上下文长度（token 数）：8192、16384、32768、65536、131072 或 200000（200K 及以上都选它）。不填或 0 表示默认的 32768。长会议按它分段交给大模型"`
 	}
 }
 
 func (in *LLMSettingsInput) toService() service.LLMInput {
-	return service.LLMInput{BaseURL: in.Body.BaseURL, Model: in.Body.Model, APIKey: in.Body.APIKey}
+	return service.LLMInput{BaseURL: in.Body.BaseURL, Model: in.Body.Model, APIKey: in.Body.APIKey, ContextTokens: in.Body.ContextTokens}
 }
 
 var putLLMSettingsOp = huma.Operation{

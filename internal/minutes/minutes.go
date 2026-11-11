@@ -82,14 +82,16 @@ type Input struct {
 	Marks []float64
 	// 给说话人起的名字，转写里直接用名字
 	Speakers transcript.Names
+	// 一次请求里最多放多少字的转写，超过就先分段提取要点，再汇总成纪要。按模型的上下文长度算（见 llm.TranscriptChars）；
+	// 0 时用 defaultMaxChars
+	MaxChars int
 }
 
 // ChatFunc 发一轮对话给大模型。
 type ChatFunc func(ctx context.Context, system, user string) (string, error)
 
-// 一次请求里最多放这么多字的转写。超过就先分段提取要点，再汇总成纪要。
-// 取值照顾上下文只有 32K 的本地模型；以后做成可配置。
-const maxCharsPerCall = 20_000
+// 没给 Input.MaxChars 时一次请求里最多放这么多字的转写，和 32K 上下文时 llm.TranscriptChars 算出来的一样
+const defaultMaxChars = 20_000
 
 const rules = `要求：
 1. 只写转写里有依据的内容，不要编造。没提到的负责人、时间写“未定”。
@@ -232,7 +234,11 @@ func UsefulTerm(s string) bool {
 
 // Generate 生成纪要（Markdown）。progress 在每完成一次大模型调用后回调。
 func Generate(ctx context.Context, chat ChatFunc, in Input, progress func(done, total int)) (Result, error) {
-	parts := split(lines(in), maxCharsPerCall)
+	limit := in.MaxChars
+	if limit <= 0 {
+		limit = defaultMaxChars
+	}
+	parts := split(lines(in), limit)
 	// 有标记的重点时多一条要求，最后那条「用 Markdown 输出」的编号跟着往后挪
 	extra, last := "", 6
 	if len(in.Marks) > 0 {

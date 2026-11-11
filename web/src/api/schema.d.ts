@@ -1533,6 +1533,11 @@ export interface components {
             /** @description 是否已经保存了 API Key；Key 本身不会返回 */
             api_key_set: boolean;
             base_url: string;
+            /**
+             * Format: int64
+             * @description 模型的上下文长度（token 数）。没设置过时是默认的 32768
+             */
+            context_tokens: number;
             model: string;
         };
         LLMSettingsInputBody: {
@@ -1540,6 +1545,11 @@ export interface components {
             api_key?: string;
             /** @description OpenAI 兼容接口的地址，一般以 /v1 结尾 */
             base_url: string;
+            /**
+             * Format: int64
+             * @description 模型的上下文长度（token 数）：8192、16384、32768、65536、131072 或 200000（200K 及以上都选它）。不填或 0 表示默认的 32768。长会议按它分段交给大模型
+             */
+            context_tokens?: number;
             model: string;
         };
         LinkInfoOutputBody: {

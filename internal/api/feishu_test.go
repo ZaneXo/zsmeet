@@ -4,7 +4,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/feishu/feishutest"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
@@ -172,4 +177,77 @@ func TestShareToFeishu(t *testing.T) {
 		t.Errorf("没有纪要：%s", r.Raw)
 	}
 	c.want(c.do("GET", fmt.Sprintf("/api/meetings/%s/feishu", "00000000-0000-0000-0000-000000000000"), nil), 404)
+}
+
+// 发到飞书时，权限、纪要版本都按锁住会议以后的算：等锁的时候被收回了编辑权限的不能发；纪要重新生成了的发新的一版，
+// 发送记录的时间是真正记下的时间（不是开始等锁的时间）。网页带上看到的版本时，版本变了不发，说清楚现在是第几版。
+func TestShareToFeishuRechecksUnderLock(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	c.feishu()
+	c.want(c.do("PUT", "/api/settings/feishu", obj{
+		"app_id": feishutest.AppID, "app_secret": feishutest.AppSecret, "site_url": "https://meet.example.com",
+	}), 200)
+	editor := c.addMember("editor@example.com", "赵雷")
+	editorID := c.memberID("editor@example.com")
+	id := c.processed("产品周会", []transcript.Segment{{Start: 1, Text: "好。"}}, "## 摘要\n好。", `[]`)
+	meetingID := uuid.MustParse(id)
+	base := "/api/meetings/" + id + "/feishu"
+	c.want(c.do("PUT", "/api/meetings/"+id+"/access", obj{"visibility": "team", "members": []obj{{"user_id": editorID, "can_edit": true}}}), 200)
+	lockMeeting := func(tx pgx.Tx) error {
+		_, err := sqlc.New(c.pool).WithTx(tx).LockMeeting(t.Context(), meetingID)
+		return err
+	}
+
+	// 等锁的时候创建者把他移出了能编辑的人
+	r := c.whileLocked(lockMeeting, func() result { return editor.do("POST", base, obj{"chat_id": "oc_team"}) }, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), "DELETE FROM meeting_members WHERE meeting_id = $1", meetingID)
+		return err
+	})
+	if r.Status != 403 {
+		t.Errorf("等锁的时候被收回了编辑权限，不能再发：%d %s", r.Status, r.Raw)
+	}
+	// 等锁的时候改成了只有创建者能看：当作会议不存在
+	c.want(c.do("PUT", "/api/meetings/"+id+"/access", obj{"visibility": "team", "members": []obj{{"user_id": editorID, "can_edit": true}}}), 200)
+	r = c.whileLocked(lockMeeting, func() result { return editor.do("POST", base, obj{"chat_id": "oc_team"}) }, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), "UPDATE meetings SET visibility = 'private' WHERE id = $1", meetingID)
+		return err
+	})
+	if r.Status != 404 {
+		t.Errorf("等锁的时候改成了看不到，当作会议不存在：%d %s", r.Status, r.Raw)
+	}
+	if n := c.count("SELECT count(*) FROM feishu_shares"); n != 0 {
+		t.Errorf("没有权限了，不记发送：%d", n)
+	}
+
+	// 等锁的时候纪要重新生成成了第 2 版：发的是第 2 版；记录的时间在第 2 版生成以后
+	var regenerated time.Time
+	r = c.whileLocked(lockMeeting, func() result { return c.do("POST", base, obj{"chat_id": "oc_team"}) }, func(tx pgx.Tx) error {
+		if _, err := sqlc.New(c.pool).WithTx(tx).AddMinutesVersion(t.Context(), sqlc.AddMinutesVersionParams{MeetingID: meetingID, Content: "## 摘要\n新的。", Source: "auto"}); err != nil {
+			return err
+		}
+		return tx.QueryRow(t.Context(), "SELECT clock_timestamp()").Scan(&regenerated)
+	})
+	c.want(r, 200)
+	if r.Body["minutes_version"] != float64(2) {
+		t.Errorf("发的是锁住会议时的当前版本（第 2 版）：%s", r.Raw)
+	}
+	var created time.Time
+	if err := c.pool.QueryRow(t.Context(), "SELECT created_at FROM feishu_shares WHERE id = $1", r.Body["id"]).Scan(&created); err != nil {
+		t.Fatal(err)
+	}
+	if !created.After(regenerated) {
+		t.Errorf("发送记录的时间是锁住会议以后真正记下的时间（%v），不是开始等锁的时间：%v", regenerated, created)
+	}
+	if _, err := c.pool.Exec(t.Context(), "UPDATE feishu_shares SET status = 'done'"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 网页上看到的还是第 1 版：不发，告诉他现在是第 2 版
+	if r := c.want(c.do("POST", base, obj{"chat_id": "oc_team", "minutes_version": 1}), 409); !strings.Contains(r.Raw, "第 2 版") {
+		t.Errorf("版本变了要说清楚：%s", r.Raw)
+	}
+	if r := c.want(c.do("POST", base, obj{"chat_id": "oc_team", "minutes_version": 2}), 200); r.Body["minutes_version"] != float64(2) {
+		t.Errorf("看到的就是当前版本，照常发：%s", r.Raw)
+	}
 }

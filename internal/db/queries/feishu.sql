@@ -1,6 +1,8 @@
 -- name: CreateShare :one
-INSERT INTO feishu_shares (meeting_id, chat_id, chat_name, with_doc, minutes_version, requested_by)
-VALUES ($1, $2, $3, $4, $5, $6)
+-- created_at 用写入时的时间（clock_timestamp），不用事务开始的时间（now）：网页上发送是锁住会议以后才写，
+-- 等锁的那一段不算进去，记录才按真正的先后排、「发送中」的期限才从真正开始发算起（和 CreateWebhookSend 一样）
+INSERT INTO feishu_shares (meeting_id, chat_id, chat_name, with_doc, minutes_version, requested_by, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())
 RETURNING *;
 
 -- name: GetShare :one
@@ -17,7 +19,7 @@ LIMIT 20;
 -- name: PendingShare :one
 -- 这场会议有没有还没发完的。半小时还没发完的不算（重试早该结束了，多半是后台任务丢了），免得一直卡住不让发
 SELECT count(*) FROM feishu_shares
-WHERE meeting_id = $1 AND status = 'pending' AND created_at > now() - interval '30 minutes';
+WHERE meeting_id = $1 AND status = 'pending' AND created_at > clock_timestamp() - interval '30 minutes';
 
 -- name: SetShareTicket :exec
 UPDATE feishu_shares SET import_ticket = $2 WHERE id = $1;

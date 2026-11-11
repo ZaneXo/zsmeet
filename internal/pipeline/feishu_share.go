@@ -94,6 +94,12 @@ func (sw *shareWorker) Work(ctx context.Context, job *river.Job[queue.FeishuShar
 	return river.JobCancel(err)
 }
 
+// send 发一条。返回 nil 表示已经发出去了（卡片发到了群里、文档开好了权限），之后不管怎样都不能再让 River 重试。
+//
+// 会把纪要发出去的几步（把纪要传给飞书导入成文档；给群、公司里的人和发送的人开文档的权限并发卡片）各自在 locked 里做：
+// 拿着会议这一行的共享锁，按锁住时的会议再检查一遍（删了没有，自动发送的还是不是团队可见），再调飞书。
+// 改可见范围、删除会议都要先锁住会议，只能排在这一步前面（这里就看得到，不发）或者后面（发的时候确实是可以发的）。
+// 等飞书导入文档可能要好几分钟、中间还要 snooze，不能一直拿着锁：等导入结果的时候不拿锁，下一步发之前重新锁、重新检查。
 func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 	w := sw.w
 	cfg, err := w.settings.Feishu(ctx)
@@ -108,12 +114,9 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 		return err
 	}
 	m := row.Meeting
-	if m.DeletedAt != nil {
-		return permanent("会议已经删除了")
-	}
-	// 自动发送（没有发起人）只发团队里所有人都能看的会议。排队以后（重试、等文档导入期间）会议可能被改成了别的可见范围
-	if share.RequestedBy == nil && m.Visibility != service.VisibilityTeam {
-		return permanent("会议已经改成不是团队所有人可见，不再自动发到群里")
+	// 先不拿锁看一遍：明显不用发的不必再去建文件夹、读纪要。真正发之前 locked 里还会再看
+	if err := shareAllowed(share, m); err != nil {
+		return err
 	}
 	mv, err := w.q.GetMinutesVersion(ctx, sqlc.GetMinutesVersionParams{MeetingID: m.ID, Version: share.MinutesVersion})
 	if err != nil {
@@ -162,14 +165,24 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 			if err != nil {
 				return err
 			}
-			if ticket, err = client.StartImport(ctx, folder, m.Title, export.MinutesBody(info, mv.Content)); err != nil {
+			// 纪要一传上去就算发出去了（文件夹共享给了别人的话，导入好就能看到）：拿着锁传
+			err = sw.locked(ctx, share, func(ctx context.Context) error {
+				ticket, err = client.StartImport(ctx, folder, m.Title, export.MinutesBody(info, mv.Content))
+				return err
+			})
+			if err != nil {
 				return err
 			}
-			// 马上记下任务号：之后出错重试时接着等这个任务，不会再导入一篇
-			if err := w.q.SetShareTicket(ctx, sqlc.SetShareTicketParams{ID: share.ID, ImportTicket: ticket}); err != nil {
-				return err
+			// 马上记下任务号：之后出错重试、snooze 以后接着等这个任务，不会再导入一篇。
+			// 实在记不下来就不能再让 River 重试了，不然会再导入一篇
+			if err := persist(ctx, func(ctx context.Context) error {
+				return w.q.SetShareTicket(ctx, sqlc.SetShareTicketParams{ID: share.ID, ImportTicket: ticket})
+			}); err != nil {
+				slog.Error("飞书已经开始导入文档，但没能记下任务号", "meeting", m.ID, "share", share.ID, "ticket", ticket, "err", err)
+				return permanent("飞书已经开始导入文档，但服务器没能记下来。为了不导入出两篇一样的文档，不再自动重试，可以过一会儿重新发一次")
 			}
 		}
+		// 等导入结果不拿锁：最多等 2 分钟，没好就 snooze，都不能一直锁着会议
 		doc, err = client.ImportResult(ctx, ticket)
 		if errors.Is(err, feishu.ErrImportPending) {
 			// 飞书还在导入：过一会儿接着等（不算重试次数）。太久了就不等了
@@ -181,53 +194,129 @@ func (sw *shareWorker) send(ctx context.Context, share sqlc.FeishuShare) error {
 		if err != nil {
 			return err
 		}
-		// 马上记下来，后面出错重试时不会再导入一遍
+		// 马上记下来。记不下来也没关系：重试时用记下的任务号再查一次，拿到的还是这一篇，不会再导入
 		if err := w.q.SetShareDoc(ctx, sqlc.SetShareDocParams{ID: share.ID, DocToken: doc.Token, DocUrl: doc.URL}); err != nil {
 			return err
 		}
 	}
-	// 文档归应用所有，不给权限谁都打不开：发到的群里的人能看，管理员打开了的话公司里拿到链接的人也能看
-	if doc.Token != "" && (share.WithDoc || share.ChatID != "") {
-		if err := grantDoc(ctx, client, doc.Token, share.ChatID, cfg.LinkShare); err != nil {
-			if !reused {
-				return err
-			}
-			// 以前导入的文档多半已经给过权限了，这次再给失败不影响发卡片
-			slog.Warn("给飞书文档加权限失败", "doc", doc.Token, "err", err)
-		}
-		// 发的人自己也要能打开、能再分享（按 zsmeet 账号的邮箱找飞书里的人）
-		if share.RequestedBy != nil {
-			if err := sw.grantRequester(ctx, client, doc.Token, *share.RequestedBy); err != nil {
-				if share.ChatID == "" && !cfg.LinkShare {
-					if feishu.Retryable(err) {
-						return err // 网络问题：重试时文档已经记下了，不会再导入
-					}
-					return permanentError{fmt.Errorf("文档导入好了，但没法给你打开它的权限（%v）。请发到一个群，或者请管理员在「设置 → 飞书」里打开「公司里拿到链接的人都能看」", err)}
-				}
-				slog.Warn("没能给发送的人加飞书文档的权限", "doc", doc.Token, "err", err)
-			}
-		}
-	}
 
-	messageID := ""
+	var card string
 	if share.ChatID != "" {
 		updated, err := w.q.SharedBefore(ctx, sqlc.SharedBeforeParams{MeetingID: m.ID, ChatID: share.ChatID, Version: share.MinutesVersion})
 		if err != nil {
 			return err
 		}
-		card, err := feishu.Card{
+		card, err = feishu.Card{
 			Title: m.Title, When: m.CreatedAt, Duration: int(m.DurationSec), Owner: row.OwnerName,
 			Minutes: mv.Content, MeetingURL: meetingURL, DocURL: doc.URL, Updated: updated,
 		}.JSON()
 		if err != nil {
 			return err
 		}
-		// 用这条记录的 ID 去重：重试时飞书不会发出第二张
-		if messageID, err = client.SendCard(ctx, share.ChatID, card, share.ID.String()); err != nil {
+	}
+	var requester string
+	if doc.Token != "" && share.RequestedBy != nil {
+		u, err := w.q.GetUser(ctx, *share.RequestedBy)
+		if err != nil {
 			return err
 		}
+		requester = u.Email
 	}
-	return w.q.FinishShare(ctx, sqlc.FinishShareParams{ID: share.ID, MessageID: messageID})
+
+	// 开权限和发卡片放在同一把锁里：会议改成不能发了的话，群里既拿不到文档的权限，也收不到卡片
+	messageID := ""
+	err = sw.locked(ctx, share, func(ctx context.Context) error {
+		// 文档归应用所有，不给权限谁都打不开：发到的群里的人能看，管理员打开了的话公司里拿到链接的人也能看
+		if doc.Token != "" && (share.WithDoc || share.ChatID != "") {
+			if err := grantDoc(ctx, client, doc.Token, share.ChatID, cfg.LinkShare); err != nil {
+				if !reused {
+					return err
+				}
+				// 以前导入的文档多半已经给过权限了，这次再给失败不影响发卡片
+				slog.Warn("给飞书文档加权限失败", "doc", doc.Token, "err", err)
+			}
+			// 发的人自己也要能打开、能再分享（按 zsmeet 账号的邮箱找飞书里的人）
+			if requester != "" {
+				if err := client.ShareWithUser(ctx, doc.Token, requester); err != nil {
+					if share.ChatID == "" && !cfg.LinkShare {
+						if feishu.Retryable(err) {
+							return err // 网络问题：重试时文档已经记下了，不会再导入
+						}
+						return permanentError{fmt.Errorf("文档导入好了，但没法给你打开它的权限（%v）。请发到一个群，或者请管理员在「设置 → 飞书」里打开「公司里拿到链接的人都能看」", err)}
+					}
+					slog.Warn("没能给发送的人加飞书文档的权限", "doc", doc.Token, "err", err)
+				}
+			}
+		}
+		if share.ChatID == "" {
+			return nil
+		}
+		// 用这条记录的 ID 去重：重试时（一小时内）飞书不会发出第二张
+		var err error
+		messageID, err = client.SendCard(ctx, share.ChatID, card, share.ID.String())
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	// 发出去了：锁已经放开，记成已发送
+	sw.finish(ctx, share, messageID)
+	return nil
+}
+
+// shareAllowed 检查会议 m 现在还能不能照着 share 发。
+func shareAllowed(share sqlc.FeishuShare, m sqlc.Meeting) error {
+	if m.DeletedAt != nil {
+		return permanent("会议已经删除了")
+	}
+	// 自动发送（没有发起人）只发团队里所有人都能看的会议。排队以后（重试、等文档导入期间）会议可能被改成了别的可见范围
+	if share.RequestedBy == nil && m.Visibility != service.VisibilityTeam {
+		return permanent("会议已经改成不是团队所有人可见，不再自动发到群里")
+	}
+	return nil
+}
+
+// 拿着会议的锁调飞书时，最多调这么久：改可见范围、删除会议、重新生成纪要最多为这一步等这么久
+const shareStepTimeout = 30 * time.Second
+
+// locked 拿着会议这一行的共享锁（ShareLockMeeting），按锁住时的会议检查还能不能发（shareAllowed），再做 step。
+// step 是会把纪要发出去的一步（调飞书），限时 shareStepTimeout；做完就放开锁。
+//
+// 代价是这段时间里改会议的操作（包括改标题、重新生成纪要）要等它做完，最多 shareStepTimeout，一般一两秒；
+// 发到飞书的队列一次只发一条，也只多占一个数据库连接。
+func (sw *shareWorker) locked(ctx context.Context, share sqlc.FeishuShare, step func(ctx context.Context) error) error {
+	w := sw.w
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	// 事务里只读过，回滚就是放开锁
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	m, err := w.q.WithTx(tx).ShareLockMeeting(ctx, share.MeetingID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return permanent("会议已经删除了")
+	}
+	if err != nil {
+		return err
+	}
+	if err := shareAllowed(share, m); err != nil {
+		return err
+	}
+	sctx, cancel := context.WithTimeout(ctx, shareStepTimeout)
+	defer cancel()
+	return step(sctx)
+}
+
+// finish 把发出去了的 share 记成已发送。写不进去（数据库暂时连不上）就隔一会儿再试几次；还是不行只记日志：
+// 不能让 River 重试。卡片虽然有去重，重试时会议可能已经改成了不能发、已经超过了半小时，这条会被记成「没发出去」；
+// 不发卡片、只导入文档的，重试会再开一遍权限。这一条在网页上会一直是发送中，过了半小时就允许重新发。
+func (sw *shareWorker) finish(ctx context.Context, share sqlc.FeishuShare, messageID string) {
+	err := persist(ctx, func(ctx context.Context) error {
+		return sw.w.q.FinishShare(ctx, sqlc.FinishShareParams{ID: share.ID, MessageID: messageID})
+	})
+	if err != nil {
+		slog.Error("纪要已经发到飞书了，但没能记成已发送", "meeting", share.MeetingID, "share", share.ID, "err", err)
+	}
 }
 
 // 发送开始这么久还没发完就不再等了（网页上「发送中」超过半小时就不再挡着重新发，见 PendingShare）
@@ -255,15 +344,6 @@ func durationWord(d time.Duration) string {
 		return fmt.Sprintf("%d 秒", int(d.Seconds()))
 	}
 	return fmt.Sprintf("%d 分钟", int(d.Minutes()))
-}
-
-// grantRequester 让发送的人（zsmeet 账号的邮箱在飞书里对应的人）能管理这篇文档。
-func (sw *shareWorker) grantRequester(ctx context.Context, client *feishu.Client, doc string, user uuid.UUID) error {
-	u, err := sw.w.q.GetUser(ctx, user)
-	if err != nil {
-		return err
-	}
-	return client.ShareWithUser(ctx, doc, u.Email)
 }
 
 // grantDoc 让 chat 群里的人能看这篇文档；inTenant 为 true 时公司里拿到链接的人也能看。

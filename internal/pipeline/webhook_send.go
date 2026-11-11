@@ -230,12 +230,12 @@ func (ww *webhookWorker) send(ctx context.Context, send sqlc.WebhookSend) error 
 	return nil
 }
 
-// finishTries 是群机器人收下以后，记成「已发送」最多试几次、每次隔多久
+// finishTries 是消息已经发出去以后（群机器人收下了、飞书收下了），把结果写进数据库最多试几次、每次隔多久
 var finishTries, finishPause = 3, time.Second
 
-// finish 把发出去了的 send 记成已发送。写不进去（数据库暂时连不上）就隔一会儿再试几次；还是不行只记日志：
-// 不能让 River 重试，否则群里会再收到一条一样的。这一条在网页上会一直是发送中，过了 WebhookPendingWindow 报成没发出去。
-func (ww *webhookWorker) finish(ctx context.Context, send sqlc.WebhookSend) {
+// persist 写一下数据库（write），写不进去（数据库暂时连不上）就隔一会儿再试，最多 finishTries 次，返回最后一次的错误。
+// 用在消息已经发出去以后：这时不能让 River 重试，不然会再发一次。ctx 取消了也照样写完（每次最多 15 秒）。
+func persist(ctx context.Context, write func(ctx context.Context) error) error {
 	bg := context.WithoutCancel(ctx)
 	var err error
 	for i := range finishTries {
@@ -243,13 +243,21 @@ func (ww *webhookWorker) finish(ctx context.Context, send sqlc.WebhookSend) {
 			time.Sleep(finishPause)
 		}
 		tctx, cancel := context.WithTimeout(bg, 15*time.Second)
-		err = ww.w.q.FinishWebhookSend(tctx, send.ID)
+		err = write(tctx)
 		cancel()
 		if err == nil {
-			return
+			return nil
 		}
 	}
-	slog.Error("纪要已经发到群里了，但没能记成已发送", "meeting", send.MeetingID, "send", send.ID, "err", err)
+	return err
+}
+
+// finish 把发出去了的 send 记成已发送。写不进去就隔一会儿再试几次（persist）；还是不行只记日志：
+// 不能让 River 重试，否则群里会再收到一条一样的。这一条在网页上会一直是发送中，过了 WebhookPendingWindow 报成没发出去。
+func (ww *webhookWorker) finish(ctx context.Context, send sqlc.WebhookSend) {
+	if err := persist(ctx, func(ctx context.Context) error { return ww.w.q.FinishWebhookSend(ctx, send.ID) }); err != nil {
+		slog.Error("纪要已经发到群里了，但没能记成已发送", "meeting", send.MeetingID, "send", send.ID, "err", err)
+	}
 }
 
 // NextRetry 决定第 job.Attempt 次失败以后，过多久再试。和 webhookRetry 里算的一样（限流的不走这里，是 snooze）。

@@ -1908,6 +1908,11 @@ export interface components {
         ShareToFeishuInputBody: {
             /** @description 发到哪个群；为空表示只导入成文档 */
             chat_id?: string;
+            /**
+             * Format: int32
+             * @description 网页上看到的纪要版本：当前版本已经不是它时返回 409、不发。不传表示发当前版本，不检查
+             */
+            minutes_version?: number;
             /** @description 同时导入成飞书文档 */
             with_doc?: boolean;
         };

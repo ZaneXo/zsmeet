@@ -282,6 +282,8 @@ type ShareToFeishuInput struct {
 	Body struct {
 		ChatID  string `json:"chat_id,omitempty" maxLength:"100" doc:"发到哪个群；为空表示只导入成文档"`
 		WithDoc bool   `json:"with_doc,omitempty" doc:"同时导入成飞书文档"`
+		// 和发到群机器人的 minutes_version 一样
+		MinutesVersion int32 `json:"minutes_version,omitempty" minimum:"0" doc:"网页上看到的纪要版本：当前版本已经不是它时返回 409、不发。不传表示发当前版本，不检查"`
 	}
 }
 
@@ -305,7 +307,7 @@ func (h *Handlers) ShareToFeishu(ctx context.Context, in *ShareToFeishuInput) (*
 		return nil, err
 	}
 	user := currentUser(ctx)
-	share, err := h.svc.ShareToFeishu(ctx, user, id, in.Body.ChatID, in.Body.WithDoc)
+	share, err := h.svc.ShareToFeishu(ctx, user, id, in.Body.ChatID, in.Body.WithDoc, in.Body.MinutesVersion)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

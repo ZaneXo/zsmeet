@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -462,4 +463,178 @@ func TestAutoPushSkipsNonTeamMeetings(t *testing.T) {
 			t.Errorf("%s 的会议不自动发到群里：%+v", visibility, shares)
 		}
 	}
+}
+
+// whileMeetingLocked 相当于 service.SetMeetingAccess：锁住会议（FOR UPDATE）的时候让 run 开始做，
+// 等它在锁上排队以后执行 change、提交，返回 run 的结果。run 不等锁就做完了，测试失败。
+func (e *env) whileMeetingLocked(meeting uuid.UUID, what string, run func() error, change string) error {
+	e.t.Helper()
+	ctx := e.t.Context()
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := e.q.WithTx(tx).LockMeeting(ctx, meeting); err != nil {
+		e.t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- run() }()
+	e.waitLockWait(done, what)
+	if _, err := tx.Exec(ctx, change, meeting); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		e.t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		e.t.Fatalf("%s：锁放开以后应该做完", what)
+	}
+	return nil
+}
+
+// 自动发到飞书：把纪要传给飞书导入、开文档权限和发卡片之前，都锁住会议再看一遍可见范围。
+// 正在改可见范围（已经锁住了会议、还没提交）时，发送等它改完再看，改成只有自己能看的就不发。
+// 等飞书导入的时候不拿锁（snooze 以后接着等），开权限、发卡片之前重新锁、重新看。
+func TestAutoShareWaitsForVisibilityChange(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fs := e.feishu(settings.Feishu{
+		SiteURL: "https://meet.example.com", ChatID: "oc_team", ChatName: "产品组",
+		AutoPush: true, WithDoc: true, LinkShare: true,
+	})
+	sw := &shareWorker{w: e.w}
+	queued := func() (uuid.UUID, uuid.UUID) {
+		t.Helper()
+		args := e.upload(wav())
+		if err := e.work(args); err != nil {
+			t.Fatal(err)
+		}
+		shares := e.shares(args.MeetingID)
+		if len(shares) != 1 {
+			t.Fatalf("排上了自动发送：%+v", shares)
+		}
+		return args.MeetingID, shares[0].FeishuShare.ID
+	}
+	const private = "UPDATE meetings SET visibility = 'private' WHERE id = $1"
+
+	// 还没开始导入：等改完可见范围，一看是只有自己能看的，纪要不传给飞书，也不发卡片
+	meeting, share := queued()
+	err := e.whileMeetingLocked(meeting, "导入文档之前改可见范围", func() error {
+		return sw.Work(t.Context(), jobOf(queue.FeishuShareArgs{ShareID: share}, 1))
+	}, private)
+	if !errors.Is(err, &rivertype.JobCancelError{}) {
+		t.Fatalf("改成只有自己能看以后不再发，也不再重试：%v", err)
+	}
+	if s, _ := e.q.GetShare(t.Context(), share); s.Status != "failed" || !strings.Contains(s.Error, "不再自动发到群里") {
+		t.Errorf("记下没发的原因：%+v", s)
+	}
+	if n := fs.Count("POST /open-apis/drive/v1/import_tasks"); n != 0 || len(fs.Sent()) != 0 {
+		t.Fatalf("纪要不能传给飞书，也不能发卡片：导入 %d 次，卡片 %+v", n, fs.Sent())
+	}
+
+	// 已经开始导入、snooze 着等结果：这期间不拿锁；导入好了以后，开权限、发卡片之前等改完可见范围，不发
+	fs.ImportPolls = 1
+	restore := feishu.SetImportTiming(0, time.Millisecond)
+	defer restore()
+	meeting, share = queued()
+	var snooze *rivertype.JobSnoozeError
+	if err := sw.Work(t.Context(), jobOf(queue.FeishuShareArgs{ShareID: share}, 1)); !errors.As(err, &snooze) {
+		t.Fatalf("飞书还在导入时过一会儿接着等：%v", err)
+	}
+	feishu.SetImportTiming(time.Minute, time.Millisecond)
+	err = e.whileMeetingLocked(meeting, "开权限、发卡片之前改可见范围", func() error {
+		return sw.Work(t.Context(), jobOf(queue.FeishuShareArgs{ShareID: share}, 1))
+	}, private)
+	if !errors.Is(err, &rivertype.JobCancelError{}) {
+		t.Fatalf("改成只有自己能看以后不再发：%v", err)
+	}
+	if len(fs.Docs()) != 1 || len(fs.Grants) != 0 || len(fs.PublicDocs) != 0 || len(fs.Sent()) != 0 {
+		t.Errorf("文档已经导入了，但群里、公司里的人都不能拿到权限，也不发卡片：%d 篇，权限 %+v %v，卡片 %+v", len(fs.Docs()), fs.Grants, fs.PublicDocs, fs.Sent())
+	}
+}
+
+// 卡片已经发到群里、记成已发送时数据库出错：多试几次，还是不行也不能让 River 重试（重试时会议可能已经改成不能发、
+// 已经超过半小时，会被记成「没发出去」）。
+func TestShareNoRepostWhenFinishFails(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fs := e.feishu(settings.Feishu{SiteURL: "https://meet.example.com"})
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	share, err := e.q.CreateShare(ctx, sqlc.CreateShareParams{MeetingID: args.MeetingID, ChatID: "oc_team", ChatName: "产品组", WithDoc: true, MinutesVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.failShareUpdate("NEW.status = 'done'")
+	finishPause = 10 * time.Millisecond
+	t.Cleanup(func() { finishPause = time.Second })
+
+	sw := &shareWorker{w: e.w}
+	if err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: share.ID}, 1)); err != nil {
+		t.Errorf("已经发出去了，不能交给 River 重试：%v", err)
+	}
+	if n := fs.Count("POST /open-apis/im/v1/messages"); n != 1 || len(fs.Docs()) != 1 {
+		t.Errorf("卡片只发一次、文档只导入一篇：卡片 %d 次，文档 %d 篇", n, len(fs.Docs()))
+	}
+	if s, _ := e.q.GetShare(ctx, share.ID); s.Status != "pending" || s.Error != "" {
+		t.Errorf("记不进去就还是发送中，不能写成没发出去：%+v", s)
+	}
+}
+
+// 飞书已经开始导入文档、记下任务号时数据库出错：不能让 River 重试（重试会再导入一篇），记成失败、说清楚。
+func TestShareNoReimportWhenTicketNotSaved(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	fs := e.feishu(settings.Feishu{SiteURL: "https://meet.example.com"})
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	share, err := e.q.CreateShare(ctx, sqlc.CreateShareParams{MeetingID: args.MeetingID, ChatID: "oc_team", ChatName: "产品组", WithDoc: true, MinutesVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.failShareUpdate("NEW.import_ticket <> OLD.import_ticket")
+	finishPause = 10 * time.Millisecond
+	t.Cleanup(func() { finishPause = time.Second })
+
+	sw := &shareWorker{w: e.w}
+	if err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: share.ID}, 1)); !errors.Is(err, &rivertype.JobCancelError{}) {
+		t.Errorf("任务号没记下来，不能交给 River 重试：%v", err)
+	}
+	if s, _ := e.q.GetShare(ctx, share.ID); s.Status != "failed" || !strings.Contains(s.Error, "不再自动重试") {
+		t.Errorf("记成失败，说清楚为什么：%+v", s)
+	}
+	// 就算任务又被做了一次，也不会再导入
+	if err := sw.Work(ctx, jobOf(queue.FeishuShareArgs{ShareID: share.ID}, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if n := fs.Count("POST /open-apis/drive/v1/import_tasks"); n != 1 || len(fs.Sent()) != 0 {
+		t.Errorf("只导入一次、不发卡片：导入 %d 次，卡片 %+v", n, fs.Sent())
+	}
+}
+
+// failShareUpdate 模拟数据库写不进去：改 feishu_shares 时 when 成立就报错。测试结束时去掉。
+func (e *env) failShareUpdate(when string) {
+	e.t.Helper()
+	if _, err := e.pool.Exec(e.t.Context(), `
+CREATE FUNCTION test_fail_share() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	IF `+when+` THEN RAISE EXCEPTION 'database is down'; END IF;
+	RETURN NEW;
+END $$;
+CREATE TRIGGER test_fail_share BEFORE UPDATE ON feishu_shares FOR EACH ROW EXECUTE FUNCTION test_fail_share();`); err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(func() {
+		_, _ = e.pool.Exec(context.Background(), "DROP TRIGGER test_fail_share ON feishu_shares; DROP FUNCTION test_fail_share()")
+	})
 }

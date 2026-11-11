@@ -145,15 +145,18 @@ function ShareForm({ meeting, chats, shares }: { meeting: Meeting; chats: Chats;
   const docOnly = chat === DOC_ONLY;
 
   const send = useMutation({
+    // 带上看到的版本：纪要在这期间重新生成或者被改过的话，服务器不发，免得发出去的不是这里写的那一版
     mutationFn: () =>
       unwrap(
         api.POST("/api/meetings/{id}/feishu", {
           params: { path: { id: meeting.id } },
-          body: { chat_id: docOnly ? "" : chat, with_doc: docOnly || withDoc },
+          body: { chat_id: docOnly ? "" : chat, with_doc: docOnly || withDoc, minutes_version: meeting.minutes_version },
         }),
       ),
     // 新的这一条马上放到记录最前面（发送中），之后每 2 秒刷新一次，直到发完
     onSuccess: (share) => queryClient.setQueryData<Shares>(sharesKey(meeting.id), (old) => ({ items: [share, ...(old?.items ?? [])] })),
+    // 版本对不上时重新取会议，弹窗上写的版本跟着变成新的
+    onError: () => queryClient.invalidateQueries({ queryKey: ["meeting", meeting.id] }),
     // 失败了也重新取一次：可能是别人（或者自动发送）正在发，记录里要显示出来
     onSettled: () => queryClient.invalidateQueries({ queryKey: sharesKey(meeting.id) }),
   });

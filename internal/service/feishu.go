@@ -181,7 +181,9 @@ func (s *Service) FeishuChats(ctx context.Context) ([]feishu.Chat, settings.Feis
 
 // ShareToFeishu 把会议当前版本的纪要发到飞书：chatID 不为空时推到这个群，withDoc 为 true 时同时导入成飞书文档。
 // 真正的发送在后台做，这里记下来、加任务就返回。能编辑这场会议的人可以发。
-func (s *Service) ShareToFeishu(ctx context.Context, user sqlc.User, id uuid.UUID, chatID string, withDoc bool) (sqlc.FeishuShare, error) {
+// version 是网页上看到的、要发的那一版：纪要已经变成别的版本时不发，免得发出去的不是看到的那一版；为 0 时不检查。
+func (s *Service) ShareToFeishu(ctx context.Context, user sqlc.User, id uuid.UUID, chatID string, withDoc bool, version int32) (sqlc.FeishuShare, error) {
+	// 先在锁外面快速看一遍，没权限、没纪要的不用去问飞书有哪些群；锁住会议以后还要按那时的再看一遍
 	m, err := s.editable(ctx, user, id)
 	if err != nil {
 		return sqlc.FeishuShare{}, err
@@ -220,8 +222,29 @@ func (s *Service) ShareToFeishu(ctx context.Context, user sqlc.User, id uuid.UUI
 	err = s.tx(ctx, func(tx pgx.Tx, q *sqlc.Queries) error {
 		// 同一场会议一次只发一个，免得连点几下发出好几张卡片。先锁住会议这一行，
 		// 同时到的两个请求排队检查，后一个能看到前一个刚记下的「发送中」
-		if _, err := q.LockMeeting(ctx, id); err != nil {
+		m, err := q.LockMeeting(ctx, id)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && m.DeletedAt != nil) {
+			return errNoMeeting
+		}
+		if err != nil {
 			return err
+		}
+		// 上面的检查是在锁外面做的：等锁（和问飞书有哪些群）的时候权限可能被收回了、纪要可能重新生成了，锁住以后按现在的再看一遍
+		access, err := accessIn(ctx, q, user, m)
+		if err != nil {
+			return err
+		}
+		if !access.View {
+			return errNoMeeting
+		}
+		if !access.Edit {
+			return errNotAllowed
+		}
+		if m.CurrentVersion == 0 {
+			return conflict("这场会议还没有纪要，等生成以后再发")
+		}
+		if version != 0 && version != m.CurrentVersion {
+			return conflict("纪要刚刚更新成了第 %d 版，和你看到的第 %d 版不一样。请看一下新的纪要，再重新发送", m.CurrentVersion, version)
 		}
 		if n, err := q.PendingShare(ctx, id); err != nil {
 			return err

@@ -119,9 +119,10 @@ var feishuLinkStartOp = huma.Operation{
 	Path:        "/api/me/feishu/link",
 	Summary:     "关联飞书：输入密码后发起",
 	Description: "核对当前密码，通过后返回飞书授权页的地址（浏览器整页打开），同时在 Cookie 里存下这次关联的 state。" +
-		"密码不对时返回 422。要求输入密码，是为了只拿到登录状态的人没法把自己的飞书账号关联上来。",
+		"密码不对时返回 422。要求输入密码，是为了只拿到登录状态的人没法把自己的飞书账号关联上来。" +
+		"只能在网页上调用：飞书跳回来时要认出网页上登录着的人，App 的令牌做不到。",
 	Tags:     []string{"账号"},
-	Security: loggedIn,
+	Security: browserOnly,
 }
 
 func (h *Handlers) FeishuLinkStart(ctx context.Context, in *FeishuLinkStartInput) (*FeishuLinkStartOutput, error) {

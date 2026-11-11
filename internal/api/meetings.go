@@ -213,7 +213,7 @@ func (h *Handlers) ListMeetings(ctx context.Context, in *ListMeetingsInput) (*Li
 type CreateMeetingInput struct {
 	Body struct {
 		Title    string `json:"title,omitempty" maxLength:"200" doc:"留空会用当前时间起一个"`
-		Source   string `json:"source" enum:"upload,record"`
+		Source   string `json:"source" enum:"upload,record,desktop" doc:"upload 是上传文件，record 是网页录音，desktop 是桌面版录音"`
 		Template string `json:"template,omitempty" doc:"纪要模板的 ID，留空用通用模板"`
 		Hotwords string `json:"hotwords,omitempty" maxLength:"500" doc:"人名、产品名等专有名词，用逗号分开"`
 		// 指定具体的人要在建好以后用「谁能看」接口设置

@@ -44,6 +44,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/apps/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 允许一个 App 登录自己的账号
+         * @description 网页上的授权页点「允许」时调用，返回一次性的授权码（2 分钟内有效，只能用一次，和 code_challenge 绑定）。只能在网页上登录后调用，带 App 令牌调用返回 403：App 不能自己给自己发新的令牌。
+         */
+        post: operations["authorize-app"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/apps/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * App 退出登录
+         * @description 作废请求里带的这个 App 令牌。只能带 App 令牌调用。
+         */
+        post: operations["app-logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/apps/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 用授权码换 App 令牌
+         * @description 不用登录。授权码不管换没换成功都用掉了。授权码不对、过期、用过了、和 code_verifier 对不上，都返回同一个 422。
+         */
+        post: operations["app-token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ask": {
         parameters: {
             query?: never;
@@ -215,6 +275,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/me/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 登录着的 App
+         * @description 自己的账号在哪些 App 上登录着，新登录的在前。
+         */
+        get: operations["list-devices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/me/devices/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 让一台 App 退出登录
+         * @description 只能是自己的。那台 App 的令牌立刻失效，要再用得重新登录。
+         */
+        delete: operations["delete-device"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/me/feishu": {
         parameters: {
             query?: never;
@@ -250,7 +350,7 @@ export interface paths {
         put?: never;
         /**
          * 关联飞书：输入密码后发起
-         * @description 核对当前密码，通过后返回飞书授权页的地址（浏览器整页打开），同时在 Cookie 里存下这次关联的 state。密码不对时返回 422。要求输入密码，是为了只拿到登录状态的人没法把自己的飞书账号关联上来。
+         * @description 核对当前密码，通过后返回飞书授权页的地址（浏览器整页打开），同时在 Cookie 里存下这次关联的 state。密码不对时返回 422。要求输入密码，是为了只拿到登录状态的人没法把自己的飞书账号关联上来。只能在网页上调用：飞书跳回来时要认出网页上登录着的人，App 的令牌做不到。
          */
         post: operations["feishu-link-start"];
         delete?: never;
@@ -270,7 +370,7 @@ export interface paths {
         put?: never;
         /**
          * 修改自己的密码
-         * @description 成功后当前设备保持登录，其他设备上的登录全部失效。
+         * @description 成功后当前设备保持登录，其他设备上的登录全部失效，登录着的 App 也全部退出（在 App 里改的话，这台 App 不退出）。
          */
         post: operations["change-password"];
         delete?: never;
@@ -1180,6 +1280,17 @@ export interface components {
             password: string;
             token: string;
         };
+        AppTokenInputBody: {
+            /** @description 授权页给的授权码 */
+            code: string;
+            /** @description PKCE 的 code_verifier（43 到 128 个字符），它的 S256 要和授权时的 code_challenge 一样 */
+            code_verifier: string;
+        };
+        AppTokenOutputBody: {
+            /** @description App 令牌，形如 zsm_…。之后的请求放在 Authorization: Bearer 里。只在这里出现一次，服务器上只存它的哈希 */
+            token: string;
+            user: components["schemas"]["User"];
+        };
         AskInputBody: {
             /** @description 只问这一场会议（会议的 ID）；不填表示在自己能看的所有会议里找 */
             meeting_id?: string;
@@ -1208,6 +1319,18 @@ export interface components {
              * @description 问题限定的结束日期（含），没限定时没有这一项
              */
             to?: string;
+        };
+        AuthorizeAppInputBody: {
+            /** @description 哪种 App，目前只有 desktop */
+            client: string;
+            /** @description base64url(SHA-256(code_verifier))，不补 =，43 个字符 */
+            code_challenge: string;
+            /** @description 设备名（电脑名），账号页上显示。去掉首尾空白后不能为空，最长 100 个字 */
+            device_name: string;
+        };
+        AuthorizeAppOutputBody: {
+            /** @description 一次性的授权码，2 分钟内有效。网页把它带在 zsmeet://auth?code=…&state=… 里交给 App */
+            code: string;
         };
         ChangePasswordInputBody: {
             current_password: string;
@@ -1264,8 +1387,11 @@ export interface components {
         CreateMeetingInputBody: {
             /** @description 人名、产品名等专有名词，用逗号分开 */
             hotwords?: string;
-            /** @enum {string} */
-            source: "upload" | "record";
+            /**
+             * @description upload 是上传文件，record 是网页录音，desktop 是桌面版录音
+             * @enum {string}
+             */
+            source: "upload" | "record" | "desktop";
             /** @description 纪要模板的 ID，留空用通用模板 */
             template?: string;
             /** @description 留空会用当前时间起一个 */
@@ -1275,6 +1401,32 @@ export interface components {
              * @enum {string}
              */
             visibility?: "team" | "private";
+        };
+        Device: {
+            /**
+             * @description 哪种 App：desktop 是桌面版
+             * @enum {string}
+             */
+            client: "desktop";
+            /**
+             * Format: date-time
+             * @description 什么时候登录的
+             */
+            created_at: string;
+            /** @description 是不是发这个请求的这台 App */
+            current: boolean;
+            /** @description 设备名（电脑名） */
+            device_name: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: date-time
+             * @description 上次使用的时间，大约精确到分钟。登录以后还没用过时没有这一项
+             */
+            last_used_at?: string;
+        };
+        DevicesOutputBody: {
+            items: components["schemas"]["Device"][];
         };
         EditMinutesInputBody: {
             /** @description Markdown */
@@ -1613,10 +1765,10 @@ export interface components {
              */
             progress: number;
             /**
-             * @description 录音从哪来：网页录音、上传文件、飞书会议
+             * @description 录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）
              * @enum {string}
              */
-            source: "record" | "upload" | "feishu";
+            source: "record" | "upload" | "feishu" | "desktop";
             /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
             speakers: {
                 [key: string]: string;
@@ -1694,10 +1846,10 @@ export interface components {
              */
             progress: number;
             /**
-             * @description 录音从哪来：网页录音、上传文件、飞书会议
+             * @description 录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）
              * @enum {string}
              */
-            source: "record" | "upload" | "feishu";
+            source: "record" | "upload" | "feishu" | "desktop";
             /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
             speakers: {
                 [key: string]: string;
@@ -1922,6 +2074,11 @@ export interface components {
             url: string;
         };
         StatusOutputBody: {
+            /**
+             * Format: int64
+             * @description 接口的版本号，从 1 开始。App 发现服务器的版本比自己需要的旧时，提示升级服务器
+             */
+            api: number;
             /** @description 登录页上是否显示「用飞书登录」 */
             feishu_login: boolean;
             /** @description 是否配置了飞书（可以把纪要发到飞书）；只对登录用户有意义 */
@@ -2020,10 +2177,10 @@ export interface components {
              */
             purge_at: string;
             /**
-             * @description 录音从哪来：网页录音、上传文件、飞书会议
+             * @description 录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）
              * @enum {string}
              */
-            source: "record" | "upload" | "feishu";
+            source: "record" | "upload" | "feishu" | "desktop";
             /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
             speakers: {
                 [key: string]: string;
@@ -2219,6 +2376,99 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LinkInfoOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "authorize-app": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorizeAppInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthorizeAppOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "app-logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "app-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppTokenInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppTokenOutputBody"];
                 };
             };
             /** @description Error */
@@ -2498,6 +2748,64 @@ export interface operations {
             query?: never;
             header?: never;
             path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "list-devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DevicesOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "delete-device": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;

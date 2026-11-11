@@ -34,11 +34,26 @@ const (
 
 type userKey struct{}
 
-// 接口对登录状态的要求，写在 Operation.Security 里，文档里也看得到
+// appTokenKey 下放的是这次请求用的 App 令牌（*service.AppToken）；网页的请求没有
+type appTokenKey struct{}
+
+// bearerKey 下放的是请求头 Authorization: Bearer 里的令牌原文，还没有核对过
+type bearerKey struct{}
+
+// 接口对登录状态的要求，写在 Operation.Security 里，文档里也看得到。
+// session 是网页登录后的 Cookie，bearer 是 App 令牌（Authorization: Bearer zsm_…），两种都行的接口两种都列上
 var (
-	loggedIn  = []map[string][]string{{"session": {}}}
-	adminOnly = []map[string][]string{{"session": {"admin"}}}
+	loggedIn  = []map[string][]string{{"session": {}}, {"bearer": {}}}
+	adminOnly = []map[string][]string{{"session": {"admin"}}, {"bearer": {"admin"}}}
+	// 只能在网页上登录后调用：给 App 发授权码（App 不能用自己的令牌再发新令牌）、关联飞书（要在浏览器里跳转）
+	browserOnly = []map[string][]string{{"session": {}}}
+	// 只能带 App 令牌调用：App 退出登录
+	appOnly = []map[string][]string{{"bearer": {}}}
 )
+
+// 不要求登录、但带着 App 令牌也能调用的接口。其余不要求登录的接口（登录、退出、初始化、用飞书登录……）
+// 都要读写网页的会话，带着 App 令牌的请求不碰会话，所以不让调
+var bearerPublic = map[string]bool{"get-status": true, "app-token": true}
 
 // NewSessions 返回登录会话的配置，线上和测试共用这一份。
 //
@@ -72,7 +87,8 @@ type Handlers struct {
 // newHandlers 在 mux 上注册所有接口。svc 和 sess 传 nil 时只能用来导出接口文档。
 func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionManager, proxies []netip.Prefix, version string) *Handlers {
 	cfg := huma.DefaultConfig("zsmeet", version)
-	cfg.Info.Description = "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login 和用飞书登录的 /api/auth/feishu/… 以外都需要先登录。"
+	cfg.Info.Description = "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login、用飞书登录的 /api/auth/feishu/… 和 App 换令牌的 /api/apps/token 以外都需要先登录。" +
+		"网页用登录后的 Cookie；App（桌面版）用 Authorization: Bearer 带上 App 令牌，和网页的登录一样有效。"
 	cfg.OpenAPIPath = "/api/openapi"
 	cfg.DocsPath = "/api/docs"
 	cfg.SchemasPath = "/api/schemas"
@@ -80,6 +96,7 @@ func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionMana
 	cfg.CreateHooks = nil
 	cfg.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
 		"session": {Type: "apiKey", In: "cookie", Name: CookieName},
+		"bearer":  {Type: "http", Scheme: "bearer", Description: "App 令牌（zsm_ 开头），用授权码换来，见 POST /api/apps/token"},
 	}
 
 	h := &Handlers{svc: svc, sess: sess, proxies: proxies}
@@ -103,7 +120,31 @@ func NewHandler(svc *service.Service, sess *scs.SessionManager, web fs.FS, proxi
 	// 录音要支持拖动进度（HTTP Range），用标准库直接发文件
 	mux.HandleFunc("GET /api/meetings/{id}/audio", h.audio)
 	mux.Handle("/", spa(web))
-	return securityHeaders(sess.LoadAndSave(mux))
+	withSession := sess.LoadAndSave(mux)
+	return securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token, ok := bearerToken(r); ok {
+			// 带 App 令牌的请求只认令牌：不读网页的会话 Cookie，也不发新的
+			r.Header.Del("Cookie")
+			mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), bearerKey{}, token)))
+			return
+		}
+		withSession.ServeHTTP(w, r)
+	}))
+}
+
+// bearerToken 取出请求头 Authorization: Bearer 里的令牌。别的认证方式（比如反向代理加的 Basic）不管，照常按 Cookie 认人。
+func bearerToken(r *http.Request) (string, bool) {
+	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	return strings.TrimSpace(token), true
+}
+
+// usesBearer 表示这次请求带着 App 令牌（不管令牌对不对）。
+func usesBearer(ctx context.Context) bool {
+	_, ok := ctx.Value(bearerKey{}).(string)
+	return ok
 }
 
 type clientIPKey struct{}
@@ -196,28 +237,80 @@ func trusted(addr netip.Addr, proxies []netip.Prefix) bool {
 }
 
 // authenticate 给需要登录的接口查出当前用户，放进 context。
+// 网页的请求按会话 Cookie 认人，带 App 令牌的按令牌认人；接口的 Security 里列了哪种才能用哪种。
 func (h *Handlers) authenticate(ctx huma.Context, next func(huma.Context)) {
-	need := ctx.Operation().Security
+	op := ctx.Operation()
+	need := op.Security
+	bearer := usesBearer(ctx.Context())
 	if len(need) == 0 {
+		if bearer && !bearerPublic[op.OperationID] {
+			huma.WriteErr(h.api, ctx, http.StatusBadRequest, "这个接口只能在网页上用，请求里不要带 App 令牌")
+			return
+		}
 		next(ctx)
 		return
 	}
-	user, err := h.sessionUser(ctx.Context())
+	user, token, err := h.requestUser(ctx.Context())
 	if err != nil {
 		writeErr(h.api, ctx, err)
 		return
 	}
-	if slices.Contains(need[0]["session"], "admin") && user.Role != "admin" {
+	scheme := "session"
+	if bearer {
+		scheme = "bearer"
+	}
+	scopes, ok := allowedScopes(need, scheme)
+	if !ok {
+		if bearer {
+			huma.WriteErr(h.api, ctx, http.StatusForbidden, "这个操作只能在网页上登录后做，App 里做不了")
+		} else {
+			huma.WriteErr(h.api, ctx, http.StatusUnauthorized, "这个接口只给 App 用，请求里要带 App 令牌")
+		}
+		return
+	}
+	if slices.Contains(scopes, "admin") && user.Role != "admin" {
 		huma.WriteErr(h.api, ctx, http.StatusForbidden, "只有管理员能做这个操作")
 		return
 	}
-	next(huma.WithValue(ctx, userKey{}, user))
+	ctx = huma.WithValue(ctx, userKey{}, user)
+	if token != nil {
+		ctx = huma.WithValue(ctx, appTokenKey{}, token)
+	}
+	next(ctx)
+}
+
+// allowedScopes 在接口的 Security 里找这种登录方式，返回它要求的权限（比如 admin）。没列这种方式时 ok 为 false。
+func allowedScopes(need []map[string][]string, scheme string) ([]string, bool) {
+	for _, alt := range need {
+		if scopes, ok := alt[scheme]; ok {
+			return scopes, true
+		}
+	}
+	return nil, false
 }
 
 var errNotLoggedIn = &service.Error{Kind: service.Unauthorized, Msg: "请先登录"}
 
+// requestUser 找出发请求的人：带着 App 令牌的按令牌找，否则按网页的会话找。
+// 用的是 App 令牌时，第二个返回值是这个令牌，否则为 nil。
+func (h *Handlers) requestUser(ctx context.Context) (sqlc.User, *service.AppToken, error) {
+	if token, ok := ctx.Value(bearerKey{}).(string); ok {
+		user, t, err := h.svc.AppTokenUser(ctx, token)
+		if err != nil {
+			return sqlc.User{}, nil, err
+		}
+		return user, &t, nil
+	}
+	user, err := h.sessionUser(ctx)
+	return user, nil, err
+}
+
 // sessionUser 从会话里找出当前用户。每次都查数据库，账号被停用后立刻失效。
+// 带着 App 令牌的请求没有会话，一律当作没登录（要认人用 requestUser）。
 func (h *Handlers) sessionUser(ctx context.Context) (sqlc.User, error) {
+	if usesBearer(ctx) {
+		return sqlc.User{}, errNotLoggedIn
+	}
 	id, err := uuid.Parse(h.sess.GetString(ctx, sessionUserKey))
 	if err != nil {
 		return sqlc.User{}, errNotLoggedIn
@@ -228,6 +321,12 @@ func (h *Handlers) sessionUser(ctx context.Context) (sqlc.User, error) {
 // currentUser 取出 authenticate 放进去的用户。只能在需要登录的接口里用。
 func currentUser(ctx context.Context) sqlc.User {
 	return ctx.Value(userKey{}).(sqlc.User)
+}
+
+// currentAppToken 取出这次请求用的 App 令牌；网页的请求返回 nil。只能在需要登录的接口里用。
+func currentAppToken(ctx context.Context) *service.AppToken {
+	t, _ := ctx.Value(appTokenKey{}).(*service.AppToken)
+	return t
 }
 
 // status 把业务错误的种类对应到 HTTP 状态码；不认识的错误一律 500，细节只进日志。
@@ -275,9 +374,9 @@ func parseID(s string) (uuid.UUID, error) {
 	return id, nil
 }
 
-// audio 回放录音。
+// audio 回放录音。网页按会话 Cookie 认人，App 按令牌认人。
 func (h *Handlers) audio(w http.ResponseWriter, r *http.Request) {
-	user, err := h.sessionUser(r.Context())
+	user, _, err := h.requestUser(r.Context())
 	if err != nil {
 		code, msg := status(err)
 		http.Error(w, msg, code)

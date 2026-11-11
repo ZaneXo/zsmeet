@@ -54,7 +54,7 @@ export function AccountLinkPage({ token }: { token: string }) {
       subtitle={
         invite
           ? `${link.invited_by || "管理员"}邀请你加入团队的会议纪要系统。填好下面两项就能开始用。`
-          : `给 ${link.name} 的账号设置一个新密码。保存后，这个账号在其他设备上的登录会全部退出。`
+          : `给 ${link.name} 的账号设置一个新密码。保存后，这个账号在其他设备上的登录会全部退出，已登录的 App 也会退出。`
       }
     >
       <form onSubmit={submit} className="flex flex-col gap-4">

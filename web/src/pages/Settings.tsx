@@ -4,8 +4,9 @@ import type { FormEvent } from "react";
 import { useParams } from "react-router";
 import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
-import type { User } from "../api/client";
-import { Button, Card, Field, Input, Notice, Select, Spinner } from "../components/ui";
+import type { Device, User } from "../api/client";
+import { Button, Card, Chip, Field, Input, Notice, Select, Spinner } from "../components/ui";
+import { APP_NAMES } from "../lib/appAuthorize";
 import { useFeishuResult } from "../lib/feishuAuth";
 import { feishuErrorText } from "../lib/feishuErrors";
 import { dateTime } from "../lib/format";
@@ -92,8 +93,71 @@ function AccountSection({ user }: { user: User }) {
         )}
       </Card>
       <FeishuLinkCard />
+      <DevicesCard />
       <ChangePasswordCard email={user.email} />
     </div>
+  );
+}
+
+/** 已登录的 App：在哪些电脑上用 zsmeet 桌面版登录着，可以让某一台退出。 */
+function DevicesCard() {
+  const devices = useQuery({
+    queryKey: ["me", "devices"],
+    queryFn: () => unwrap(api.GET("/api/me/devices")),
+  });
+  const revoke = useMutation({
+    mutationFn: (id: string) => unwrap(api.DELETE("/api/me/devices/{id}", { params: { path: { id } } })),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["me", "devices"] }),
+  });
+  const items = devices.data?.items;
+  return (
+    <Card className="flex flex-col gap-3 p-6">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-lg font-bold">已登录的 App</h2>
+        <p className="text-[13px] leading-relaxed text-muted">
+          在 zsmeet 桌面版里点「在浏览器里登录」并允许以后，那台电脑会出现在这里。电脑丢了、不再用了，就点「退出」，那台电脑要重新登录才能用。
+        </p>
+      </div>
+      {devices.isPending && <Spinner label="正在读取…" />}
+      {devices.isError && (
+        <div className="flex flex-col items-start gap-2">
+          <Notice tone="bad">读不到已登录的 App：{errorMessage(devices.error)}</Notice>
+          <Button size="sm" disabled={devices.isFetching} onClick={() => devices.refetch()}>
+            {devices.isFetching ? "正在重试…" : "重试"}
+          </Button>
+        </div>
+      )}
+      {items && items.length === 0 && <p className="text-sm text-ink-2">还没有在 App 里登录过。</p>}
+      {items && items.length > 0 && (
+        <ul className="divide-y divide-line rounded-xl border border-line">
+          {items.map((d) => (
+            <DeviceRow key={d.id} device={d} busy={revoke.isPending && revoke.variables === d.id} onRevoke={() => revoke.mutate(d.id)} />
+          ))}
+        </ul>
+      )}
+      {revoke.isError && <Notice tone="bad">{errorMessage(revoke.error)}</Notice>}
+    </Card>
+  );
+}
+
+function DeviceRow({ device: d, busy, onRevoke }: { device: Device; busy: boolean; onRevoke: () => void }) {
+  return (
+    <li className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-semibold" title={d.device_name}>
+            {d.device_name}
+          </span>
+          {d.current && <Chip tone="info">就是这台</Chip>}
+        </div>
+        <span className="text-xs text-muted">
+          {APP_NAMES[d.client]} · {dateTime(d.created_at)} 登录 · {d.last_used_at ? `上次使用 ${dateTime(d.last_used_at)}` : "登录以后还没用过"}
+        </span>
+      </div>
+      <Button size="sm" disabled={busy} onClick={onRevoke}>
+        {busy ? "正在退出…" : "退出"}
+      </Button>
+    </li>
   );
 }
 
@@ -220,8 +284,9 @@ function ChangePasswordCard({ email }: { email: string }) {
       setCurrent("");
       setNext("");
       setAgain("");
-      // 改了密码，飞书的关联也解除了
+      // 改了密码，飞书的关联也解除了，App 也都退出了
       void queryClient.invalidateQueries({ queryKey: ["me", "feishu"] });
+      void queryClient.invalidateQueries({ queryKey: ["me", "devices"] });
     },
   });
   const mismatch = again.length > 0 && next !== again;
@@ -237,7 +302,7 @@ function ChangePasswordCard({ email }: { email: string }) {
         <input type="email" name="username" autoComplete="username" value={email} readOnly hidden />
         <div className="flex flex-col gap-1">
           <h2 className="text-lg font-bold">修改密码</h2>
-          <p className="text-[13px] leading-relaxed text-muted">改完以后这台设备保持登录，其他设备上的登录会全部退出；关联了飞书的话，关联也会解除，需要时再关联一次。忘了当前密码的话，请管理员帮你重置。</p>
+          <p className="text-[13px] leading-relaxed text-muted">改完以后这台设备保持登录，其他设备上的登录会全部退出，已登录的 App 也会退出（要在 App 里重新登录）；关联了飞书的话，关联也会解除，需要时再关联一次。忘了当前密码的话，请管理员帮你重置。</p>
         </div>
         <Field label="当前密码" htmlFor="pw-current">
           <Input id="pw-current" type="password" className="max-w-sm" value={current} onChange={(e) => { setCurrent(e.target.value); change.reset(); }} required autoComplete="current-password" />
@@ -250,7 +315,7 @@ function ChangePasswordCard({ email }: { email: string }) {
         </Field>
         {mismatch && <Notice tone="warn">两次输入的新密码不一样。</Notice>}
         {change.isError && <Notice tone="bad">{errorMessage(change.error)}</Notice>}
-        {change.isSuccess && <Notice tone="ok">密码已修改。其他设备上的登录已经退出，和飞书的关联（如果有）也解除了。</Notice>}
+        {change.isSuccess && <Notice tone="ok">密码已修改。其他设备上的登录和已登录的 App 都已经退出，和飞书的关联（如果有）也解除了。</Notice>}
         <div>
           <Button type="submit" variant="primary" disabled={change.isPending || mismatch}>
             {change.isPending ? "正在保存…" : "修改密码"}

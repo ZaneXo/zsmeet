@@ -62,8 +62,9 @@ export function SetupPage() {
 /**
  * 登录页。管理员打开了飞书登录时多一个「用飞书登录」：普通的链接，整页跳到飞书的授权页，登录完飞书跳回首页。
  * 用飞书登录没成功时，飞书跳回来的地址里带着原因的代号（见 useFeishuResult）。
+ * App 的授权页借用它时会换一句副标题，并在跳去飞书之前记下授权页的地址（beforeFeishu）。
  */
-export function LoginPage({ feishuLogin }: { feishuLogin: boolean }) {
+export function LoginPage({ feishuLogin, subtitle, beforeFeishu }: { feishuLogin: boolean; subtitle?: string; beforeFeishu?: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const { error: feishuError } = useFeishuResult();
@@ -78,7 +79,7 @@ export function LoginPage({ feishuLogin }: { feishuLogin: boolean }) {
   };
 
   return (
-    <AuthLayout title="登录 zsmeet" subtitle="会议录音自动转写，生成纪要">
+    <AuthLayout title="登录 zsmeet" subtitle={subtitle ?? "会议录音自动转写，生成纪要"}>
       {lastError && (
         <div className="mb-4">
           <Notice tone="bad">{lastError}</Notice>
@@ -86,7 +87,7 @@ export function LoginPage({ feishuLogin }: { feishuLogin: boolean }) {
       )}
       {feishuLogin && (
         <>
-          <a href="/api/auth/feishu/start" className={`${buttonClass("primary")} w-full`}>
+          <a href="/api/auth/feishu/start" onClick={beforeFeishu} className={`${buttonClass("primary")} w-full`}>
             用飞书登录
           </a>
           <p className="mt-2 text-center text-xs leading-relaxed text-muted">用飞书扫码，或者在飞书网页版已经登录时点一下就行</p>

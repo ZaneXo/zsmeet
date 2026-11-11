@@ -3,7 +3,9 @@ import { Navigate, Route, Routes, useLocation } from "react-router";
 import { api, errorMessage, unwrap } from "./api/client";
 import { Shell } from "./components/Shell";
 import { Button, Notice, Spinner } from "./components/ui";
+import { APP_AUTHORIZE_PATH, pendingAuthorize } from "./lib/appAuthorize";
 import { AccountLinkPage } from "./pages/AccountLink";
+import { AppAuthorizePage } from "./pages/AppAuthorize";
 import { LoginPage, SetupPage } from "./pages/Auth";
 import { MeetingDetailPage } from "./pages/MeetingDetail";
 import { MeetingsPage } from "./pages/Meetings";
@@ -41,8 +43,15 @@ export function App() {
       </div>
     );
   }
+  // App（桌面版）登录的授权页：不在平常的界面框架里，没登录时它自己先显示登录表单
+  if (pathname === APP_AUTHORIZE_PATH) return <AppAuthorizePage status={data} />;
   if (!data.initialized) return <SetupPage />;
   if (!data.user) return <LoginPage feishuLogin={data.feishu_login} />;
+  // 从授权页去用飞书登录，登录完被带回了首页：接着打开授权页
+  if (pathname === "/") {
+    const pending = pendingAuthorize();
+    if (pending) return <Navigate to={APP_AUTHORIZE_PATH + pending} replace />;
+  }
 
   return (
     <Shell user={data.user}>

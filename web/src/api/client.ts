@@ -18,6 +18,7 @@ export type Invite = components["schemas"]["Invite"];
 export type LinkInfo = components["schemas"]["LinkInfoOutputBody"];
 export type AskAnswer = components["schemas"]["AskOutputBody"];
 export type Citation = components["schemas"]["Citation"];
+export type Device = components["schemas"]["Device"];
 
 export const api = createClient<paths>({ baseUrl: "", credentials: "same-origin" });
 

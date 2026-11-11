@@ -45,6 +45,7 @@ export const SOURCE_LABEL: Record<Meeting["source"], string> = {
   upload: "上传文件",
   record: "网页录音",
   feishu: "飞书会议",
+  desktop: "电脑录音",
 };
 
 export const STAGE_LABEL: Record<Meeting["stage"], string> = {

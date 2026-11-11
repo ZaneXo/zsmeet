@@ -385,6 +385,16 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
 
   if (m.status === "uploading" && m.source === "record") return <UnfinishedRecording meeting={m} user={user} />;
 
+  if (m.status === "uploading" && m.source === "desktop") {
+    return (
+      <Notice tone="info">
+        {m.can_manage
+          ? "这场会议是用 zsmeet 桌面版在电脑上录的。录音会从那台电脑自动传上来（断网时等联网以后接着传），传完以后开始处理。"
+          : `${m.owner_name} 正在用 zsmeet 桌面版录这场会议，录音传完以后才会开始处理。`}
+      </Notice>
+    );
+  }
+
   if (m.status === "uploading") {
     return (
       <Notice tone="warn">

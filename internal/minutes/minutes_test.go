@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ZaneXo/zsmeet/internal/llm"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
@@ -72,6 +75,45 @@ func TestGenerateLongMeetingSplits(t *testing.T) {
 	}
 	if out.Content != "## 摘要\n汇总。" {
 		t.Errorf("输出不对：%+v", out)
+	}
+}
+
+// 每段放多少字跟着 Input.MaxChars 走：同一场会，上下文 32K（每段 2 万字）时一次写完，8K（每段 3000 字）时要分段
+func TestGenerateSplitsByMaxChars(t *testing.T) {
+	calls := func(maxChars int) (n int, longest int) {
+		chat := func(_ context.Context, system, user string) (string, error) {
+			n++
+			if strings.Contains(system, "长会议转写的第") {
+				longest = max(longest, len([]rune(user)))
+			}
+			return "## 摘要\n定了一期范围。", nil
+		}
+		in := input(60) // 每句约 150 字，60 句约 9000 字
+		in.MaxChars = maxChars
+		if _, err := Generate(t.Context(), chat, in, nil); err != nil {
+			t.Fatal(err)
+		}
+		return n, longest
+	}
+	if n, _ := calls(0); n != 1 {
+		t.Errorf("没给 MaxChars 时按每段 2 万字，9000 字的会一次写完，实际调用 %d 次", n)
+	}
+	if n, _ := calls(20_000); n != 1 {
+		t.Errorf("每段 2 万字时一次写完，实际调用 %d 次", n)
+	}
+	n, longest := calls(3_000)
+	if n != 5 {
+		t.Errorf("每段 3000 字时应该分成 4 段再汇总，共 5 次，实际 %d 次", n)
+	}
+	if longest == 0 || longest > 3_000 {
+		t.Errorf("每段的转写不能超过 3000 字，最长的一段 %d 字", longest)
+	}
+}
+
+// 没给 MaxChars 时和没设置上下文长度（按 32K）时算出来的一样
+func TestDefaultMaxCharsMatchesDefaultContext(t *testing.T) {
+	if got := llm.TranscriptChars(0); got != defaultMaxChars {
+		t.Errorf("默认每段 %d 字，按默认上下文算出来是 %d 字", defaultMaxChars, got)
 	}
 }
 
@@ -301,5 +343,118 @@ func TestRenameSpeakersAmbiguous(t *testing.T) {
 	// 英文名要整个单词对上
 	if got := RenameSpeakers("Li 说 Linux 要升级，Li。", transcript.Names{0: "Li"}, map[int][2]string{0: {"Li", "Li Wei"}}); got != "Li Wei 说 Linux 要升级，Li Wei。" {
 		t.Errorf("英文名：%s", got)
+	}
+}
+
+// 上下文小（每次 3000 字）、会又长（约 3 万字）时，各段要点合起来放不进一次汇总，要一层层合并：
+// 每次调用交给大模型的内容都不超过 3000 字（加上标题、模板这些固定的话），各段的要点、标记的重点都要一路传到最后汇总那一次。
+func TestLongMeetingMergesNotesInLayers(t *testing.T) {
+	const limit = 3_000
+	partNo := regexp.MustCompile(`长会议转写的第 (\d+) 部分`)
+	point := regexp.MustCompile(`(★ )?\[\d\d:\d\d\] 要点 P\d+`)
+	filler := strings.Repeat("大家讨论了一期范围和排期细节。", 50) // 750 字
+	var users, mergeSystems []string
+	var finalSystem, finalUser string
+	parts := 0
+	chat := func(_ context.Context, system, user string) (string, error) {
+		users = append(users, user)
+		switch {
+		case strings.Contains(system, "长会议转写的第"):
+			parts++
+			k := partNo.FindStringSubmatch(system)[1]
+			out := "- [00:00] 要点 P" + k + "：" + filler
+			if strings.Contains(user, "【★ 00:15 标记为重点】") {
+				out = "- ★ [00:15] 要点 P" + k + "：定了一期范围\n" + out
+			}
+			return out + "\n\n```terms\n{\"terms\": [{\"term\": \"飞书\", \"variants\": [\"非书" + k + "\"]}]}\n```", nil
+		case strings.Contains(system, "合并成一份更精简的要点"):
+			mergeSystems = append(mergeSystems, system)
+			// 只留下各条要点的开头（时间点、★、编号），再加上一些字，让合并出的要点也放不进一次汇总
+			var out []string
+			for _, p := range point.FindAllString(user, -1) {
+				out = append(out, "- "+p)
+			}
+			return strings.Join(out, "\n") + "\n- " + strings.Repeat("合并后的讨论。", 120) + "\n\n```terms\n{\"terms\": []}\n```", nil
+		}
+		finalSystem, finalUser = system, user
+		return "## 摘要\n汇总。", nil
+	}
+	in := input(200) // 每句约 150 字，200 句约 3 万字
+	in.MaxChars = limit
+	in.Marks = []float64{15}
+	var progress [][2]int
+	out, err := Generate(t.Context(), chat, in, func(done, total int) { progress = append(progress, [2]int{done, total}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parts < 8 {
+		t.Fatalf("3 万字每段 3000 字应该分成 10 段左右，实际 %d 段", parts)
+	}
+	if len(mergeSystems) == 0 {
+		t.Error("要点合起来放不下时要先合并")
+	}
+	// 标题、时间、纪要模板和材料开头那句话是固定的，不算在每次的字数里
+	for i, u := range users {
+		if n := len([]rune(u)); n > limit+300 {
+			t.Errorf("第 %d 次调用交给大模型 %d 字，超过了 %d 字", i+1, n, limit)
+		}
+	}
+	for k := 1; k <= parts; k++ {
+		if !strings.Contains(finalUser, "要点 P"+strconv.Itoa(k)) {
+			t.Errorf("第 %d 部分的要点没有传到最后汇总那一次：\n%s", k, finalUser)
+		}
+	}
+	if !strings.Contains(finalUser, "★ [00:15] 要点 P1") || !strings.Contains(finalUser, "开会的人特意标记为重点的时间点：[00:15]") ||
+		!strings.Contains(finalSystem, "6. 材料最后列出了") {
+		t.Errorf("标记的重点要一路传到汇总：\n%s\n%s", finalSystem, finalUser)
+	}
+	for _, s := range mergeSystems {
+		if !strings.Contains(s, "开头带「★」的条目") || strings.Contains(s, "terms 代码块") {
+			t.Errorf("合并时要保留标记的重点，不要术语表：\n%s", s)
+		}
+	}
+	if strings.Contains(finalUser, "```terms") || strings.Contains(finalSystem, "terms 代码块") {
+		t.Errorf("术语表不能混进要点里，汇总时也不再要：\n%s", finalUser)
+	}
+	if len(out.Terms) != 1 || len(out.Terms[0].Variants) != parts || !out.TermsFound {
+		t.Errorf("各部分的术语表要合在一起：%+v", out.Terms)
+	}
+	// 进度：每次调用加一，done 不超过 total，最后一次 done == total == 调用次数
+	for i, p := range progress {
+		if p[0] != i+1 || p[0] > p[1] {
+			t.Fatalf("进度不对：%v", progress)
+		}
+	}
+	if last := progress[len(progress)-1]; last[0] != len(users) || last[1] != len(users) {
+		t.Errorf("最后的进度应该是 %d/%d，实际 %v", len(users), len(users), last)
+	}
+}
+
+// 大模型不听话、要点写得比要求的长很多时，也要能合并完，不会一直合并下去。
+func TestLongMeetingMergeTerminatesWithLongNotes(t *testing.T) {
+	n := 0
+	chat := func(_ context.Context, system, _ string) (string, error) {
+		n++
+		if n > 100 {
+			return "", errors.New("调用次数太多，合并停不下来")
+		}
+		if strings.Contains(system, "长会议转写的第") || strings.Contains(system, "合并成一份更精简的要点") {
+			return "- [00:00] " + strings.Repeat("很长的要点。", 700), nil
+		}
+		return "## 摘要\n汇总。", nil
+	}
+	in := input(200)
+	in.MaxChars = 3_000
+	var last [2]int
+	if _, err := Generate(t.Context(), chat, in, func(done, total int) {
+		if done > total {
+			t.Errorf("进度 %d/%d 超过了总数", done, total)
+		}
+		last = [2]int{done, total}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if last[0] != n || last[1] != n {
+		t.Errorf("最后的进度应该是 %d/%d，实际 %v", n, n, last)
 	}
 }

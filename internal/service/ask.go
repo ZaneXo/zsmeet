@@ -24,8 +24,6 @@ import (
 const (
 	// 问题最长多少个字
 	maxQuestionChars = 300
-	// 交给大模型的材料大约多少个字。照顾上下文只有 32K 的本地模型，也让回答快一些
-	askBudget = 12_000
 	// 材料最多来自几场会议
 	maxAskMeetings = 6
 	// 每个搜索词最多找多少场会议，再从里面挑最相关的
@@ -105,8 +103,10 @@ func (s *Service) Ask(ctx context.Context, user sqlc.User, in AskInput) (Answer,
 
 	var sources []ask.Source
 	var plan ask.Plan
+	// 交给大模型的材料最多多少字，按管理员设置的上下文长度算（32K 时 1.2 万字）
+	budget := llm.AskChars(cfg.Context())
 	if one != nil {
-		sources, plan, err = s.askOne(ctx, user, *one, question, now, chat)
+		sources, plan, err = s.askOne(ctx, user, *one, question, budget, now, chat)
 	} else {
 		sources, plan, err = s.askAll(ctx, user, question, now, chat)
 	}
@@ -114,7 +114,7 @@ func (s *Service) Ask(ctx context.Context, user sqlc.User, in AskInput) (Answer,
 		return Answer{}, askFailed(ctx, user, err)
 	}
 	out := Answer{Keywords: plan.Keywords, From: plan.From, To: plan.To, Citations: []ask.Citation{}}
-	material := ask.Build(sources, askBudget)
+	material := ask.Build(sources, budget)
 	if material.Meetings == 0 {
 		out.Text = askNothingFound
 		return out, nil
@@ -167,8 +167,8 @@ func (s *Service) plan(ctx context.Context, question string, now time.Time, chat
 	return ask.ParsePlan(out, question, now), nil
 }
 
-// askOne 准备只问一场会议时的材料：纪要和整场转写；放不下时纪要加上按搜索词找到的转写片段。
-func (s *Service) askOne(ctx context.Context, user sqlc.User, m Meeting, question string, now time.Time, chat func(context.Context, string, string) (string, error)) ([]ask.Source, ask.Plan, error) {
+// askOne 准备只问一场会议时的材料：纪要和整场转写；放不下（超过 budget 字）时纪要加上按搜索词找到的转写片段。
+func (s *Service) askOne(ctx context.Context, user sqlc.User, m Meeting, question string, budget int, now time.Time, chat func(context.Context, string, string) (string, error)) ([]ask.Source, ask.Plan, error) {
 	segs, minutesOf, err := s.searchTexts(ctx, []uuid.UUID{m.ID})
 	if err != nil {
 		return nil, ask.Plan{}, err
@@ -181,7 +181,7 @@ func (s *Service) askOne(ctx context.Context, user sqlc.User, m Meeting, questio
 	if len(lines) > 0 {
 		src.Transcript = [][]ask.Line{lines}
 	}
-	if ask.Size(src) <= askBudget {
+	if ask.Size(src) <= budget {
 		return []ask.Source{src}, ask.Plan{}, nil
 	}
 

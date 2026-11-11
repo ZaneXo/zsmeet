@@ -316,6 +316,8 @@ func (r *run) writeMinutes(ctx context.Context, segs []transcript.Segment) error
 		Segments: transcript.Merge(segs, 0.8, 160, marks(r.m.Marks)),
 		Marks:    marks(r.m.Marks),
 		Speakers: transcript.ParseNames(r.m.Speakers),
+		// 每段放多少字按管理员设置的上下文长度算
+		MaxChars: llm.TranscriptChars(cfg.Context()),
 	}, func(done, total int) {
 		r.report(ctx, StageMinutes, float64(done)/float64(total))
 	})

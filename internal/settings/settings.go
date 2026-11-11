@@ -20,11 +20,28 @@ type LLM struct {
 	Model   string `json:"model"`
 	// 自己部署的 Ollama、vLLM 可以不填
 	APIKey string `json:"api_key"`
+	// 模型的上下文长度（token 数），只能是 ContextChoices 里的一档。0 表示没设置过（以前保存的配置里没有这一项），
+	// 按 DefaultContextTokens 算。长会议按它分段交给大模型（见 llm.TranscriptChars）
+	ContextTokens int `json:"context_tokens,omitempty"`
 }
 
 // Ready 表示填了能发请求的最少信息。
 func (l LLM) Ready() bool {
 	return l.BaseURL != "" && l.Model != ""
+}
+
+// DefaultContextTokens 是管理员没设置上下文长度时按多长算：32K，照顾只开了 32K 的本地模型。
+const DefaultContextTokens = 32_768
+
+// ContextChoices 是上下文长度能选的几档（token 数）。最后一档表示「200K 及以上」，再长的也按它算。
+var ContextChoices = []int{8_192, 16_384, 32_768, 65_536, 131_072, 200_000}
+
+// Context 返回按多长的上下文来安排每次交给大模型的内容：没设置过时是 DefaultContextTokens。
+func (l LLM) Context() int {
+	if l.ContextTokens <= 0 {
+		return DefaultContextTokens
+	}
+	return l.ContextTokens
 }
 
 type Store struct {

@@ -82,14 +82,16 @@ type Input struct {
 	Marks []float64
 	// 给说话人起的名字，转写里直接用名字
 	Speakers transcript.Names
+	// 一次请求里最多放多少字的转写，超过就先分段提取要点，再汇总成纪要。按模型的上下文长度算（见 llm.TranscriptChars）；
+	// 0 时用 defaultMaxChars
+	MaxChars int
 }
 
 // ChatFunc 发一轮对话给大模型。
 type ChatFunc func(ctx context.Context, system, user string) (string, error)
 
-// 一次请求里最多放这么多字的转写。超过就先分段提取要点，再汇总成纪要。
-// 取值照顾上下文只有 32K 的本地模型；以后做成可配置。
-const maxCharsPerCall = 20_000
+// 没给 Input.MaxChars 时一次请求里最多放这么多字的转写，和 32K 上下文时 llm.TranscriptChars 算出来的一样
+const defaultMaxChars = 20_000
 
 const rules = `要求：
 1. 只写转写里有依据的内容，不要编造。没提到的负责人、时间写“未定”。
@@ -230,20 +232,20 @@ func UsefulTerm(s string) bool {
 	return utf8.RuneCountInString(s) >= 2 && strings.IndexFunc(s, unicode.IsLetter) >= 0
 }
 
-// Generate 生成纪要（Markdown）。progress 在每完成一次大模型调用后回调。
+// Generate 生成纪要（Markdown）。progress 在每完成一次大模型调用后回调，total 是估计的总调用次数：
+// 长会议要分层合并要点时，做完一层会按实际的要点长度重新估，可能变大或变小，但 done 不会超过 total。
 func Generate(ctx context.Context, chat ChatFunc, in Input, progress func(done, total int)) (Result, error) {
-	parts := split(lines(in), maxCharsPerCall)
+	limit := in.MaxChars
+	if limit <= 0 {
+		limit = defaultMaxChars
+	}
+	parts := split(lines(in), limit)
 	// 有标记的重点时多一条要求，最后那条「用 Markdown 输出」的编号跟着往后挪
 	extra, last := "", 6
 	if len(in.Marks) > 0 {
 		extra, last = markRule, 7
 	}
-	// 分了段就多一次汇总调用
-	total := len(parts)
-	if total > 1 {
-		total++
-	}
-	done := 0
+	done, total := 0, 1
 	step := func() {
 		done++
 		if progress != nil {
@@ -255,28 +257,69 @@ func Generate(ctx context.Context, chat ChatFunc, in Input, progress func(done, 
 	var terms []Term
 	termsFound := false
 	if len(parts) > 1 {
-		// 术语表在每一部分里要：最后汇总那一次只看得到要点，要点里听错的字已经纠正了，看不到转写里的听错写法
-		notes := make([]string, len(parts))
-		for i, part := range parts {
-			system := fmt.Sprintf("你是一名专业的会议记录员。下面是一场长会议转写的第 %d 部分（共 %d 部分）。"+
-				"请提取这一部分的要点：讨论了什么、得出了什么结论、谁要做什么。用 Markdown 列表输出，除了最后的 terms 代码块，不要输出别的话。\n\n"+rules+extra,
-				i+1, len(parts), hotwordRule(in.Hotwords)) + termsRule(last, "要点")
-			note, err := chat(ctx, system, strings.Join(part, "\n"))
-			if err != nil {
-				return Result{}, err
-			}
-			note, partTerms, ok := splitTerms(note)
-			terms, termsFound = mergeTerms(terms, partTerms), termsFound || ok
-			notes[i] = fmt.Sprintf("### 第 %d 部分\n%s", i+1, note)
-			step()
-		}
-		material = "会议较长，下面是按时间顺序分段整理出的要点：\n\n" + strings.Join(notes, "\n\n")
+		// 长会议最后汇总那一次看不到转写，标记的时间点直接列在材料后面
+		marksLine := ""
 		if len(in.Marks) > 0 {
 			clocks := make([]string, len(in.Marks))
 			for i, t := range in.Marks {
 				clocks[i] = "[" + transcript.Clock(t) + "]"
 			}
-			material += "\n\n开会的人特意标记为重点的时间点：" + strings.Join(clocks, "、")
+			marksLine = "\n\n开会的人特意标记为重点的时间点：" + strings.Join(clocks, "、")
+		}
+		// 汇总材料里除了要点本身还有的字：开头一句和标记的时间点
+		fixed := utf8.RuneCountInString(notesHeader + marksLine)
+		noteChars := noteBudget(limit)
+		// 每段一次、汇总一次；要点合起来放不下时还要分层合并，先按每段要点 noteChars 字估
+		total = len(parts) + 1 + mergeCalls(slices.Repeat([]int{noteChars}, len(parts)), limit, fixed, noteChars)
+		replan := func(notes []note) {
+			total = done + 1 + mergeCalls(noteSizes(notes), limit, fixed, noteChars)
+		}
+
+		// 术语表在每一部分里要：后面合并、汇总时只看得到要点，要点里听错的字已经纠正了，看不到转写里的听错写法
+		notes := make([]note, len(parts))
+		for i, part := range parts {
+			system := fmt.Sprintf("你是一名专业的会议记录员。下面是一场长会议转写的第 %d 部分（共 %d 部分）。"+
+				"请提取这一部分的要点：讨论了什么、得出了什么结论、谁要做什么。要点要精简，不超过 %d 字（terms 代码块不算）。"+
+				"用 Markdown 列表输出，除了最后的 terms 代码块，不要输出别的话。\n\n"+rules+extra,
+				i+1, len(parts), noteChars, hotwordRule(in.Hotwords)) + termsRule(last, "要点")
+			out, err := chat(ctx, system, strings.Join(part, "\n"))
+			if err != nil {
+				return Result{}, err
+			}
+			text, partTerms, ok := splitTerms(out)
+			terms, termsFound = mergeTerms(terms, partTerms), termsFound || ok
+			notes[i] = note{from: i + 1, to: i + 1, text: text}
+			step()
+		}
+		replan(notes)
+
+		// 要点合起来超过一次能放的字数，就把相邻几段的要点合并成更精简的要点，一层层合并到放得下为止
+		for len(notes) > 1 && fixed+joinedSize(noteSizes(notes)) > limit {
+			var merged []note
+			for _, g := range group(noteSizes(notes), limit) {
+				batch := notes[g[0]:g[1]]
+				if len(batch) == 1 {
+					// 最后剩下的一条不用单独合并，留到下一层
+					merged = append(merged, batch[0])
+					continue
+				}
+				from, to := batch[0].from, batch[len(batch)-1].to
+				out, err := chat(ctx, mergeSystem(from, to, len(parts), noteChars, len(in.Marks) > 0), joinNotes(batch))
+				if err != nil {
+					return Result{}, err
+				}
+				// 合并时不要术语表，模型多给了也要去掉，不能混进要点里
+				text, moreTerms, ok := splitTerms(out)
+				terms, termsFound = mergeTerms(terms, moreTerms), termsFound || ok
+				merged = append(merged, note{from: from, to: to, text: text})
+				step()
+			}
+			notes = merged
+			replan(notes)
+		}
+
+		material = notesHeader + joinNotes(notes) + marksLine
+		if len(in.Marks) > 0 {
 			extra = markSummaryRule
 		}
 	}
@@ -299,6 +342,107 @@ func Generate(ctx context.Context, chat ChatFunc, in Input, progress func(done, 
 	content, finalTerms, ok := splitTerms(out)
 	terms, termsFound = mergeTerms(finalTerms, terms), termsFound || ok
 	return Result{Content: unwrapFence(content), Terms: terms, TermsFound: termsFound}, nil
+}
+
+const notesHeader = "会议较长，下面是按时间顺序分段整理出的要点：\n\n"
+
+// note 是长会议里第 from 到 to 部分（从 1 数）整理出的要点。
+type note struct {
+	from, to int
+	text     string
+}
+
+func (n note) String() string {
+	if n.from == n.to {
+		return fmt.Sprintf("### 第 %d 部分\n%s", n.from, n.text)
+	}
+	return fmt.Sprintf("### 第 %d 到 %d 部分\n%s", n.from, n.to, n.text)
+}
+
+func joinNotes(notes []note) string {
+	s := make([]string, len(notes))
+	for i, n := range notes {
+		s[i] = n.String()
+	}
+	return strings.Join(s, "\n\n")
+}
+
+func noteSizes(notes []note) []int {
+	sizes := make([]int, len(notes))
+	for i, n := range notes {
+		sizes[i] = utf8.RuneCountInString(n.String())
+	}
+	return sizes
+}
+
+// joinedSize 是几条要点用空行连起来以后的字数。
+func joinedSize(sizes []int) int {
+	n := 0
+	for i, s := range sizes {
+		if i > 0 {
+			n += 2
+		}
+		n += s
+	}
+	return n
+}
+
+// noteBudget 是每段要点（以及每次合并出的要点）要求控制在多少字以内：一段转写的四分之一，按百字取整。
+// 这样一次汇总能放下四段左右的要点，再多就要分层合并。
+func noteBudget(limit int) int {
+	return max(limit/4/100*100, 300)
+}
+
+// group 把按时间顺序排好的要点分成相邻的几组，每组合起来不超过 limit 字，返回每组的 [开始, 结束)。
+// 每组至少两条（最后只剩一条时除外）：哪怕有一条要点自己就超过了 limit，每合并一层条数也一定会变少，不会一直合并下去。
+func group(sizes []int, limit int) [][2]int {
+	var groups [][2]int
+	start, size := 0, 0
+	for i, n := range sizes {
+		if i-start >= 2 && size+2+n > limit {
+			groups = append(groups, [2]int{start, i})
+			start, size = i, 0
+		}
+		if i > start {
+			size += 2
+		}
+		size += n
+	}
+	return append(groups, [2]int{start, len(sizes)})
+}
+
+// mergeCalls 估计要点合起来放进一次汇总还要合并几次：sizes 是现在各条要点的字数，合并出的要点按 noteChars 字算。
+func mergeCalls(sizes []int, limit, fixed, noteChars int) int {
+	calls := 0
+	for len(sizes) > 1 && fixed+joinedSize(sizes) > limit {
+		var next []int
+		for _, g := range group(sizes, limit) {
+			if g[1]-g[0] == 1 {
+				next = append(next, sizes[g[0]])
+				continue
+			}
+			calls++
+			next = append(next, noteChars)
+		}
+		sizes = next
+	}
+	return calls
+}
+
+// mergeSystem 是把相邻几段要点合并成更精简的要点时的系统提示。第 from 到 to 部分，共 parts 部分。
+func mergeSystem(from, to, parts, noteChars int, marks bool) string {
+	s := fmt.Sprintf("你是一名专业的会议记录员。下面是一场长会议第 %d 到 %d 部分（共 %d 部分）按时间顺序整理出的要点。"+
+		"请把它们合并成一份更精简的要点，后面还要和其他部分一起汇总成纪要。用 Markdown 列表输出，不要输出别的话。\n\n"+
+		"要求：\n"+
+		"1. 只写要点里有的内容，不要编造。结论、待办（谁、做什么、什么时候之前）和具体的数字都要保留，重复的合并成一条。\n"+
+		"2. 每条开头保留它在转写里的时间点，如 [12:34]；几条合成一条时用最早的时间点。\n"+
+		"3. 说话人沿用要点里的称呼（如「说话人 1（张敏）」），专有名词沿用要点里的写法。\n"+
+		"4. 用要点的主要语言书写。\n"+
+		"5. 合并后不超过 %d 字。", from, to, parts, noteChars)
+	if marks {
+		s += "\n6. 开头带「★」的条目是开会的人特意标记的重点，原样保留「★」和它的时间点，不要和别的条目合在一起。"
+	}
+	return s
 }
 
 // split 把转写按行分成若干段，每段不超过 limit 个字。单行超长时独占一段。

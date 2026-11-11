@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/ZaneXo/zsmeet/internal/llm"
@@ -19,6 +20,8 @@ type LLMInput struct {
 	BaseURL string
 	Model   string
 	APIKey  string
+	// 模型的上下文长度（token 数），只能是 settings.ContextChoices 里的一档；0 表示按默认的 32K
+	ContextTokens int
 }
 
 func (s *Service) resolveLLM(ctx context.Context, in LLMInput) (settings.LLM, error) {
@@ -29,6 +32,10 @@ func (s *Service) resolveLLM(ctx context.Context, in LLMInput) (settings.LLM, er
 	if cfg.Model == "" {
 		return settings.LLM{}, invalid("模型名不能为空")
 	}
+	if in.ContextTokens != 0 && !slices.Contains(settings.ContextChoices, in.ContextTokens) {
+		return settings.LLM{}, invalid("上下文长度只能从列表里选（8K 到 200K），不知道的话选 32K")
+	}
+	cfg.ContextTokens = in.ContextTokens
 	return cfg, nil
 }
 

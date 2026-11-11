@@ -8,6 +8,7 @@ import type { Tone } from "../components/ui";
 import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName, STAGE_LABEL } from "../lib/format";
 import { jumpParam } from "../lib/jump";
 import { useTicker } from "../lib/useTicker";
+import { isDesktop } from "../platform";
 import { TrashList } from "./Trash";
 import { UploadDialog } from "./UploadDialog";
 import { VISIBILITY_LABEL } from "./AccessDialog";
@@ -112,11 +113,13 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
               问会议
             </Button>
           )}
-          <AppLink to="/record" className={buttonClass("primary")}>
-            <Icon name="mic" />
-            开始录音
-          </AppLink>
-          <Button onClick={() => setUploading(true)}>
+          {!isDesktop && (
+            <AppLink to="/record" className={buttonClass("primary")}>
+              <Icon name="mic" />
+              开始录音
+            </AppLink>
+          )}
+          <Button variant={isDesktop ? "primary" : "default"} onClick={() => setUploading(true)}>
             <Icon name="upload" />
             上传录音
           </Button>
@@ -203,13 +206,19 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
             <>你还没有创建过会议。别人创建的会议在「全部」里。</>
           ) : (
             <div className="flex flex-col items-center gap-4">
-              <span>还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。</span>
+              <span>
+                {isDesktop
+                  ? "还没有会议。上传一段会议录音，几分钟后就能看到转写和纪要。"
+                  : "还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。"}
+              </span>
               <span className="flex flex-wrap justify-center gap-2.5">
-                <AppLink to="/record" className={buttonClass("primary")}>
-                  <Icon name="mic" />
-                  开始录音
-                </AppLink>
-                <Button onClick={() => setUploading(true)}>
+                {!isDesktop && (
+                  <AppLink to="/record" className={buttonClass("primary")}>
+                    <Icon name="mic" />
+                    开始录音
+                  </AppLink>
+                )}
+                <Button variant={isDesktop ? "primary" : "default"} onClick={() => setUploading(true)}>
                   <Icon name="upload" />
                   上传录音
                 </Button>

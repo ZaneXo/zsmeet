@@ -6,16 +6,20 @@ import { api, unwrap } from "../api/client";
 import type { User } from "../api/client";
 import { hms, session, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
+import { isDesktop } from "../platform";
+import { logout as desktopLogout } from "../platform/desktop";
+import { OfflineBanner } from "../platform/OfflineBanner";
 import { AbandonedRecordingsBanner } from "./LocalRecordings";
 import { Icon } from "./ui";
 
 /** 登录后的整体框架：左边导航，右边内容。窄屏时导航排到上面。 */
 export function Shell({ user, children }: { user: User; children: ReactNode }) {
   const logout = useMutation({
-    mutationFn: () => unwrap(api.POST("/api/logout")),
+    // 桌面版：App 通知服务器作废这台电脑的令牌，再回到登录页（缓存的数据由 platform 清掉）
+    mutationFn: isDesktop ? desktopLogout : () => unwrap(api.POST("/api/logout")),
     onSettled: () => {
       // 整页重新加载：换了人以后不能留着上一个人缓存的数据
-      window.location.assign("/");
+      if (!isDesktop) window.location.assign("/");
     },
   });
 
@@ -40,11 +44,14 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
           <Icon name="list" />
           会议
         </AppLink>
-        <AppLink to="/record" className={navClass(section === "record")} aria-current={section === "record" ? "page" : undefined}>
-          <Icon name="mic" />
-          网页录音
-          <RecordingBadge />
-        </AppLink>
+        {/* 桌面版的录音（录电脑里会议软件的声音）在第三阶段做，先不放网页录音的入口 */}
+        {!isDesktop && (
+          <AppLink to="/record" className={navClass(section === "record")} aria-current={section === "record" ? "page" : undefined}>
+            <Icon name="mic" />
+            网页录音
+            <RecordingBadge />
+          </AppLink>
+        )}
         <AppLink to="/settings" className={navClass(section === "settings")} aria-current={section === "settings" ? "page" : undefined}>
           <Icon name="settings" />
           设置
@@ -71,8 +78,13 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
       </nav>
       <main className="flex min-w-0 flex-1 flex-col gap-5 px-4 py-6 md:px-10 md:py-7">
         <div className="mx-auto w-full max-w-5xl empty:hidden">
-          <AbandonedRecordingsBanner user={user} skip={meetingId} />
+          <OfflineBanner />
         </div>
+        {!isDesktop && (
+          <div className="mx-auto w-full max-w-5xl empty:hidden">
+            <AbandonedRecordingsBanner user={user} skip={meetingId} />
+          </div>
+        )}
         <div>{children}</div>
       </main>
     </div>

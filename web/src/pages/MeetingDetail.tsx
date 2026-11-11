@@ -11,6 +11,8 @@ import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STA
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
+import { mediaUrl, subscribe } from "../platform";
+import { DownloadLink } from "../platform/DownloadLink";
 import { AccessDialog, VISIBILITY_LABEL } from "./AccessDialog";
 import { AskPanel } from "./Ask";
 import { FeishuShareDialog, LatestFeishuShare } from "./FeishuShare";
@@ -29,11 +31,9 @@ const isRecording = (m: Meeting | undefined) => m?.source === "record" && m.stat
 function useMeetingEvents(id: string, active: boolean) {
   useEffect(() => {
     if (!active) return;
-    const source = new EventSource(`/api/meetings/${id}/events`);
-    source.addEventListener("meeting", (event) => {
-      queryClient.setQueryData(["meeting", id], JSON.parse((event as MessageEvent<string>).data) as Meeting);
+    return subscribe(`/api/meetings/${id}/events`, "meeting", (data) => {
+      queryClient.setQueryData(["meeting", id], JSON.parse(data) as Meeting);
     });
-    return () => source.close();
   }, [id, active]);
 }
 
@@ -227,7 +227,7 @@ export function MeetingDetailPage({
             ref={audio}
             controls
             preload="metadata"
-            src={`/api/meetings/${m.id}/audio`}
+            src={mediaUrl(`/api/meetings/${m.id}/audio`)}
             aria-label="会议录音"
             className="w-full"
             onTimeUpdate={(e) => setNow(e.currentTarget.currentTime)}
@@ -835,14 +835,13 @@ function ExportMenu({ meeting: m, hasTranscript }: { meeting: Meeting; hasTransc
       </summary>
       <div className="absolute right-0 z-10 mt-1 flex min-w-36 flex-col rounded-xl border border-line bg-white p-1 shadow-lg">
         {options.map(([what, format, label]) => (
-          <a
+          <DownloadLink
             key={label}
             href={`/api/meetings/${m.id}/export?what=${what}&format=${format}`}
-            download
             className="rounded-lg px-3 py-2 text-[13px] text-ink-2 hover:bg-canvas hover:text-ink"
           >
             {label}
-          </a>
+          </DownloadLink>
         ))}
       </div>
     </details>

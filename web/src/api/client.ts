@@ -1,5 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import createClient from "openapi-fetch";
+import { setupApiClient } from "../platform";
 import type { components, paths } from "./schema";
 
 // schema.d.ts 是从后端的接口文档自动生成的（make gen），不要手改。
@@ -20,6 +21,8 @@ export type AskAnswer = components["schemas"]["AskOutputBody"];
 export type Citation = components["schemas"]["Citation"];
 
 export const api = createClient<paths>({ baseUrl: "", credentials: "same-origin" });
+// 桌面版：请求改发给 App 里的本地代理（见 src/platform/）
+setupApiClient(api);
 
 export const queryClient = new QueryClient({
   defaultOptions: {

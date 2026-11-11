@@ -9,6 +9,8 @@ import { Button, Card, Field, Input, Notice, Select, Spinner } from "../componen
 import { useFeishuResult } from "../lib/feishuAuth";
 import { feishuErrorText } from "../lib/feishuErrors";
 import { dateTime } from "../lib/format";
+import { isDesktop } from "../platform";
+import { DesktopAccountSection, OpenAdminSettings } from "../platform/DesktopAccount";
 import { FeishuSettingsSection } from "./FeishuSettings";
 import { MembersSection } from "./Members";
 import { TemplateSettingsSection } from "./TemplateSettings";
@@ -28,11 +30,14 @@ const SECTIONS = [
 
 type SectionKey = (typeof SECTIONS)[number]["key"];
 
-/** 设置页。左边是分区：自己的账号人人都有，成员、大模型和飞书只有管理员能看到。 */
+/**
+ * 设置页。左边是分区：自己的账号人人都有，成员、大模型和飞书只有管理员能看到。
+ * 桌面版只有账号；团队管理先放一个「在网页里打开」的入口。
+ */
 export function SettingsPage({ user }: { user: User }) {
   const params = useParams();
   const isAdmin = user.role === "admin";
-  const visible = SECTIONS.filter((s) => isAdmin || !s.adminOnly);
+  const visible = SECTIONS.filter((s) => (isAdmin && !isDesktop) || !s.adminOnly);
   const current: SectionKey = visible.find((s) => s.key === params.section)?.key ?? "account";
 
   return (
@@ -57,10 +62,16 @@ export function SettingsPage({ user }: { user: User }) {
               </AppLink>
             </div>
           ))}
+          {isDesktop && isAdmin && (
+            <>
+              <div className="hidden px-3 pb-1 pt-3 text-xs font-semibold text-muted md:block">团队管理 · 仅管理员</div>
+              <OpenAdminSettings />
+            </>
+          )}
         </nav>
 
         <div className="min-w-0 flex-1">
-          {current === "account" && <AccountSection user={user} />}
+          {current === "account" && (isDesktop ? <DesktopAccountSection user={user} /> : <AccountSection user={user} />)}
           {current === "members" && <MembersSection me={user} />}
           {current === "llm" && <LLMSettingsCard />}
           {current === "templates" && <TemplateSettingsSection />}

@@ -132,13 +132,15 @@ func NewHandler(svc *service.Service, sess *scs.SessionManager, web fs.FS, proxi
 	}))
 }
 
-// bearerToken 取出请求头 Authorization: Bearer 里的令牌。别的认证方式（比如反向代理加的 Basic）不管，照常按 Cookie 认人。
+// bearerToken 取出请求头 Authorization: Bearer 里的 App 令牌（zsm_ 开头）。别的认证方式、别的 Bearer 令牌
+// （比如前面的反向代理自己加的）都不管，照常按 Cookie 认人。
 func bearerToken(r *http.Request) (string, bool) {
 	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
+	token = strings.TrimSpace(token)
+	if !ok || !strings.EqualFold(scheme, "Bearer") || !strings.HasPrefix(token, service.AppTokenPrefix) {
 		return "", false
 	}
-	return strings.TrimSpace(token), true
+	return token, true
 }
 
 // usesBearer 表示这次请求带着 App 令牌（不管令牌对不对）。

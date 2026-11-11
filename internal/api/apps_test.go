@@ -155,6 +155,12 @@ func TestAppLoginFlow(t *testing.T) {
 	mixed.want(mixed.do("GET", "/api/members", nil), 403)
 	mixed.bearer = "zsm_" + strings.Repeat("B", 43)
 	mixed.want(mixed.do("GET", "/api/meetings", nil), 401)
+	// 不是 zsm_ 开头的 Bearer（比如前面的反向代理自己加的）不当成 App 令牌，照常按 Cookie 认人
+	mixed.bearer = "sso-proxy-token"
+	if r := mixed.want(mixed.do("GET", "/api/status", nil), 200); r.Body["user"].(obj)["email"] != "admin@example.com" {
+		t.Errorf("别的 Bearer 令牌不该挡住 Cookie 登录：%s", r.Raw)
+	}
+	mixed.want(mixed.do("GET", "/api/members", nil), 200)
 	// 管理员的网页登录不受影响
 	c.want(c.do("GET", "/api/members", nil), 200)
 

@@ -94,7 +94,7 @@ Rust 在 App 进程里起一个只监听 `127.0.0.1` 随机端口的 HTTP 代理
 - 打包在 App 里（`zsmeet.app/Contents/MacOS/zsmeet-recorder`，Tauri 的 `externalBin`），由 App 启动，权限算在 App 头上：弹窗、系统设置里都是 zsmeet。`desktop/scripts/build-recorder.sh` 用 swiftc 把 Apple 芯片和 Intel 各编一份、用 lipo 合成通用的（只装 Command Line Tools 也能编），`tauri dev`、`tauri build` 之前自动执行。打包时 Tauri 用 App 的身份重新签名，带上 hardened runtime 和 `entitlements.plist` 里的 `com.apple.security.device.audio-input`（没有它，麦克风录到的全是静音）。App 的 Info.plist 里有麦克风（`NSMicrophoneUsageDescription`）和录制系统音频（`NSAudioCaptureUsageDescription`）的说明。
 - `zsmeet-recorder devices`：标准输出一行 `{"microphones":[{"uid":"…","name":"…","default":true}]}`。只读设备信息，不弹权限窗口。
 - `zsmeet-recorder record --out <目录> [--start-seq N] [--chunk-seconds 10] [--mic <uid> | --mic default | --no-mic] [--no-system] [--input-file <音频文件> [--realtime]]`
-  - `--input-file` 是测试用的：拿音频文件代替麦克风和电脑声音（不要权限、不弹窗），尽快读完，读完自动结束（和收到 stop 一样）；加 `--realtime` 按文件的实际时长读，用来测暂停、继续。读到一半出错（文件被截短、删掉）以 error（`input_file`）结束、以 1 退出，不当成读完了。
+  - `--input-file` 是测试用的：拿音频文件代替麦克风和电脑声音（不要权限、不弹窗），尽快读完，读完自动结束（和收到 stop 一样）；加 `--realtime` 按文件的实际时长读，用来测暂停、继续。读到一半出错（比如文件被截短）以 error（`input_file`）结束、以 1 退出，不当成读完了。
   - `--start-seq N`：接着录一场中断了的录音时，第一片写成 N。N 只能是 0 到 3999（服务器一场会议最多收 4000 片），别的数按参数不对处理（`bad_args`，以 2 退出）。目录里已经有序号不小于 N 的分片时拒绝开始（`chunk_exists`），不会覆盖；目录列不出里面有什么（比如只能写、不能读）时也不开始（`out_dir`），免得看不到已有的分片、把它们覆盖掉。
 - 标准输入一行一个命令：`{"cmd":"pause"}`、`{"cmd":"resume"}`、`{"cmd":"stop"}`，标准输入关掉等于 stop；SIGINT、SIGTERM、SIGHUP 也按 stop 处理。标准输出一行一个事件（日志写在标准错误）：
 
@@ -141,7 +141,7 @@ Rust 在 App 进程里起一个只监听 `127.0.0.1` 随机端口的 HTTP 代理
 - 接着录：从 `recording.json` 的 `next_seq`、目录里已有分片的下一片、服务器已经收到的分片（`GET …/chunks`）的下一片里取最大的开始写，哪一片都不会被覆盖。秒数和标记接着上次的：新标记的时间从已经写好的分片的总时长算起，和服务器接起来的录音对得上；中断前最后一片之后点的标记，对应的声音没存下来，不要了。`recording.json` 记少了、跳过了几片时（比如它退回了上一份），跳过的分片也算进时长：还在这台电脑上的照着分片算，只在服务器上的按每片 10 秒算。
   - 问不到服务器（连不上、出错、回复看不懂）时照这台电脑上记着的来，也不会占用服务器上已有的序号：一片传上去以后，要等记着它的 `recording.json` 存好了才删本地的文件，所以服务器上的每一片，要么 `next_seq` 已经算上了，要么文件还在这台电脑上。问服务器是多一道保险。
 - 上传：后台一直在跑，只传当前登录的账号（同一个服务器地址、同一个用户 id）的录音，用它的令牌；别的账号的录音留在本地、界面上也不显示。按开始录音的先后，每场按序号一片一片地 `PUT /api/meetings/{id}/chunks/{seq}`（`Content-Type: audio/aac`，body 是分片本身），记下传到哪一片以后再删本地的文件。
-  - 连不上、超时、5xx、408、429、回复看不懂（2xx 却不是 JSON，比如连的网络要先登录、中间的设备返回了一个网页；`GET …/chunks` 的回复不是 `{"received":[…]}`）：这一场等一会儿再试（1、2、5、10、20、30 秒，之后每 30 秒），不耽误别的，分片也不删；登录的账号一变就马上再试。
+  - 连不上、超时、5xx、408、429、回复看不懂（2xx 却不是 JSON 或者没收全，比如连的网络要先登录、中间的设备返回了一个网页；`GET …/chunks` 的回复不是 `{"received":[…]}`）：这一场等一会儿再试（1、2、5、10、20、30 秒，之后每 30 秒），不耽误别的，分片也不删；登录的账号一变就马上再试。
   - 401：App 退出登录，同一个账号重新登录以后接着传。录音不停。
   - 403、404、其他 4xx、分片返回 409（会议已经上传完成）：不再传，算失败，等用户删掉。
   - complete 返回 409：看一眼会议，已经不在 `uploading` 就算完成（上次其实成功了），否则算失败，显示服务器说的原因。完成以后删掉整个目录。

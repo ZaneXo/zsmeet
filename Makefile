@@ -85,7 +85,8 @@ docker: ## 构建 Docker 镜像 zsmeet:local（先把 deploy/.env.example 复制
 	docker compose -f deploy/docker-compose.yml build
 
 # ---- 桌面版（macOS，desktop/，见 docs/desktop.md）----
-# 需要 Rust（rustup）。界面是 web/ 按桌面版模式构建的（pnpm -C web build --mode desktop），Tauri 会自动构建
+# 需要 Rust（rustup）。界面是 web/ 按桌面版模式构建的（pnpm -C web build --mode desktop），录音小程序
+# zsmeet-recorder（Swift，desktop/recorder/）由 desktop/scripts/build-recorder.sh 构建，Tauri 构建前都会自动做
 
 .PHONY: desktop-dev
 desktop-dev: ## 开发桌面版：打开 App 窗口，界面改了自动刷新
@@ -104,7 +105,12 @@ desktop-universal: ## 构建 Apple 芯片和 Intel 通用的 DMG（和发布时�
 	pnpm -C desktop tauri build --target universal-apple-darwin
 
 .PHONY: desktop-test
-desktop-test: ## 桌面版的检查和测试：cargo fmt、clippy、cargo test
+desktop-test: ## 桌面版的检查和测试：录音小程序的测试，cargo fmt、clippy、cargo test，和真的录音小程序一起录一遍（要 ffmpeg）
 	pnpm -C web install --frozen-lockfile
 	pnpm -C web build --mode desktop
+	@# 先构建录音小程序（Rust 编译时要它已经在 desktop/src-tauri/binaries/ 下），再跑它自己的测试
+	desktop/recorder/test.sh
 	cd desktop/src-tauri && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+	@# 真的录音小程序（用测试音频代替麦克风和电脑声音，不要权限）+ App 的录音管理 + 假的服务器
+	cd desktop/src-tauri && ZSMEET_RECORDER="$(CURDIR)/desktop/src-tauri/binaries/zsmeet-recorder-universal-apple-darwin" \
+		cargo test --locked real_helper -- --ignored

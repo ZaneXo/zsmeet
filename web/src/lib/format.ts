@@ -8,6 +8,13 @@ export function clock(sec: number): string {
   return s >= 3600 ? `${Math.floor(s / 3600)}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
+/** 时:分:秒，录音的计时用（网页录音和桌面版录音都用）。 */
+export function hms(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+}
+
 /** 把纪要里的 [mm:ss] 或 [h:mm:ss] 换算成秒。 */
 export function parseClock(text: string): number {
   return text.split(":").reduce((total, part) => total * 60 + Number(part), 0);
@@ -45,7 +52,7 @@ export const SOURCE_LABEL: Record<Meeting["source"], string> = {
   upload: "上传文件",
   record: "网页录音",
   feishu: "飞书会议",
-  desktop: "电脑录音",
+  desktop: "桌面版录音",
 };
 
 export const STAGE_LABEL: Record<Meeting["stage"], string> = {

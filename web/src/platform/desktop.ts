@@ -126,6 +126,7 @@ export async function sessionExpired() {
   setState(await invoke<DesktopState>("session_expired"));
 }
 
+/** 在系统浏览器里打开站外链接。打不开时 Rust 那边会弹提示框说明原因（commands.rs 的 open_external）。 */
 export function openExternal(url: string): Promise<void> {
   return invoke("open_external", { url });
 }
@@ -200,7 +201,11 @@ export function subscribeEvents(path: string, onEvent: (e: SSEEvent) => void): (
           const parser = new SSEParser();
           for (;;) {
             const { value, done } = await reader.read();
-            if (done) break;
+            if (done) {
+              // 最后一条事件可能还在 parser 里（只用「\r」换行时）
+              for (const event of parser.end()) onEvent(event);
+              break;
+            }
             for (const event of parser.push(value)) onEvent(event);
           }
         }
@@ -234,6 +239,7 @@ function installLinkHandler() {
     }
     if (url.origin === window.location.origin || !["http:", "https:", "mailto:"].includes(url.protocol)) return;
     e.preventDefault();
-    void openExternal(url.href);
+    // 打不开时 App 已经弹了提示框说明原因，这里只是接住出错，不留没处理的 Promise
+    openExternal(url.href).catch(() => {});
   });
 }

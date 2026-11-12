@@ -63,45 +63,75 @@ struct Status {
     api: Option<i64>,
 }
 
-/// 最多跟着跳转几次。
+/// 检查服务器地址时最多跟着跳转几次。
 const MAX_REDIRECTS: usize = 10;
 
-/// App 自己发请求（检查服务器、换令牌、退出登录、导出）用的 HTTP 客户端。界面的请求走本地代理，不用它。
+/// App 自己发的请求（换令牌、退出登录、导出、传录音）用的 HTTP 客户端。界面的请求走本地代理，不用它。
+///
+/// 这些请求都带着不能给别人的东西（令牌、code_verifier、录音），一概不跟随跳转：307、308 会把请求体
+/// 原样发到新地址，跳到哪里就交给了谁。收到跳转按服务器出错处理（多半是服务器的设置问题）。
 pub fn http_client() -> reqwest::Client {
+    client_with(reqwest::redirect::Policy::none())
+}
+
+/// 检查服务器地址（`GET /api/status`）用的 HTTP 客户端。这个请求什么都不带，只有它跟着跳转，规则见 probe_hop。
+fn probe_client() -> reqwest::Client {
+    client_with(reqwest::redirect::Policy::custom(
+        |attempt| match probe_hop(attempt.previous(), attempt.url()) {
+            Hop::Follow => attempt.follow(),
+            Hop::Stop => attempt.stop(),
+            Hop::Refuse(why) => attempt.error(why),
+        },
+    ))
+}
+
+fn client_with(redirect: reqwest::redirect::Policy) -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(8))
-        .redirect(redirect_policy())
+        .redirect(redirect)
         .build()
         .expect("HTTP 客户端初始化失败")
 }
 
-/// 跟着跳转的规则：
-/// - 哪一跳都不能从 https 跳到 http（只看最后落到哪里的话，中间降级的那一跳可能被人改过）
-/// - 只跟着同一台主机上的跳转（http 换 https、换端口、换路径）。跳到别的主机就停下，把这次跳转原样交回去：
-///   不加密的那一跳谁都能改，悄悄换成别的主机，以后的请求和令牌就都发到别人那里去了
-fn redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        let previous = attempt.previous();
-        let next = attempt.url();
-        let too_many = previous.len() > MAX_REDIRECTS;
-        let downgrade =
-            previous.last().is_some_and(|u| u.scheme() == "https") && next.scheme() != "https";
-        let same_host = previous
-            .first()
-            .is_none_or(|u| u.host_str() == next.host_str());
-        if too_many {
-            attempt.error(RedirectRefused::TooMany)
-        } else if downgrade {
-            attempt.error(RedirectRefused::Downgrade)
-        } else if same_host {
-            attempt.follow()
-        } else {
-            attempt.stop()
-        }
-    })
+/// 检查服务器地址时，一次跳转怎么处理。
+#[derive(Debug, PartialEq)]
+enum Hop {
+    Follow,
+    /// 不跟过去，把这次跳转原样交回去（read_status 告诉用户新地址，让他确认以后自己填）
+    Stop,
+    Refuse(RedirectRefused),
 }
 
-#[derive(Debug)]
+/// 检查服务器地址时跟着跳转的规则。previous 是这一路请求过的地址（第一个是最开始填的，最后一个是说要跳转的那个），
+/// next 是要跳去的地址：
+/// - 最多跟着跳 MAX_REDIRECTS 次
+/// - 哪一跳都不能从 https 跳到 http（只看最后落到哪里的话，中间降级的那一跳可能被人改过）
+/// - 只跟着同一台主机上的跳转：换路径；或者从 http 换成 https，这时端口可以跟着换（比如 80 换 443）。
+///   协议不变时端口也不能变，同一台机器的别的端口上可能是别的程序。跳到别的主机、别的端口就停下：
+///   不加密的那一跳谁都能改，悄悄换成别的地方，以后的请求和令牌就都发到别人那里去了
+fn probe_hop(previous: &[Url], next: &Url) -> Hop {
+    // previous 里第一个是最开始的请求，不是跳转：跟着这一跳的话，一共跳了 previous.len() 次
+    if previous.len() > MAX_REDIRECTS {
+        return Hop::Refuse(RedirectRefused::TooMany);
+    }
+    let Some(from) = previous.last() else {
+        return Hop::Stop;
+    };
+    if from.scheme() == "https" && next.scheme() != "https" {
+        return Hop::Refuse(RedirectRefused::Downgrade);
+    }
+    let same_host = from.host_str() == next.host_str();
+    let same_origin = from.scheme() == next.scheme()
+        && from.port_or_known_default() == next.port_or_known_default();
+    let upgrade = from.scheme() == "http" && next.scheme() == "https";
+    if same_host && (same_origin || upgrade) {
+        Hop::Follow
+    } else {
+        Hop::Stop
+    }
+}
+
+#[derive(Debug, PartialEq)]
 enum RedirectRefused {
     TooMany,
     Downgrade,
@@ -118,7 +148,7 @@ impl std::fmt::Display for RedirectRefused {
 
 impl std::error::Error for RedirectRefused {}
 
-/// 请求是不是因为跳转规则（见 redirect_policy）被拦下的。
+/// 请求是不是因为跳转规则（见 probe_hop）被拦下的。
 fn redirect_refused(e: &reqwest::Error) -> Option<&RedirectRefused> {
     let mut source = std::error::Error::source(e);
     while let Some(s) = source {
@@ -131,8 +161,9 @@ fn redirect_refused(e: &reqwest::Error) -> Option<&RedirectRefused> {
 }
 
 /// 检查填的地址是不是能用的 zsmeet 服务器，返回整理好的地址（有跳转的话是跳转以后的地址）。
-pub async fn check_server(client: &reqwest::Client, input: &str) -> Result<String, String> {
+pub async fn check_server(input: &str) -> Result<String, String> {
     let candidates = candidates(input)?;
+    let client = probe_client();
     // https 的证书不受信任、退回 http 也连不上时，说证书的问题比说 http 连不上有用
     let mut certificate = None;
     for (i, server) in candidates.iter().enumerate() {
@@ -179,7 +210,7 @@ pub async fn check_server(client: &reqwest::Client, input: &str) -> Result<Strin
 
 /// 看 `/api/status` 的结果，返回服务器地址。
 async fn read_status(requested: &str, resp: reqwest::Response) -> Result<String, String> {
-    // 跳到了别的主机（见 redirect_policy）：不悄悄换过去，告诉用户新地址，让他确认以后自己填
+    // 跳到了别的主机、别的端口（见 probe_hop）：不悄悄换过去，告诉用户新地址，让他确认以后自己填
     if resp.status().is_redirection() {
         let to = resp
             .headers()
@@ -420,11 +451,20 @@ pub fn authorize_url(server: &str, device: &str, pkce: &Pkce) -> String {
     url.into()
 }
 
-/// 浏览器登录完跳回来的 `zsmeet://auth?code=…&state=…`。
+/// 浏览器登录完跳回来的链接：网页上点了「允许」是 `zsmeet://auth?code=…&state=…`，
+/// 点了「取消」是 `zsmeet://auth?error=denied&state=…`。
 #[derive(Debug, PartialEq)]
 pub struct Callback {
-    pub code: String,
     pub state: String,
+    pub answer: Answer,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Answer {
+    /// 点了「允许」：拿这个一次性的 code 换令牌
+    Allowed(String),
+    /// 没有登录（点了「取消」），带着给用户看的话
+    Refused(String),
 }
 
 pub fn parse_callback(link: &str) -> Result<Callback, String> {
@@ -434,19 +474,32 @@ pub fn parse_callback(link: &str) -> Result<Callback, String> {
         return Err(bad());
     }
     let mut code = None;
+    let mut error = None;
     let mut state = None;
     for (k, v) in url.query_pairs() {
         match k.as_ref() {
             "code" => code = Some(v.into_owned()),
+            "error" => error = Some(v.into_owned()),
             "state" => state = Some(v.into_owned()),
             _ => {}
         }
     }
-    match (code, state) {
-        (Some(code), Some(state)) if !code.is_empty() && !state.is_empty() => {
-            Ok(Callback { code, state })
-        }
-        _ => Err(bad()),
+    let state = state.filter(|s| !s.is_empty()).ok_or_else(bad)?;
+    let answer = match (error, code) {
+        // 带着 error 的都算没登录，就算也带着 code
+        (Some(error), _) => Answer::Refused(refused_message(&error)),
+        (None, Some(code)) if !code.is_empty() => Answer::Allowed(code),
+        _ => return Err(bad()),
+    };
+    Ok(Callback { state, answer })
+}
+
+/// 网页说没登录（`error=…`）时给用户看的话。
+fn refused_message(error: &str) -> String {
+    if error == "denied" {
+        "你在浏览器里点了「取消」，没有登录。要登录的话，请重新点「在浏览器里登录」".into()
+    } else {
+        "浏览器里的登录没有完成，请重新点「在浏览器里登录」".into()
     }
 }
 
@@ -475,6 +528,13 @@ pub async fn exchange(
         .send()
         .await
         .map_err(|_| format!("连不上 {server}，登录没有完成。请检查网络后重新登录"))?;
+    if resp.status().is_redirection() {
+        // 不跟着跳（见 http_client）：code_verifier 不能发到别的地方去
+        return Err(format!(
+            "登录没有完成：服务器把登录请求转到了别的地址（返回 {}），请让管理员检查服务器的设置",
+            resp.status().as_u16()
+        ));
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let detail = resp
@@ -501,7 +561,7 @@ pub async fn exchange(
     Ok((body.token, body.user))
 }
 
-/// 告诉服务器这台电脑退出了（`POST /api/apps/logout`）。连不上也不要紧，本地照样退出。
+/// 告诉服务器这台电脑退出了（`POST /api/apps/logout`），这个令牌作废。连不上也不要紧，本地照样退出。
 pub async fn revoke(client: &reqwest::Client, server: &str, token: &str) {
     let result = client
         .post(format!("{server}/api/apps/logout"))
@@ -509,8 +569,12 @@ pub async fn revoke(client: &reqwest::Client, server: &str, token: &str) {
         .timeout(Duration::from_secs(5))
         .send()
         .await;
-    if let Err(e) = result {
-        log::warn!("通知服务器退出登录失败：{e}");
+    match result {
+        Ok(resp) if !resp.status().is_success() => {
+            log::warn!("通知服务器退出登录失败：服务器返回 {}", resp.status())
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("通知服务器退出登录失败：{e}"),
     }
 }
 
@@ -711,14 +775,99 @@ mod tests {
         assert_eq!(
             parse_callback("zsmeet://auth?code=abc&state=xyz").unwrap(),
             Callback {
-                code: "abc".into(),
-                state: "xyz".into()
+                state: "xyz".into(),
+                answer: Answer::Allowed("abc".into())
             }
         );
         assert!(parse_callback("zsmeet://auth?code=abc").is_err());
+        assert!(parse_callback("zsmeet://auth?code=&state=xyz").is_err());
         assert!(parse_callback("zsmeet://other?code=a&state=b").is_err());
         assert!(parse_callback("https://auth?code=a&state=b").is_err());
         assert!(parse_callback("not a url").is_err());
+    }
+
+    #[test]
+    fn parses_callback_when_the_browser_said_no() {
+        let denied = parse_callback("zsmeet://auth?error=denied&state=xyz").unwrap();
+        assert_eq!(denied.state, "xyz");
+        assert!(
+            matches!(&denied.answer, Answer::Refused(m) if m.contains("点了「取消」")),
+            "{denied:?}"
+        );
+        // 别的原因、同时带着 code：都不换令牌
+        let other = parse_callback("zsmeet://auth?error=server_error&code=abc&state=xyz").unwrap();
+        assert!(
+            matches!(&other.answer, Answer::Refused(m) if m.contains("没有完成")),
+            "{other:?}"
+        );
+        // 没有 state 的不认（核对不了是不是这次登录）
+        assert!(parse_callback("zsmeet://auth?error=denied").is_err());
+    }
+
+    #[test]
+    fn probe_follows_only_safe_redirects() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        let hop = |from: &str, to: &str| probe_hop(&[u(from)], &u(to));
+        // 同一个地方换路径；http 换 https（端口可以跟着换）
+        assert_eq!(
+            hop("http://h:8080/zs/api/status", "http://h:8080/api/status"),
+            Hop::Follow
+        );
+        assert_eq!(
+            hop("http://h/api/status", "https://h/api/status"),
+            Hop::Follow
+        );
+        assert_eq!(
+            hop("http://h:8080/api/status", "https://h:8443/api/status"),
+            Hop::Follow
+        );
+        // 协议不变时不能换端口（同一台机器上的别的程序），也不能换主机
+        assert_eq!(
+            hop("http://h:8080/api/status", "http://h:9090/api/status"),
+            Hop::Stop
+        );
+        assert_eq!(
+            hop("https://h/api/status", "https://h:8443/api/status"),
+            Hop::Stop
+        );
+        assert_eq!(
+            hop("http://h/api/status", "http://h:80/api/status"),
+            Hop::Follow
+        );
+        assert_eq!(
+            hop("http://h/api/status", "https://other/api/status"),
+            Hop::Stop
+        );
+        assert_eq!(
+            hop("http://h/api/status", "http://other/api/status"),
+            Hop::Stop
+        );
+        // 不能降级到 http
+        assert_eq!(
+            hop("https://h/api/status", "http://h/api/status"),
+            Hop::Refuse(RedirectRefused::Downgrade)
+        );
+        // 每一跳都看它自己的上一跳：中间跳到别的端口的那一跳停下
+        assert_eq!(
+            probe_hop(&[u("http://h/a"), u("https://h/b")], &u("https://h:8443/c")),
+            Hop::Stop
+        );
+    }
+
+    #[test]
+    fn probe_follows_at_most_max_redirects() {
+        // previous 里第一个是最开始的请求：里面有 MAX_REDIRECTS 个地址时，这一跳是第 MAX_REDIRECTS 次，还跟着
+        let chain = |n: usize| -> Vec<Url> {
+            (0..n)
+                .map(|i| Url::parse(&format!("http://h/{i}")).unwrap())
+                .collect()
+        };
+        let next = Url::parse("http://h/next").unwrap();
+        assert_eq!(probe_hop(&chain(MAX_REDIRECTS), &next), Hop::Follow);
+        assert_eq!(
+            probe_hop(&chain(MAX_REDIRECTS + 1), &next),
+            Hop::Refuse(RedirectRefused::TooMany)
+        );
     }
 
     #[test]

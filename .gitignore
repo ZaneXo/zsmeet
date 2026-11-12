@@ -34,6 +34,10 @@
 /desktop/node_modules/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
+# 录音小程序（desktop/recorder/，Swift）的构建产物，以及构建好放给 Tauri 打包的文件（desktop/scripts/build-recorder.sh 生成）
+/desktop/recorder/.build/
+/desktop/recorder/.swiftpm/
+/desktop/src-tauri/binaries/
 
 # make build 的输出、Go 的测试产物
 /bin/

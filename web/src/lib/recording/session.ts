@@ -691,13 +691,6 @@ export function useRecording(): Snapshot {
   return useSyncExternalStore(session.subscribe, session.getSnapshot);
 }
 
-/** 时:分:秒，录音的计时用。 */
-export function hms(sec: number): string {
-  const s = Math.floor(sec);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
-}
-
 /** 下载一段存在这台电脑上的录音。 */
 export async function downloadLocal(rec: LocalRecording): Promise<void> {
   saveFile(await store.assemble(rec), rec);

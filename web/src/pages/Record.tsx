@@ -3,8 +3,10 @@ import type { FormEvent, ReactNode } from "react";
 import { errorMessage } from "../api/client";
 import type { User } from "../api/client";
 import { AppLink } from "../components/AppLink";
+import { LevelMeter, RecordingMarks } from "../components/RecordingParts";
 import { Button, buttonClass, Card, Field, Icon, Input, Notice, Select } from "../components/ui";
-import { canRecordTab, hms, microphones, session, SLICE_MS, unsupportedReason, useRecording } from "../lib/recording/session";
+import { hms } from "../lib/format";
+import { canRecordTab, microphones, session, SLICE_MS, unsupportedReason, useRecording } from "../lib/recording/session";
 import type { Snapshot, Source } from "../lib/recording/session";
 import type { Trouble } from "../lib/recording/upload";
 import { useTicker } from "../lib/useTicker";
@@ -153,7 +155,7 @@ function Setup({ user, rec }: { user: User; rec: Snapshot }) {
             ) : (
               <div className="flex items-center gap-3">
                 <span className="shrink-0 text-xs text-muted">试一下：说句话</span>
-                <Meter which="mic" active={rec.micLive} />
+                <LevelMeter read={() => session.level("mic")} active={rec.micLive} />
               </div>
             )}
           </div>
@@ -200,32 +202,6 @@ function micProblem(e: unknown): string {
   return `打不开麦克风：${errorMessage(e)}`;
 }
 
-/** 音量条：最近几秒的音量，从左往右滚动。 */
-function Meter({ which, active, paused = false }: { which: "mic" | "tab"; active: boolean; paused?: boolean }) {
-  const [levels, setLevels] = useState<number[]>(() => new Array<number>(40).fill(0));
-  useEffect(() => {
-    if (!active) {
-      setLevels(new Array<number>(40).fill(0));
-      return;
-    }
-    const timer = setInterval(() => {
-      setLevels((prev) => [...prev.slice(1), paused ? 0 : session.level(which)]);
-    }, 100);
-    return () => clearInterval(timer);
-  }, [which, active, paused]);
-  return (
-    <div className="flex h-8 flex-1 items-center gap-[3px]" aria-hidden="true">
-      {levels.map((level, i) => (
-        <span
-          key={i}
-          className={`w-1 shrink-0 rounded-full ${paused || !active ? "bg-line-strong" : "bg-brand"}`}
-          style={{ height: `${Math.max(8, level * 100)}%` }}
-        />
-      ))}
-    </div>
-  );
-}
-
 // ---- 录音中 ----
 
 const TROUBLE: Record<Trouble, string> = {
@@ -269,8 +245,8 @@ function Live({ rec }: { rec: Snapshot }) {
             </span>
           </div>
           <div className="flex min-w-[200px] flex-1 flex-col gap-1">
-            <Meter which="mic" active={rec.micLive} paused={paused} />
-            {rec.source === "mic+tab" && <Meter which="tab" active={rec.tabLive} paused={paused} />}
+            <LevelMeter read={() => session.level("mic")} active={rec.micLive} paused={paused} />
+            {rec.source === "mic+tab" && <LevelMeter read={() => session.level("tab")} active={rec.tabLive} paused={paused} />}
           </div>
         </div>
 
@@ -321,7 +297,7 @@ function Live({ rec }: { rec: Snapshot }) {
         </div>
       </Card>
 
-      <Marks marks={rec.marks} />
+      <RecordingMarks marks={rec.marks} />
 
       <p className="text-xs leading-relaxed text-muted">
         不要关闭或刷新这个网页。万一关了，已经存在这台电脑上的录音下次打开 zsmeet 时可以接着传。
@@ -338,25 +314,6 @@ function Problem({ tone, action, children }: { tone: "warn" | "bad"; action: Rea
         {action}
       </div>
     </Notice>
-  );
-}
-
-function Marks({ marks }: { marks: readonly number[] }) {
-  return (
-    <Card className="flex flex-col gap-2.5 p-6">
-      <b className="text-[15px] font-semibold">标记的重点（会写进纪要）</b>
-      {marks.length === 0 ? (
-        <span className="text-[13px] text-muted">有人说到关键内容时点「标记重点」。</span>
-      ) : (
-        <ol className="flex flex-wrap gap-2">
-          {marks.map((t, i) => (
-            <li key={t} className="rounded-lg bg-subtle px-2.5 py-1 text-[13px] tabular-nums">
-              重点 {i + 1} · {hms(t)}
-            </li>
-          ))}
-        </ol>
-      )}
-    </Card>
   );
 }
 

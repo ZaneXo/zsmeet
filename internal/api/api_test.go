@@ -99,7 +99,13 @@ func (c *client) another() *client {
 	return &client{t: c.t, base: c.base, http: &http.Client{Jar: jar}, pool: c.pool, svc: c.svc, store: c.store}
 }
 
-// do 发一个请求。body 是 []byte 时按二进制发，其他非 nil 值按 JSON 发。
+// typed 是指定了 Content-Type 的原始内容，交给 do 发。比如桌面版上传的分片是 audio/aac。
+type typed struct {
+	contentType string
+	data        []byte
+}
+
+// do 发一个请求。body 是 []byte 时按二进制发，typed 按它的 Content-Type 发，其他非 nil 值按 JSON 发。
 func (c *client) do(method, path string, body any) result {
 	c.t.Helper()
 	var reader io.Reader
@@ -108,6 +114,8 @@ func (c *client) do(method, path string, body any) result {
 	case nil:
 	case []byte:
 		reader, contentType = bytes.NewReader(b), "application/octet-stream"
+	case typed:
+		reader, contentType = bytes.NewReader(b.data), b.contentType
 	default:
 		raw, err := json.Marshal(b)
 		if err != nil {

@@ -3,8 +3,8 @@ import { Navigate, Route, Routes, useLocation } from "react-router";
 import { api, errorMessage, unwrap } from "./api/client";
 import { Shell } from "./components/Shell";
 import { isDesktop } from "./platform";
-import { switchServer } from "./platform/desktop";
-import { DesktopNotInitialized, DesktopSessionExpired } from "./platform/DesktopScreens";
+import { DesktopRecordPage } from "./platform/DesktopRecord";
+import { DesktopNotInitialized, DesktopSessionExpired, SwitchServerButton } from "./platform/DesktopScreens";
 import { Button, Notice, Spinner } from "./components/ui";
 import { APP_AUTHORIZE_PATH, pendingAuthorize } from "./lib/appAuthorize";
 import { AccountLinkPage } from "./pages/AccountLink";
@@ -43,11 +43,7 @@ export function App() {
       <div className="mx-auto mt-24 flex max-w-md flex-col gap-4 px-4">
         <Notice tone="bad">{errorMessage(status.error)}</Notice>
         <Button onClick={() => status.refetch()}>重试</Button>
-        {isDesktop && (
-          <Button variant="ghost" onClick={() => void switchServer()}>
-            换一个服务器
-          </Button>
-        )}
+        {isDesktop && <SwitchServerButton variant="ghost" />}
       </div>
     );
   }
@@ -78,8 +74,8 @@ export function App() {
             />
           }
         />
-        {/* 桌面版的录音是原生录音（第三阶段），网页录音不放进 App */}
-        <Route path="/record" element={isDesktop ? <Navigate to="/" replace /> : <RecordPage user={data.user} />} />
+        {/* 桌面版用 App 自己的录音（录电脑里会议软件的声音和麦克风），不用网页录音 */}
+        <Route path="/record" element={isDesktop ? <DesktopRecordPage /> : <RecordPage user={data.user} />} />
         <Route path="/settings/:section?" element={<SettingsPage user={data.user} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

@@ -27,6 +27,18 @@ export class SSEParser {
     return out;
   }
 
+  /**
+   * 流结束了：末尾的「\r」不会再等来「\n」，当作行尾，这样以「\r」结尾的最后一条事件也能交出去。
+   * 没写完的行、没用空行结束的事件，按规范丢掉。
+   */
+  end(): SSEEvent[] {
+    const out = this.buffer.endsWith("\r") ? this.push("\n") : [];
+    this.buffer = "";
+    this.event = "";
+    this.data = [];
+    return out;
+  }
+
   private line(line: string): SSEEvent | undefined {
     if (line === "") {
       // 空行：一条事件结束。没有 data 的不算

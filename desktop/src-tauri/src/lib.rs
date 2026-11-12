@@ -1,14 +1,15 @@
-//! zsmeet 桌面版的 Rust 部分：本地代理和离线缓存、登录、钥匙串、菜单栏。
+//! zsmeet 桌面版的 Rust 部分：本地代理和离线缓存、登录、钥匙串、菜单栏、原生录音。
 //! 界面是 `web/` 按桌面版模式构建出来的同一套 React 代码（见 docs/desktop.md）。
 //!
-//! 第三阶段的原生录音（Swift 录音程序、分片上传、菜单栏的录音控制）接在这里：
-//! 在 `setup` 里启动录音管理，在 `tray.rs` 里加菜单项，在 `invoke_handler` 里加命令。
+//! 原生录音（recorder/）：管着 Swift 写的录音程序 zsmeet-recorder，录好的分片存在本地、在后台传到服务器；
+//! 菜单栏（tray.rs）上有录音的时长和控制。关掉窗口录音不停；退出 App 时先结束录音，没传完的下次打开接着传。
 
 mod cache;
 mod commands;
 mod core;
 mod export;
 mod proxy;
+mod recorder;
 mod server;
 mod token;
 mod tray;
@@ -17,16 +18,22 @@ mod tray;
 mod tests;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::core::{AppState, Core, Events, Options};
+use crate::recorder::{Recorder, RecorderEvents, RecorderOptions, RecorderState};
 
-/// 发给界面的事件：状态变了；浏览器登录回来以后没能完成登录。
+/// 发给界面的事件：状态变了；浏览器登录回来以后没能完成登录；录音的状态变了（录音时每 100 毫秒左右还有音量）。
 pub const EVENT_STATE: &str = "zsmeet://state";
 pub const EVENT_LOGIN_ERROR: &str = "zsmeet://login-error";
+pub const EVENT_RECORDER: &str = "recorder://state";
+
+/// 退出 App 时最多等录音程序多久（写完最后一片）。
+const QUIT_WAIT: Duration = Duration::from_secs(5);
 
 /// App 界面的来源。macOS 上 Tauri 2 用 `tauri://localhost`。
 const APP_ORIGIN: &str = "tauri://localhost";
@@ -49,6 +56,17 @@ impl Events for TauriEvents {
             .opener()
             .open_url(url, None::<&str>)
             .map_err(|e| e.to_string())
+    }
+}
+
+struct TauriRecorderEvents(AppHandle);
+
+impl RecorderEvents for TauriRecorderEvents {
+    fn state(&self, state: &RecorderState) {
+        if let Err(e) = self.0.emit(EVENT_RECORDER, state) {
+            log::warn!("录音状态事件发送失败：{e}");
+        }
+        tray::show_recording(&self.0, state);
     }
 }
 
@@ -138,6 +156,18 @@ pub fn run() {
             ));
             app.manage(core.clone());
 
+            // 原生录音：读出这台电脑上的录音（上次没传完的接着传），录音放在 App 的数据目录里
+            let recorder = Recorder::new(
+                RecorderOptions::new(
+                    paths.app_data_dir()?.join("recordings"),
+                    recorder::locate_helper(),
+                ),
+                core.clone(),
+                Arc::new(TauriRecorderEvents(handle.clone())),
+                server::http_client(),
+            );
+            app.manage(recorder.clone());
+
             let proxy = proxy::Proxy::new(core, origins, proxy::upstream_client());
             tauri::async_runtime::spawn(async move {
                 match tokio::net::TcpListener::from_std(listener) {
@@ -160,10 +190,12 @@ pub fn run() {
             }
 
             tray::build(&handle)?;
+            // 菜单栏建好以后再开始上传：一开始的状态（有没有没传完的录音）也要显示在菜单上
+            tauri::async_runtime::spawn(recorder.run());
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关窗口不退出，App 留在菜单栏里（第三阶段：录音时关掉窗口录音不停）
+            // 关窗口不退出，App 留在菜单栏里；录音时关掉窗口录音也不停
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == tray::MAIN_WINDOW {
                     api.prevent_close();
@@ -182,17 +214,30 @@ pub fn run() {
             commands::open_external,
             commands::open_server_page,
             commands::save_export,
+            commands::recorder_devices,
+            commands::recorder_start,
+            commands::recorder_pause,
+            commands::recorder_resume,
+            commands::recorder_mark,
+            commands::recorder_stop,
+            commands::recorder_finish,
+            commands::recorder_discard,
+            commands::recorder_state,
         ])
         .build(tauri::generate_context!())
         .expect("zsmeet 启动失败");
 
-    app.run(|app, event| {
+    app.run(|app, event| match event {
+        // 退出（菜单栏的「退出」、⌘Q、关机）：先结束录音，等录音程序写完最后一片。没传完的下次打开接着传
+        RunEvent::Exit => {
+            if let Some(recorder) = app.try_state::<Arc<Recorder>>() {
+                let recorder = recorder.inner().clone();
+                tauri::async_runtime::block_on(recorder.shutdown(QUIT_WAIT));
+            }
+        }
         // 窗口藏起来以后点 Dock 上的图标：重新显示
         #[cfg(target_os = "macos")]
-        if let RunEvent::Reopen { .. } = event {
-            tray::show_main(app);
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = (app, event);
+        RunEvent::Reopen { .. } => tray::show_main(app),
+        _ => {}
     });
 }

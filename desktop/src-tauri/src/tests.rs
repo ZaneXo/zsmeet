@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::extract::{Path, Request, State};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -16,6 +16,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::core::testing::{fixture, Fixture};
+use crate::core::Core;
 use crate::proxy::{self, Proxy};
 use crate::server;
 use crate::token::TokenStore;
@@ -34,6 +35,8 @@ struct Seen {
     /// /api/status 里有没有 api 字段、是不是初始化了
     status: Mutex<Value>,
     release: Notify,
+    /// 用 code=slow 换令牌时，等测试放行了才回
+    token_gate: Notify,
 }
 
 fn record(seen: &Seen, headers: &HeaderMap) {
@@ -128,7 +131,11 @@ async fn mock_upload(req: Request) -> Json<Value> {
 
 async fn mock_token(State(seen): State<Arc<Seen>>, Json(body): Json<Value>) -> Response {
     *seen.token_body.lock().unwrap() = Some(body.clone());
-    if body["code"] == "good" {
+    if body["code"] == "slow" {
+        // 换令牌要一会儿：这时用户可能点了取消
+        seen.token_gate.notified().await;
+    }
+    if body["code"] == "good" || body["code"] == "slow" {
         Json(json!({"token": "zsm_new", "user": {"id": "u2", "name": "李雷", "email": "li@example.com", "role": "admin"}}))
             .into_response()
     } else {
@@ -148,6 +155,15 @@ async fn mock_logout(State(seen): State<Arc<Seen>>, headers: HeaderMap) -> Statu
     StatusCode::NO_CONTENT
 }
 
+/// /hops/{n}/api/status：跳 n 次才到 /api/status。
+async fn mock_hops(Path(n): Path<u32>) -> Redirect {
+    if n <= 1 {
+        Redirect::temporary("/api/status")
+    } else {
+        Redirect::temporary(&format!("/hops/{}/api/status", n - 1))
+    }
+}
+
 struct Upstream {
     url: String,
     seen: Arc<Seen>,
@@ -159,6 +175,16 @@ async fn upstream() -> Upstream {
     *seen.status.lock().unwrap() = json!({"initialized": true, "api": 1, "version": "test"});
     let app = Router::new()
         .route("/api/status", get(mock_status))
+        // 同一台服务器上的跳转：旧地址跳到新地址、跳到统一登录页、跳很多次
+        .route(
+            "/old/api/status",
+            get(|| async { Redirect::permanent("/api/status") }),
+        )
+        .route(
+            "/sso/api/status",
+            get(|| async { Redirect::temporary("/login") }),
+        )
+        .route("/hops/{n}/api/status", get(mock_hops))
         .route("/api/meetings", get(mock_meetings))
         .route("/api/meetings/m1", get(mock_meetings))
         .route("/api/meetings/m1/audio", get(mock_audio))
@@ -582,51 +608,129 @@ async fn set_server_checks_status() {
     assert_eq!(saved["server"], up.url.as_str());
 }
 
-/// 一台只会把 /api/status 跳转到 to 的服务器，返回它的地址。
-async fn redirector(to: String) -> String {
-    let app = Router::new().route(
-        "/api/status",
-        get(move || {
-            let to = to.clone();
-            async move { axum::response::Redirect::permanent(&to) }
-        }),
-    );
+/// 起一个服务器，返回它的地址。
+async fn serve_app(app: Router) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     url
 }
 
+/// 一台把什么请求都跳转（307，方法和请求体不变）到 to 加上原来路径的服务器，返回它的地址。
+async fn redirect_all(to: String) -> String {
+    serve_app(Router::new().fallback(move |uri: Uri| {
+        let to = to.clone();
+        async move { Redirect::temporary(&format!("{to}{}", uri.path())) }
+    }))
+    .await
+}
+
+/// 一台什么请求都记下来、都回 200 的服务器（看有没有请求被跟着跳过来），返回它的地址和收到的请求。
+async fn sink() -> (String, Arc<Mutex<Vec<String>>>) {
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let seen = got.clone();
+    let url = serve_app(Router::new().fallback(move |req: Request| {
+        let seen = seen.clone();
+        async move {
+            seen.lock()
+                .unwrap()
+                .push(format!("{} {}", req.method(), req.uri()));
+            StatusCode::OK
+        }
+    }))
+    .await;
+    (url, got)
+}
+
+/// 等到条件成立，最多 10 秒。
+async fn until(what: &str, done: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "等了 10 秒还没有{what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
-async fn set_server_keeps_the_address_after_redirects() {
+async fn set_server_follows_only_safe_redirects() {
     let up = upstream().await;
     let f = fixture("http://127.0.0.1:1");
 
-    // 旧地址跳到新地址：存新地址（本地代理不跟随跳转，存旧的以后每个请求都会失败）
-    let old = redirector(format!("{}/api/status", up.url)).await;
-    let state = f.core.set_server(&old).await.unwrap();
+    // 同一台服务器上旧地址跳到新地址：存新地址（本地代理不跟随跳转，存旧的以后每个请求都会失败）
+    let state = f.core.set_server(&format!("{}/old", up.url)).await.unwrap();
     assert_eq!(state.server.as_deref(), Some(up.url.as_str()));
 
     // 跳到别的页面（比如统一登录页）：不是 zsmeet 服务器
-    let login = redirector(format!("{}/login", up.url)).await;
-    let err = f.core.set_server(&login).await.unwrap_err();
+    let err = f
+        .core
+        .set_server(&format!("{}/sso", up.url))
+        .await
+        .unwrap_err();
     assert!(err.contains("不像是 zsmeet"), "{err}");
     assert_eq!(f.core.state().server.as_deref(), Some(up.url.as_str()));
 
-    // 跳到另一台主机：不跟过去、不保存，告诉用户新地址让他自己填（不加密的那一跳谁都能改）
-    let elsewhere = up.url.replace("127.0.0.1", "localhost");
-    let moved = redirector(format!("{elsewhere}/api/status")).await;
+    // 最多跟着跳 10 次，第 11 次不跟
+    let state = f
+        .core
+        .set_server(&format!("{}/hops/10", up.url))
+        .await
+        .unwrap();
+    assert_eq!(state.server.as_deref(), Some(up.url.as_str()));
+    let err = f
+        .core
+        .set_server(&format!("{}/hops/11", up.url))
+        .await
+        .unwrap_err();
+    assert!(err.contains("次数太多"), "{err}");
+
+    // 跳到另一台主机、同一台机器的另一个端口：不跟过去、不保存，告诉用户新地址让他自己填
+    // （不加密的那一跳谁都能改；同一台机器的别的端口上可能是别的程序）
     let asked = up.seen.auth.lock().unwrap().len();
-    let err = f.core.set_server(&moved).await.unwrap_err();
-    assert!(
-        err.contains("另一台服务器") && err.contains(&elsewhere),
-        "{err}"
-    );
+    for target in [up.url.replace("127.0.0.1", "localhost"), up.url.clone()] {
+        let moved = redirect_all(target.clone()).await;
+        let err = f.core.set_server(&moved).await.unwrap_err();
+        assert!(
+            err.contains("另一台服务器") && err.contains(&target),
+            "{err}"
+        );
+    }
     assert_eq!(f.core.state().server.as_deref(), Some(up.url.as_str()));
     assert_eq!(
         up.seen.auth.lock().unwrap().len(),
         asked,
-        "不该跟着跳到另一台主机"
+        "不该跟着跳到另一台主机、另一个端口"
+    );
+}
+
+#[tokio::test]
+async fn secret_requests_never_follow_redirects() {
+    // 同一台机器另一个端口上的程序：跟着跳过去的话，code_verifier、录音就都交给了它
+    let (other, got) = sink().await;
+    let redirect = redirect_all(other).await;
+
+    let err = server::exchange(&server::http_client(), &redirect, "good", "the-verifier")
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("转到了别的地址") && err.contains("307"),
+        "{err}"
+    );
+
+    let resp = server::http_client()
+        .put(format!("{redirect}/api/meetings/m1/chunks/0"))
+        .bearer_auth("zsm_test")
+        .body("audio")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 307);
+    assert!(
+        got.lock().unwrap().is_empty(),
+        "不该跟着跳过去：{:?}",
+        got.lock().unwrap()
     );
 }
 
@@ -707,6 +811,156 @@ async fn browser_login_round_trip() {
         h.up.seen.auth.lock().unwrap().last().unwrap().as_deref(),
         Some("Bearer zsm_new")
     );
+}
+
+/// 最近一次「在浏览器里登录」打开的授权页地址里的 state。
+fn opened_state(f: &Fixture) -> String {
+    let opened = f.events.opened.lock().unwrap().last().unwrap().clone();
+    url::Url::parse(&opened)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1
+        .into_owned()
+}
+
+#[tokio::test]
+async fn cancel_in_the_browser_ends_the_login() {
+    let h = harness(false).await;
+    let core = &h.f.core;
+    core.login_start().unwrap();
+    let state = opened_state(&h.f);
+
+    // 旧的授权页上点了取消：和别的旧链接一样不认，正在等的登录照样等着
+    let err = core
+        .handle_deep_link("zsmeet://auth?error=denied&state=old")
+        .await
+        .unwrap_err();
+    assert!(err.contains("不是这次登录"), "{err}");
+    assert!(core.state().login_pending);
+
+    // 这次打开的授权页上点了取消：不再等，告诉用户是在浏览器里取消的
+    let err = core
+        .handle_deep_link(&format!("zsmeet://auth?error=denied&state={state}"))
+        .await
+        .unwrap_err();
+    assert!(err.contains("点了「取消」"), "{err}");
+    assert!(!core.state().login_pending);
+    assert!(!core.state().signed_in);
+    let last = h.f.events.states.lock().unwrap().last().unwrap().clone();
+    assert!(!last.login_pending);
+    assert_eq!(h.f.events.errors.lock().unwrap().last(), Some(&err));
+    assert!(
+        h.up.seen.token_body.lock().unwrap().is_none(),
+        "取消了不该去换令牌"
+    );
+}
+
+/// 走一遍浏览器登录，服务器收到换令牌的请求以后先不回（code=slow），这时做 interrupt，返回这次登录的结果。
+async fn interrupt_exchange(h: &Harness, interrupt: impl Fn(&Core)) -> Result<(), String> {
+    *h.up.seen.token_body.lock().unwrap() = None;
+    *h.up.seen.logout_auth.lock().unwrap() = None;
+    let core = h.f.core.clone();
+    core.login_start().unwrap();
+    let link = format!("zsmeet://auth?code=slow&state={}", opened_state(&h.f));
+    let exchange = tokio::spawn({
+        let core = core.clone();
+        async move { core.handle_deep_link(&link).await }
+    });
+    until("服务器收到换令牌的请求", || {
+        h.up.seen.token_body.lock().unwrap().is_some()
+    })
+    .await;
+    interrupt(&core);
+    h.up.seen.token_gate.notify_one();
+    exchange.await.unwrap()
+}
+
+/// 换到了令牌也没登录、没存，服务器上的令牌作废了，也没提示（是用户自己点的）。
+fn assert_dropped(h: &Harness, what: &str) {
+    assert!(!h.f.core.state().signed_in, "{what}");
+    assert_eq!(h.f.tokens.get(&h.up.url).unwrap(), None, "{what}");
+    assert_eq!(
+        h.up.seen.logout_auth.lock().unwrap().as_deref(),
+        Some("Bearer zsm_new"),
+        "{what}"
+    );
+    assert!(h.f.events.errors.lock().unwrap().is_empty(), "{what}");
+}
+
+#[tokio::test]
+async fn cancelling_during_the_exchange_never_signs_in() {
+    let h = harness(false).await;
+
+    interrupt_exchange(&h, |core| {
+        core.login_cancel();
+    })
+    .await
+    .unwrap();
+    assert_dropped(&h, "点了取消");
+    assert!(!h.f.core.state().login_pending);
+
+    // 点了「重新打开浏览器」：之前那次不算数了，新打开的这次还在等
+    interrupt_exchange(&h, |core| {
+        core.login_start().unwrap();
+    })
+    .await
+    .unwrap();
+    assert_dropped(&h, "重新打开了浏览器");
+    assert!(h.f.core.state().login_pending);
+}
+
+/// 让设置文件存不进去：在它的位置上放一个文件夹，临时文件改名换不掉它。
+fn block_settings(f: &Fixture) {
+    let path = f.dir.path().join("settings.json");
+    let _ = std::fs::remove_file(&path);
+    std::fs::create_dir_all(path.join("挡住")).unwrap();
+}
+
+#[tokio::test]
+async fn unsaved_settings_are_not_passed_off_as_done() {
+    // 登录：不算登录，钥匙串里的令牌删掉、服务器上的令牌作废（不然重启以后找不到是谁登录的）
+    let h = harness(false).await;
+    let core = &h.f.core;
+    core.login_start().unwrap();
+    block_settings(&h.f);
+    let err = core
+        .handle_deep_link(&format!(
+            "zsmeet://auth?code=good&state={}",
+            opened_state(&h.f)
+        ))
+        .await
+        .unwrap_err();
+    assert!(err.contains("没能保存"), "{err}");
+    assert!(!core.state().signed_in);
+    assert_eq!(h.f.tokens.get(&h.up.url).unwrap(), None);
+    assert_eq!(
+        h.up.seen.logout_auth.lock().unwrap().as_deref(),
+        Some("Bearer zsm_new")
+    );
+
+    // 填服务器地址：存不下来就不换
+    let f = fixture("http://127.0.0.1:1");
+    block_settings(&f);
+    let err = f.core.set_server(&h.up.url).await.unwrap_err();
+    assert!(err.contains("没能保存"), "{err}");
+    assert_eq!(f.core.state().server, None);
+
+    // 退出登录：照样退出、删掉令牌，原因显示在登录页上
+    let h = harness(true).await;
+    block_settings(&h.f);
+    let state = h.f.core.logout().await;
+    assert!(!state.signed_in);
+    assert_eq!(h.f.tokens.get(&h.up.url).unwrap(), None);
+    let error = h.f.events.errors.lock().unwrap().last().unwrap().clone();
+    assert!(error.contains("已经退出登录"), "{error}");
+
+    // 换服务器：清不掉服务器地址就留着它（重启以后也还是它），原因显示在登录页上
+    let state = h.f.core.switch_server().await;
+    assert_eq!(state.server.as_deref(), Some(h.up.url.as_str()));
+    let error = h.f.events.errors.lock().unwrap().last().unwrap().clone();
+    assert!(error.contains("没能清掉"), "{error}");
 }
 
 #[tokio::test]

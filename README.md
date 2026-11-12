@@ -179,7 +179,7 @@ zsmeet 的访问地址要填同事能打开的地址（卡片上的链接、用�
 
 ## 桌面版（macOS）
 
-macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自己部署的 zsmeet 服务器：看会议、搜索、问会议、上传录音、导出，和网页版一样；打开过的会议在断网时也能看。录电脑里会议软件的声音还在做（见[路线图](#路线图)）。设计见 [docs/desktop.md](docs/desktop.md)。
+macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自己部署的 zsmeet 服务器：看会议、搜索、问会议、上传录音、导出，和网页版一样；打开过的会议在断网时也能看。它还能录电脑里会议软件（飞书、腾讯会议、Zoom 这些）的声音和麦克风，断网也能录，联网后自动补传。设计见 [docs/desktop.md](docs/desktop.md)。
 
 **安装**：在 [Releases](https://github.com/ZaneXo/zsmeet/releases) 里找 `desktop-v` 开头的版本，下载 `zsmeet-desktop-…-macos-universal.dmg`，打开后把 zsmeet 拖进「应用程序」。目前的安装包没有签名，第一次打开时 macOS 会提示「无法验证开发者」：在「应用程序」里右键点 zsmeet →「打开」，再点一次「打开」（只用做一次）。新版本的 macOS 上如果没有「打开」按钮，到「系统设置 → 隐私与安全性」最下面点「仍要打开」。
 
@@ -196,16 +196,39 @@ macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自�
 - 「设置」里只有账号：能看到连的哪台服务器、退出登录、切换服务器。改密码、关联飞书，以及管理员的团队设置，点「在网页里打开」到浏览器里做。在网页上改了密码，或者在账号页退出了这台电脑，App 会回到登录页。
 - **离线**：连不上服务器时，会议列表、会议详情、纪要、转写这些打开过的内容照样能看，顶上显示「离线，显示的是上次同步的内容」，连上以后自动更新。没打开过的会议、录音回放、导出、修改都要等连上服务器。离线内容存在这台电脑上（每个用户最多约 256 MB），退出登录或切换服务器时删掉。
 
+**录音**：
+
+1. 点「开始录音」，填标题、选纪要模板和谁能看（和网页录音一样），再选录什么声音：
+   - **电脑里的声音**：飞书、腾讯会议、Zoom 这些会议软件里其他人说话的声音（电脑上同时在放的别的声音也会录进去）。
+   - **麦克风**：你自己和身边的人说话的声音。可以选用哪个麦克风，也可以不录。开线上会议时建议戴耳机，不然对方的声音从扬声器放出来，会被麦克风再录一遍。
+2. 第一次录音时 macOS 会问两次，都点「允许」：是否允许 zsmeet 使用麦克风，是否允许 zsmeet 录制电脑的声音（系统音频）。点了「不允许」的话，录音页会提示去哪里打开：
+   - 麦克风：「系统设置 → 隐私与安全性 → 麦克风」，打开 zsmeet。
+   - 电脑里的声音：「系统设置 → 隐私与安全性 → 屏幕与系统录音」，在「仅系统录音」里打开 zsmeet。
+
+   打开以后重新开始录音。只给了一项权限也能录，只是只录到那一路的声音。
+3. 录音时可以暂停（暂停的时候什么都不录）、继续、标记重点（写纪要时会重点写这些时间点前后的内容）。关掉窗口录音也不停：菜单栏的 zsmeet 图标旁边显示录了多久，点开可以暂停、标记重点、结束录音。
+4. 结束录音以后，剩下的部分传完，服务器自动开始转写、生成纪要，录音页上有这场会议的链接。一场最长约 6 小时，到时自动结束。
+
+断网、退出和意外中断：
+
+- 开始录音时要连得上服务器（先在服务器上建好这场会议）；开始以后断网照样录。录音每 10 秒左右存一片在这台电脑上，边录边传，断网时先存着，连上以后自动补传。
+- 退出 zsmeet（菜单栏的「退出」或 ⌘Q）会先结束录音；没传完的部分下次打开 zsmeet 时接着传。
+- 录到一半 zsmeet 意外退出、电脑断电：已经录好的部分都在。再打开 zsmeet 时会提示这场录音中断了，可以「接着录」（接在后面，标记的重点也都在），也可以「传上去生成纪要」，或者删掉。
+- 退出登录、切换服务器会先结束正在录的那一场（点的时候会先提醒你）。录好的留在这台电脑上，以后用这个账号登录这台服务器时接着传，换别的账号登录看不到、也不会传。
+- 录音存在 `~/Library/Application Support/io.github.zanexo.zsmeet/recordings/` 下，只有你自己的 macOS 账户能打开；每一片传上去就删掉，整场传完后整个删掉。
+
 **开发**：需要 Rust（[rustup](https://rustup.rs)，版本由 `desktop/src-tauri/rust-toolchain.toml` 固定）和上面「开发」一节的 Node + pnpm。
 
 ```bash
 make desktop-dev        # 打开桌面版窗口，界面（web/）改了自动刷新。先用 make dev-api 起好服务器
-make desktop-test       # cargo fmt、clippy 和 Rust 的测试（不碰钥匙串，用假的服务器）
+make desktop-test       # 录音小程序的测试，cargo fmt、clippy 和 Rust 的测试（不碰钥匙串，用假的服务器），再和真的录音小程序一起录一遍（用测试音频，不要权限）
 make desktop-build      # 构建本机架构的 .app 和 DMG，在 desktop/src-tauri/target/release/bundle/ 下
 make desktop-universal  # 构建 Apple 芯片和 Intel 通用的 DMG，和发布时一样
 ```
 
 开发模式下（`make desktop-dev`）macOS 不会把 `zsmeet://` 的链接交给它，浏览器登录完跳不回来：要试登录，用 `make desktop-build` 打出来的 App。界面里网页版和桌面版不一样的地方都在 `web/src/platform/`；网页版的构建（`pnpm -C web build`）里没有桌面版的代码。
+
+录音小程序 `zsmeet-recorder` 在 `desktop/recorder/`（Swift，只装 Xcode 的 Command Line Tools 就能编），`desktop/scripts/build-recorder.sh` 构建它（`make desktop-dev`、`make desktop-build` 会自动构建），`desktop/recorder/test.sh` 跑它自己的测试（要 ffmpeg）。开发模式下录音的权限算在终端头上（系统设置里要打开的是终端），要试真的麦克风和电脑声音，用 `make desktop-build` 打出来的 App。
 
 ## 它是怎么工作的
 
@@ -252,7 +275,7 @@ internal/
   db/               表结构迁移（migrations/）、SQL（queries/）、sqlc 生成的代码（sqlc/）
   …                 其余是各管一件小事的包：audio、models、search、storage、secret、settings
 web/                前端：React + TypeScript + Tailwind（网页版和桌面版共用，不同的地方在 src/platform/）
-desktop/            桌面版（macOS，Tauri 2）：本地代理、离线缓存、登录、菜单栏
+desktop/            桌面版（macOS，Tauri 2）：本地代理、离线缓存、登录、菜单栏、录音（recorder/ 是 Swift 写的录音小程序）
 deploy/             Dockerfile、docker-compose.yml、.env.example
 tools/newapi/       make api 用的接口骨架生成器
 ```
@@ -313,12 +336,13 @@ PR 由 [CodeAnt AI](https://www.codeant.ai) 自动做 AI 代码审查，审查�
 
 ## 路线图
 
-接下来：桌面版录音（录电脑里会议软件的声音和麦克风，断网也能录）、实时字幕、GPU 加速、英文界面。
+接下来：实时字幕、GPU 加速、英文界面。
 
 已知的不足：
 
 - 说话人区分的聚类阈值只在合成语音上调过，还需要用真实的多人会议校准（`internal/asr/asr.go`）；按声音认出说话人的阈值也一样（`internal/voiceprint`）。
 - 界面只有中文。
+- 桌面版录音没有回声消除：开会时外放的话，对方的声音会从麦克风再录进去一遍（和电脑声音那一路稍微错开），戴耳机就没有这个问题。
 
 ## 开源协议
 

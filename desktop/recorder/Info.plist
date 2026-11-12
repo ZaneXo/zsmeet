@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 链接时嵌进 zsmeet-recorder 里（__TEXT,__info_plist）：给它一个标识，签名时用。
+     它由 App 启动，权限算在 App 头上，弹窗用的是 App 的 Info.plist（desktop/src-tauri/Info.plist）；
+     这里也写上两项说明，免得系统框架在本进程里找不到说明就直接拒绝 -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.zanexo.zsmeet.recorder</string>
+	<key>CFBundleName</key>
+	<string>zsmeet-recorder</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>zsmeet 录音时要用麦克风，录下你这边说的话。</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>zsmeet 录音时要录电脑里的声音，把飞书、腾讯会议等会议软件里其他人说的话一起录下来。</string>
+</dict>
+</plist>

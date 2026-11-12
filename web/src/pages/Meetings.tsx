@@ -7,6 +7,7 @@ import { Button, buttonClass, Chip, Icon, Input, Notice, Spinner } from "../comp
 import type { Tone } from "../components/ui";
 import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName, STAGE_LABEL } from "../lib/format";
 import { jumpParam } from "../lib/jump";
+import { waitingForRecording } from "../lib/meetingStatus";
 import { useTicker } from "../lib/useTicker";
 import { isDesktop } from "../platform";
 import { TrashList } from "./Trash";
@@ -50,7 +51,6 @@ export function meetingChip(m: Meeting): { tone: Tone; text: string } {
 }
 
 const isActive = (m: Meeting) => m.status === "queued" || m.status === "processing";
-const isRecording = (m: Meeting) => m.source === "record" && m.status === "uploading";
 
 export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
   const [input, setInput] = useState("");
@@ -72,16 +72,17 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
     queryKey: ["meetings", q, mine],
     enabled: !trash,
     queryFn: () => unwrap(api.GET("/api/meetings", { params: { query: { q: q || undefined, mine: mine || undefined } } })),
-    // 有会议在处理时每 3 秒刷新一次，让状态和进度跟上；有人在录音时每 15 秒刷新一次
+    // 有会议在处理时每 3 秒刷新一次，让状态和进度跟上；有人在录音（网页录音、桌面版录音）时每 15 秒刷新一次
     refetchInterval: (query) => {
       const items = query.state.data?.items ?? [];
-      return items.some(isActive) ? 3000 : items.some(isRecording) ? 15_000 : false;
+      return items.some(isActive) ? 3000 : items.some(waitingForRecording) ? 15_000 : false;
     },
     placeholderData: (previous) => previous,
   });
 
-  // 有人在录音时定时重画：录音中断以后，标签要从「录音中」变成「录音未传完」，即使服务器返回的数据没变
-  useTicker(15_000, (meetings.data?.items ?? []).some(isRecording));
+  // 有人在录音时定时重画：录音中断以后，标签要从「录音中」变成「录音未传完」（桌面版录的从「电脑录音中」变成
+  // 「等电脑传完录音」），即使服务器返回的数据没变
+  useTicker(15_000, (meetings.data?.items ?? []).some(waitingForRecording));
 
   const retry = useMutation({
     mutationFn: (id: string) => unwrap(api.POST("/api/meetings/{id}/retry", { params: { path: { id } } })),
@@ -104,7 +105,10 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1.5">
           <h1 className="text-[26px] font-bold">会议</h1>
-          <p className="text-sm text-muted">在网页上录音，或者上传录音文件，自动转写、区分说话人并生成纪要。会议默认团队里的人都能看到，创建者可以改成只给指定的人看。</p>
+          <p className="text-sm text-muted">
+            {isDesktop ? "录下电脑里会议软件的声音和麦克风" : "在网页上录音"}
+            ，或者上传录音文件，自动转写、区分说话人并生成纪要。会议默认团队里的人都能看到，创建者可以改成只给指定的人看。
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
           <label className="relative block w-72 max-w-full">
@@ -119,13 +123,11 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
               问会议
             </Button>
           )}
-          {!isDesktop && (
-            <AppLink to="/record" className={buttonClass("primary")}>
-              <Icon name="mic" />
-              开始录音
-            </AppLink>
-          )}
-          <Button variant={isDesktop ? "primary" : "default"} onClick={() => setUploading(true)}>
+          <AppLink to="/record" className={buttonClass("primary")}>
+            <Icon name="mic" />
+            开始录音
+          </AppLink>
+          <Button onClick={() => setUploading(true)}>
             <Icon name="upload" />
             上传录音
           </Button>
@@ -212,19 +214,13 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
             <>你还没有创建过会议。别人创建的会议在「全部」里。</>
           ) : (
             <div className="flex flex-col items-center gap-4">
-              <span>
-                {isDesktop
-                  ? "还没有会议。上传一段会议录音，几分钟后就能看到转写和纪要。"
-                  : "还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。"}
-              </span>
+              <span>还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。</span>
               <span className="flex flex-wrap justify-center gap-2.5">
-                {!isDesktop && (
-                  <AppLink to="/record" className={buttonClass("primary")}>
-                    <Icon name="mic" />
-                    开始录音
-                  </AppLink>
-                )}
-                <Button variant={isDesktop ? "primary" : "default"} onClick={() => setUploading(true)}>
+                <AppLink to="/record" className={buttonClass("primary")}>
+                  <Icon name="mic" />
+                  开始录音
+                </AppLink>
+                <Button onClick={() => setUploading(true)}>
                   <Icon name="upload" />
                   上传录音
                 </Button>

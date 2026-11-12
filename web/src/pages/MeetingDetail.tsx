@@ -11,7 +11,8 @@ import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STA
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
-import { mediaUrl, subscribe } from "../platform";
+import { isDesktop, mediaUrl, subscribe } from "../platform";
+import { ThisComputerRecording } from "../platform/DesktopRecordings";
 import { DownloadLink } from "../platform/DownloadLink";
 import { AccessDialog, VISIBILITY_LABEL } from "./AccessDialog";
 import { AskPanel } from "./Ask";
@@ -22,7 +23,8 @@ import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
 
 const isActive = (m: Meeting | undefined) => m?.status === "queued" || m?.status === "processing";
-const isRecording = (m: Meeting | undefined) => m?.source === "record" && m.status === "uploading";
+// 桌面版里也盯着桌面版录的会议：录音传完、开始处理时页面跟着变
+const isRecording = (m: Meeting | undefined) => (m?.source === "record" || (isDesktop && m?.source === "desktop")) && m.status === "uploading";
 
 /**
  * 订阅服务器推送的处理进度（SSE），收到就更新缓存里的会议。
@@ -386,13 +388,15 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
   if (m.status === "uploading" && m.source === "record") return <UnfinishedRecording meeting={m} user={user} />;
 
   if (m.status === "uploading" && m.source === "desktop") {
-    return (
+    const elsewhere = (
       <Notice tone="info">
         {m.can_manage
           ? "这场会议是用 zsmeet 桌面版在电脑上录的。录音会从那台电脑自动传上来（断网时等联网以后接着传），传完以后开始处理。"
           : `${m.owner_name} 正在用 zsmeet 桌面版录这场会议，录音传完以后才会开始处理。`}
       </Notice>
     );
+    // 桌面版：这场会议就是在这台电脑上录的话，显示录音、上传的情况
+    return isDesktop ? <ThisComputerRecording meetingId={m.id} elsewhere={elsewhere} /> : elsewhere;
   }
 
   if (m.status === "uploading") {

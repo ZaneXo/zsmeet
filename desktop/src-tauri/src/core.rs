@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 use crate::cache::{Generation, OfflineCache, DEFAULT_MAX_BYTES};
 use crate::server::{self, Pkce};
@@ -47,6 +48,15 @@ pub struct AppState {
 struct Settings {
     server: Option<String>,
     user: Option<Value>,
+}
+
+/// 当前登录的账号：哪台服务器上的哪个用户，用的是哪个令牌。
+/// 上传录音前要核对录音属于这个账号（服务器和用户都一样），再用这个令牌，绝不拿别人的令牌传。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Account {
+    pub server: String,
+    pub user_id: String,
+    pub token: String,
 }
 
 /// 本地代理转发一个请求时要用到的东西。
@@ -90,6 +100,8 @@ pub struct Core {
     client: reqwest::Client,
     cache_generation: Generation,
     inner: Mutex<Inner>,
+    /// 登录的账号变了（登录、退出、登录失效、换服务器）就更新，录音的上传任务据此暂停或接着传
+    account: watch::Sender<Option<Account>>,
 }
 
 impl Core {
@@ -111,18 +123,21 @@ impl Core {
             }),
             _ => None,
         };
+        let inner = Inner {
+            settings,
+            token,
+            pending: None,
+            expired: false,
+        };
+        let (account, _) = watch::channel(account_of(&inner));
         Self {
             opts,
             tokens,
             events,
             client,
             cache_generation: Generation::default(),
-            inner: Mutex::new(Inner {
-                settings,
-                token,
-                pending: None,
-                expired: false,
-            }),
+            inner: Mutex::new(inner),
+            account,
         }
     }
 
@@ -159,8 +174,25 @@ impl Core {
 
     fn changed(&self) -> AppState {
         let state = self.state();
+        // 在 watch 的锁里取当前的账号：几处同时变化时，最后发出去的一定是最新的
+        self.account.send_if_modified(|current| {
+            let account = self.account();
+            let modified = *current != account;
+            *current = account;
+            modified
+        });
         self.events.state(&state);
         state
+    }
+
+    /// 当前登录的账号。没登录（或者登录失效了）时是 None。
+    pub fn account(&self) -> Option<Account> {
+        account_of(&self.inner.lock().unwrap())
+    }
+
+    /// 订阅登录的账号的变化。
+    pub fn watch_account(&self) -> watch::Receiver<Option<Account>> {
+        self.account.subscribe()
     }
 
     /// 本地代理转发请求用：服务器地址、令牌、这个用户的离线缓存。没设置服务器时返回 None。
@@ -372,6 +404,14 @@ impl Core {
         let server = self.inner.lock().unwrap().settings.server.clone()?;
         Some(format!("{server}{path}"))
     }
+}
+
+fn account_of(inner: &Inner) -> Option<Account> {
+    Some(Account {
+        server: inner.settings.server.clone()?,
+        user_id: server::user_id(inner.settings.user.as_ref()?)?,
+        token: inner.token.clone()?,
+    })
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 # 桌面版（macOS，desktop/）：
-#   - 改了 desktop/ 或 web/ 的 PR、push 到 main：rustfmt、clippy、cargo test，以及按桌面版模式构建界面
+#   - 改了 desktop/ 或 web/ 的 PR、push 到 main：录音小程序（Swift）的构建和测试，rustfmt、clippy、cargo test、
+#     录音的端到端测试，以及按桌面版模式构建界面
 #   - 推 desktop-v 开头的标签（比如 desktop-v0.1.0）：再打一个 universal（Apple 芯片 + Intel）的 DMG，附到 GitHub Release 上
 #
 # 默认打出来的是 ad-hoc 签名（未签名）的 DMG，第一次打开要在 Finder 里右键 →「打开」。
@@ -58,6 +59,21 @@ jobs:
       - name: 按桌面版模式构建界面
         run: pnpm -C web build --mode desktop
 
+      # 录音小程序 zsmeet-recorder 是 App 带着的 sidecar：Rust 编译时（tauri-build）要求它已经在
+      # desktop/src-tauri/binaries/ 下，所以在 Rust 的步骤之前构建
+      - name: 构建录音小程序（Swift）
+        run: desktop/scripts/build-recorder.sh
+
+      # 录音小程序的端到端测试用 ffmpeg 检查录出来的分片（服务器也是用它解码的）
+      - name: 安装 ffmpeg
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
+
+      - name: 录音小程序的测试
+        run: desktop/recorder/test.sh
+
       # 在 src-tauri 里执行，才会装上 rust-toolchain.toml 固定的版本
       - name: 安装 Rust
         working-directory: desktop/src-tauri
@@ -86,6 +102,12 @@ jobs:
       - name: 测试
         working-directory: desktop/src-tauri
         run: cargo test --locked
+
+      # 真的录音小程序（--input-file：用测试音频代替麦克风和电脑声音，不要权限）加上 App 的录音管理和假的服务器：
+      # 录一遍、传上去，用 ffmpeg 检查服务器收到的分片接起来能完整解码、时长和原来的一样
+      - name: 录音的端到端测试
+        working-directory: desktop/src-tauri
+        run: ZSMEET_RECORDER="$PWD/binaries/zsmeet-recorder-universal-apple-darwin" cargo test --locked real_helper -- --ignored
 
   release:
     name: 打包 DMG 并发布
@@ -130,6 +152,7 @@ jobs:
           rustup toolchain install
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      # tauri build 会先执行 tauri.conf.json 里的 beforeBuildCommand：构建录音小程序（通用版本）和界面
       - name: 构建（ad-hoc 签名）
         if: env.HAS_SIGNING != 'true'
         run: pnpm -C desktop tauri build --target universal-apple-darwin

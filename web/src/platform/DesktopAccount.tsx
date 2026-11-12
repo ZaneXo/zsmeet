@@ -1,9 +1,12 @@
 import { useMutation } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router";
 import { errorMessage } from "../api/client";
 import type { User } from "../api/client";
 import { Button, Card, Notice } from "../components/ui";
 import { logout, openServerPage, switchServer, useDesktopState } from "./desktop";
+import { useRecorder } from "./recorder";
+import { signOutNote } from "./recorderView";
 
 /**
  * 桌面版的「账号」：连的哪台服务器、退出登录、切换服务器。
@@ -11,11 +14,24 @@ import { logout, openServerPage, switchServer, useDesktopState } from "./desktop
  */
 export function DesktopAccountSection({ user }: { user: User }) {
   const state = useDesktopState();
+  const { state: recorder } = useRecorder();
   const [switching, setSwitching] = useState(false);
+  // 正在录音、有录音没传完时，退出登录前先说清楚会怎样。导航栏上点「退出登录」也会带着 ?logout=1 来到这里
+  const [leaving, setLeaving] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const asked = params.get("logout") === "1";
+  useEffect(() => {
+    if (!asked) return;
+    setSwitching(false);
+    setLeaving(true);
+    setParams({}, { replace: true });
+  }, [asked, setParams]);
   const signOut = useMutation({ mutationFn: logout });
   const change = useMutation({ mutationFn: switchServer });
   const open = useMutation({ mutationFn: (path: string) => openServerPage(path) });
   const failure = signOut.error ?? change.error ?? open.error;
+  const leaveNote = signOutNote(recorder, "退出登录");
+  const switchNote = signOutNote(recorder, "切换服务器");
 
   return (
     <div className="flex flex-col gap-5">
@@ -32,14 +48,47 @@ export function DesktopAccountSection({ user }: { user: User }) {
           <dd className="break-all">{state?.server}</dd>
         </dl>
         <div className="mt-4 flex flex-wrap gap-2.5">
-          <Button onClick={() => signOut.mutate()} disabled={signOut.isPending}>
-            {signOut.isPending ? "正在退出…" : "退出登录"}
-          </Button>
-          {!switching && <Button onClick={() => setSwitching(true)}>切换服务器</Button>}
+          {!leaving && (
+            <Button
+              onClick={() => {
+                setSwitching(false);
+                if (leaveNote) setLeaving(true);
+                else signOut.mutate();
+              }}
+              disabled={signOut.isPending}
+            >
+              {signOut.isPending ? "正在退出…" : "退出登录"}
+            </Button>
+          )}
+          {!switching && (
+            <Button
+              onClick={() => {
+                setLeaving(false);
+                setSwitching(true);
+              }}
+            >
+              切换服务器
+            </Button>
+          )}
         </div>
+        {leaving && (
+          <div className="mt-3 flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-sm">
+            <span className="text-ink-2">{leaveNote || "确定退出登录吗？"}</span>
+            <span className="flex gap-2">
+              <Button size="sm" variant="primary" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
+                {signOut.isPending ? "正在退出…" : "退出登录"}
+              </Button>
+              <Button size="sm" onClick={() => setLeaving(false)}>
+                取消
+              </Button>
+            </span>
+          </div>
+        )}
         {switching && (
           <div className="mt-3 flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-sm">
-            <span className="text-ink-2">切换服务器会先退出这台服务器上的登录，这台电脑上保存的离线内容也会删掉。</span>
+            <span className="text-ink-2">
+              切换服务器会先退出这台服务器上的登录，这台电脑上保存的离线内容也会删掉。{switchNote}
+            </span>
             <span className="flex gap-2">
               <Button size="sm" variant="primary" disabled={change.isPending} onClick={() => change.mutate()}>
                 退出并切换

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 签名时给 App 和录音小程序（Contents/MacOS/zsmeet-recorder）加上的权限。
+     App 开了 hardened runtime：没有 audio-input 这一项，系统会直接拒绝用麦克风（不弹窗，录到的全是静音）。
+     录电脑里的声音（进程音频捕获）不需要额外的权限项，只要 Info.plist 里的 NSAudioCaptureUsageDescription -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

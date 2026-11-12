@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- 打包时 Tauri 会把这里的内容合并进 App 的 Info.plist -->
+<!-- 打包时 Tauri 会把这里的内容合并进 App 的 Info.plist。
+     录音小程序 zsmeet-recorder 由 App 启动，它要的权限算在 App 头上，弹窗里的说明也用这里的 -->
 <plist version="1.0">
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>zsmeet 要连接你填写的会议服务器。服务器在公司或家里的局域网里时，需要允许访问本地网络。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>zsmeet 录音时要用麦克风，录下你这边说的话。</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>zsmeet 录音时要录电脑里的声音，把飞书、腾讯会议等会议软件里其他人说的话一起录下来。</string>
 </dict>
 </plist>

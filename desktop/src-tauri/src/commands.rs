@@ -1,4 +1,4 @@
-//! 界面能调用的命令（`invoke`）。具体的事都在 core.rs 里做，这里只做和 Tauri 相关的部分。
+//! 界面能调用的命令（`invoke`）。具体的事都在 core.rs、recorder/ 里做，这里只做和 Tauri 相关的部分。
 
 use std::sync::Arc;
 
@@ -8,8 +8,10 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::core::{AppState, Core};
 use crate::export;
+use crate::recorder::{Devices, Recorder, RecorderState};
 
 type CoreState<'a> = State<'a, Arc<Core>>;
+type RecorderHandle<'a> = State<'a, Arc<Recorder>>;
 
 /// 当前状态：本地代理的地址和 secret、服务器地址、谁登录了。
 #[tauri::command]
@@ -23,9 +25,13 @@ pub async fn set_server(core: CoreState<'_>, url: String) -> Result<AppState, St
     core.set_server(&url).await
 }
 
-/// 换服务器：先退出登录，再回到「填服务器地址」。
+/// 换服务器：先退出登录，再回到「填服务器地址」。正在录的先结束（见 logout）。
 #[tauri::command]
-pub async fn switch_server(core: CoreState<'_>) -> Result<AppState, String> {
+pub async fn switch_server(
+    core: CoreState<'_>,
+    recorder: RecorderHandle<'_>,
+) -> Result<AppState, String> {
+    recorder.stop().await?;
     Ok(core.switch_server().await)
 }
 
@@ -40,8 +46,10 @@ pub fn login_cancel(core: CoreState) -> AppState {
     core.login_cancel()
 }
 
+/// 退出登录。正在录的先结束：录好的留在这台电脑上，这个账号下次登录时接着传，别的账号看不到、也不会用别人的令牌传。
 #[tauri::command]
-pub async fn logout(core: CoreState<'_>) -> Result<AppState, String> {
+pub async fn logout(core: CoreState<'_>, recorder: RecorderHandle<'_>) -> Result<AppState, String> {
+    recorder.stop().await?;
     Ok(core.logout().await)
 }
 
@@ -137,4 +145,69 @@ async fn save_export_inner(
         .await
         .map_err(|e| format!("文件没能保存到 {}（{e}），请换一个位置", target.display()))?;
     Ok(Some(target.display().to_string()))
+}
+
+// ---- 录音（recorder/） ----
+
+/// 这台电脑上的麦克风。
+#[tauri::command]
+pub async fn recorder_devices(recorder: RecorderHandle<'_>) -> Result<Devices, String> {
+    recorder.devices().await
+}
+
+/// 开始录音（会议要先在服务器上建好，source 是 desktop）。mic：麦克风的 uid 或者 "default"，
+/// null 是不录麦克风；system：录不录电脑的声音。这场会议在这台电脑上有中断了的录音时接着录。
+#[tauri::command]
+pub async fn recorder_start(
+    recorder: RecorderHandle<'_>,
+    meeting_id: String,
+    mic: Option<String>,
+    system: bool,
+) -> Result<RecorderState, String> {
+    recorder.start(&meeting_id, mic, system).await
+}
+
+#[tauri::command]
+pub async fn recorder_pause(recorder: RecorderHandle<'_>) -> Result<RecorderState, String> {
+    recorder.pause().await
+}
+
+#[tauri::command]
+pub async fn recorder_resume(recorder: RecorderHandle<'_>) -> Result<RecorderState, String> {
+    recorder.resume().await
+}
+
+/// 标记重点：记下现在录到第几秒。
+#[tauri::command]
+pub fn recorder_mark(recorder: RecorderHandle) -> Result<RecorderState, String> {
+    recorder.mark()
+}
+
+/// 结束录音。录好的在后台传完，再告诉服务器开始处理。
+#[tauri::command]
+pub async fn recorder_stop(recorder: RecorderHandle<'_>) -> Result<RecorderState, String> {
+    recorder.stop().await
+}
+
+/// 中断了的录音不接着录了：把录好的传上去，告诉服务器开始处理。
+#[tauri::command]
+pub fn recorder_finish(
+    recorder: RecorderHandle,
+    meeting_id: String,
+) -> Result<RecorderState, String> {
+    recorder.finish(&meeting_id)
+}
+
+/// 删掉这台电脑上一段中断了的、传不上去的录音。
+#[tauri::command]
+pub fn recorder_discard(
+    recorder: RecorderHandle,
+    meeting_id: String,
+) -> Result<RecorderState, String> {
+    recorder.discard(&meeting_id)
+}
+
+#[tauri::command]
+pub fn recorder_state(recorder: RecorderHandle) -> RecorderState {
+    recorder.state()
 }

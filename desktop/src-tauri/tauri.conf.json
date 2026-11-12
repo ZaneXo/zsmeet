@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../../web/dist-desktop",
     "devUrl": "http://localhost:5174",
-    "beforeDevCommand": "pnpm -C ../web install --frozen-lockfile && pnpm -C ../web exec vite --mode desktop --port 5174 --strictPort",
-    "beforeBuildCommand": "pnpm -C ../web install --frozen-lockfile && pnpm -C ../web build --mode desktop"
+    "beforeDevCommand": "bash scripts/build-recorder.sh && pnpm -C ../web install --frozen-lockfile && pnpm -C ../web exec vite --mode desktop --port 5174 --strictPort",
+    "beforeBuildCommand": "bash scripts/build-recorder.sh && pnpm -C ../web install --frozen-lockfile && pnpm -C ../web build --mode desktop"
   },
   "app": {
     "windows": [
@@ -39,6 +39,7 @@
     "active": true,
     "targets": ["app", "dmg"],
     "category": "Productivity",
+    "externalBin": ["binaries/zsmeet-recorder"],
     "shortDescription": "zsmeet 会议纪要",
     "copyright": "© 2026 zsmeet contributors · Apache License 2.0",
     "icon": [
@@ -50,7 +51,8 @@
     ],
     "macOS": {
       "minimumSystemVersion": "14.4",
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "entitlements.plist"
     }
   },
   "plugins": {

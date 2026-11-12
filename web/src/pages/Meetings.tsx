@@ -50,7 +50,8 @@ export function meetingChip(m: Meeting): { tone: Tone; text: string } {
 }
 
 const isActive = (m: Meeting) => m.status === "queued" || m.status === "processing";
-const isRecording = (m: Meeting) => m.source === "record" && m.status === "uploading";
+// 桌面版里也盯着桌面版录的会议：这台电脑正在录的那一场要一直显示「电脑录音中」
+const isRecording = (m: Meeting) => (m.source === "record" || (isDesktop && m.source === "desktop")) && m.status === "uploading";
 
 export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
   const [input, setInput] = useState("");
@@ -104,7 +105,10 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1.5">
           <h1 className="text-[26px] font-bold">会议</h1>
-          <p className="text-sm text-muted">在网页上录音，或者上传录音文件，自动转写、区分说话人并生成纪要。会议默认团队里的人都能看到，创建者可以改成只给指定的人看。</p>
+          <p className="text-sm text-muted">
+            {isDesktop ? "录下电脑里会议软件的声音和麦克风" : "在网页上录音"}
+            ，或者上传录音文件，自动转写、区分说话人并生成纪要。会议默认团队里的人都能看到，创建者可以改成只给指定的人看。
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
           <label className="relative block w-72 max-w-full">
@@ -119,13 +123,11 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
               问会议
             </Button>
           )}
-          {!isDesktop && (
-            <AppLink to="/record" className={buttonClass("primary")}>
-              <Icon name="mic" />
-              开始录音
-            </AppLink>
-          )}
-          <Button variant={isDesktop ? "primary" : "default"} onClick={() => setUploading(true)}>
+          <AppLink to="/record" className={buttonClass("primary")}>
+            <Icon name="mic" />
+            开始录音
+          </AppLink>
+          <Button onClick={() => setUploading(true)}>
             <Icon name="upload" />
             上传录音
           </Button>
@@ -212,19 +214,13 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
             <>你还没有创建过会议。别人创建的会议在「全部」里。</>
           ) : (
             <div className="flex flex-col items-center gap-4">
-              <span>
-                {isDesktop
-                  ? "还没有会议。上传一段会议录音，几分钟后就能看到转写和纪要。"
-                  : "还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。"}
-              </span>
+              <span>还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。</span>
               <span className="flex flex-wrap justify-center gap-2.5">
-                {!isDesktop && (
-                  <AppLink to="/record" className={buttonClass("primary")}>
-                    <Icon name="mic" />
-                    开始录音
-                  </AppLink>
-                )}
-                <Button variant={isDesktop ? "primary" : "default"} onClick={() => setUploading(true)}>
+                <AppLink to="/record" className={buttonClass("primary")}>
+                  <Icon name="mic" />
+                  开始录音
+                </AppLink>
+                <Button onClick={() => setUploading(true)}>
                   <Icon name="upload" />
                   上传录音
                 </Button>

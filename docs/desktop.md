@@ -13,8 +13,9 @@
 
 ```
 desktop/
-  src-tauri/        Rust：本地代理、登录、钥匙串、菜单栏、录音管理（第三阶段）
-  recorder/         Swift：录系统声音和麦克风的小程序（第三阶段）
+  src-tauri/        Rust：本地代理、登录、钥匙串、菜单栏、录音管理（src/recorder/）
+  recorder/         Swift：录电脑声音和麦克风的小程序 zsmeet-recorder
+  scripts/          build-recorder.sh：构建录音小程序，放到 src-tauri/binaries/ 给 Tauri 打包
 web/src/platform/   网页版和桌面版不一样的地方（见下）
 ```
 
@@ -50,7 +51,7 @@ Rust 在 App 进程里起一个只监听 `127.0.0.1` 随机端口的 HTTP 代理
 - `Authorization: Bearer zsm_…` 在所有要登录的接口上都能用，和网页的登录状态一样有效（包括 `/api/meetings/{id}/audio`）。停用的账号、被吊销的令牌返回 401。
 - `GET /api/me/devices`、`DELETE /api/me/devices/{id}`：账号页上列出已登录的 App（设备名、上次使用时间），可以退出某一台。`POST /api/apps/logout`（带令牌）：退出当前这台。
 - 改密码、用重置链接设新密码、停用账号时，这个人的 App 令牌全部作废（和网页上其他设备的登录一起退出）。
-- 会议来源多一种 `desktop`（桌面版录音），界面上显示「电脑录音」。
+- 会议来源多一种 `desktop`，界面上显示「桌面版录音」。
 - `/api/status` 多一个 `api` 版本号（整数，从 1 开始），App 发现服务器太旧时提示升级服务器。
 
 ### 平台差异（`web/src/platform/`）
@@ -64,22 +65,99 @@ Rust 在 App 进程里起一个只监听 `127.0.0.1` 随机端口的 HTTP 代理
 | 进度推送 | `EventSource` | 用 `fetch` 读流（`EventSource` 加不了 `X-Zsmeet-App`） |
 | 下载（导出） | 浏览器下载 | 保存对话框（Rust 取回文件、写到选的位置，界面不需要文件读写权限） |
 | 外部链接 | 新标签页 | 系统浏览器 |
-| 录音 | 浏览器录音（MediaRecorder） | 原生录音（第三阶段）；在那之前不放录音入口 |
+| 录音 | 浏览器录音（MediaRecorder） | 原生录音：电脑里的声音和麦克风（见下面的「录音」） |
 | 管理员设置 | 有 | 先只放「在网页里打开」的入口 |
 | 账号 | 改密码、关联飞书 | 服务器地址、退出登录、切换服务器；改密码、关联飞书「在网页里打开」 |
 | 离线 | 无 | 顶上显示「离线」提示条，连上以后自动重新取数据 |
 
 用哪一边由构建时的 `VITE_PLATFORM` 决定（`--mode desktop` 时是 desktop），是常量，网页版的构建里没有桌面版的代码。
 
-### 录音（第三阶段）
+### 录音（第三阶段，已完成）
 
-- Swift 小程序 `zsmeet-recorder`：Core Audio 进程音频捕获录系统声音、AVAudioEngine 录麦克风，混成一路，编码成 AAC（ADTS），每 10 秒落一个分片到本地目录；支持暂停、继续、标记重点、电平。
-- Rust 管理它，把分片按序号上传到 `PUT /api/meetings/{id}/chunks/{seq}`，断网就留在本地，恢复后接着传，App 重启也能接着传；结束时 `POST …/complete`。
-- 菜单栏：录音时长、暂停、标记、结束。关掉窗口录音不停。
+```
+界面（录音页）──invoke──▶ Rust（src-tauri/src/recorder/）──stdin 命令──▶ zsmeet-recorder（Swift）
+     ▲                          │    ▲                                           │
+     └──── recorder://state ────┘    └──────── stdout 事件、<序号>.aac 分片 ◀──────┘
+                                │
+                                └── PUT …/chunks/{seq}、PUT …/marks、POST …/complete ──▶ 服务器
+```
+
+录音、上传都在 App 里，界面只发命令、显示状态：关掉窗口、切到别的页面录音都不停，菜单栏上也能暂停、标记、结束。
+
+#### 录音小程序 zsmeet-recorder（`desktop/recorder/`）
+
+- 打包在 App 里（`zsmeet.app/Contents/MacOS/zsmeet-recorder`，Tauri 的 `externalBin`），由 App 启动，权限算在 App 头上：弹窗、系统设置里都是 zsmeet。`desktop/scripts/build-recorder.sh` 用 swiftc 把 Apple 芯片和 Intel 各编一份、用 lipo 合成通用的（只装 Command Line Tools 也能编），`tauri dev`、`tauri build` 之前自动执行。打包时 Tauri 用 App 的身份重新签名，带上 hardened runtime 和 `entitlements.plist` 里的 `com.apple.security.device.audio-input`（没有它，麦克风录到的全是静音）。App 的 Info.plist 里有麦克风（`NSMicrophoneUsageDescription`）和录制系统音频（`NSAudioCaptureUsageDescription`）的说明。
+- `zsmeet-recorder devices`：标准输出一行 `{"microphones":[{"uid":"…","name":"…","default":true}]}`。只读设备信息，不弹权限窗口。
+- `zsmeet-recorder record --out <目录> [--start-seq N] [--chunk-seconds 10] [--mic <uid> | --mic default | --no-mic] [--no-system] [--input-file <音频文件> [--realtime]]`
+  - `--input-file` 是测试用的：拿音频文件代替麦克风和电脑声音（不要权限、不弹窗），尽快读完，读完自动结束（和收到 stop 一样）；加 `--realtime` 按文件的实际时长读，用来测暂停、继续。
+  - `--start-seq N`：接着录一场中断了的录音时，第一片写成 N。目录里已经有序号不小于 N 的分片时拒绝开始（`chunk_exists`），不会覆盖。
+- 标准输入一行一个命令：`{"cmd":"pause"}`、`{"cmd":"resume"}`、`{"cmd":"stop"}`，标准输入关掉等于 stop；SIGINT、SIGTERM、SIGHUP 也按 stop 处理。标准输出一行一个事件（日志写在标准错误）：
+
+| 事件 | 说明 |
+|---|---|
+| `{"event":"started","sample_rate":48000,"channels":1,"mic":"<麦克风名>"或null,"system":true}` | 开始录了。第一次录音时要等用户点完权限弹窗，可能要等很久 |
+| `{"event":"level","seconds":12.3,"mic":0.5,"system":0.2}` | 约每 100 毫秒一个：录了多少秒（不算暂停），两路的音量（0 到 1）。暂停时没有 |
+| `{"event":"chunk","seq":3,"path":"<绝对路径>","bytes":80000,"seconds":10.005}` | 一片写好了：先写 `<序号>.aac.part`、落盘，改名成 `<序号>.aac` 以后才报告 |
+| `{"event":"paused"}`、`{"event":"resumed"}` | 暂停时先把正在写的那一片写完（`paused` 前面紧跟着一个 `chunk`） |
+| `{"event":"warning","code":"mic_denied","message":"…"}` | 有一路录不了，另一路照常录。code 是 `mic_denied`、`mic_unavailable`、`system_denied`、`system_unavailable`，message 是给用户看的中文，说了怎么处理 |
+| `{"event":"error","code":"no_source","message":"…"}` | 录不下去了，接着以 1 退出（参数不对是 `bad_args`，以 2 退出） |
+| `{"event":"stopped","next_seq":7,"seconds":65.2}` | 停好了，最后一片也写完了，接着以 0 退出 |
+
+- 分片 `<目录>/<序号>.aac`：AAC-LC、48 kHz、单声道、约 64 kbps、ADTS，每片约 10 秒（按录到的声音算，不算暂停的时间），不会有空的分片。
+  - 整场录音只建一个编码器，暂停、切分片都不重建，切分片只是把 ADTS 帧分到不同的文件里：所有分片按序号接起来就是一路连续的 ADTS，时长和录到的一样。每片重开编码器的话，每片开头多出约 44 毫秒的预热，一小时差十几秒。编码器开头的预热里够一整帧的部分丢掉，只剩 1.3 毫秒，标记的时间点和转写的时间都对得上。
+  - 服务器把分片按序号原样接起来交给 ffmpeg，和网页录音的分片走同一条路。
+- 混音：麦克风和电脑声音各自转成 48 kHz 单声道，按时间混成一路。两个设备的时钟不一样快、交数据时快时慢，所以按经过的时间取：每一路先攒 0.15 秒，取的时候不够就补静音，积压超过 0.5 秒丢掉最早的，两路一直对得上。暂停时采到的声音直接丢掉，什么都不编码；继续时还用同一个编码器。结束时把编码器里剩下的编进最后一片（可能不满 10 秒）。
+- 权限：麦克风用 AVCaptureDevice 查，还没问过就弹窗问。电脑声音用 Core Audio 的进程音频捕获（`CATapDescription` + `AudioHardwareCreateProcessTap`，放进一个只有本进程看得见的聚合设备）；苹果没有公开查这个权限的接口，用系统 TCC 框架里的 `TCCAccessPreflight`、`TCCAccessRequest` 查和问（将来找不到这两个函数就照常开始，系统第一次录的时候自己弹窗，只是拒绝了的话发现不了，录到的是静音）。一路录不了发 warning、录另一路；两路都录不了发 error（`no_source`）。
+- 结束时拆掉 tap 和聚合设备再退出。结束卡住 8 秒（`stop_timeout`）或者结束时又收到一次信号（`killed`）就发 error 直接退出，系统会收回本进程私有的设备。
+
+#### App 里的录音管理（`desktop/src-tauri/src/recorder/`）
+
+- 找录音小程序：环境变量 `ZSMEET_RECORDER`，没设就用 App 主程序旁边的 `zsmeet-recorder`。一次只录一场；stdin 一直开着（关掉就是让它停），stderr 记进日志。
+- 本地数据：`<App 数据目录>/recordings/<会议 id>/`（`~/Library/Application Support/io.github.zanexo.zsmeet/recordings/`，只有自己能进，0700），放 `recording.json` 和录音小程序写的分片。`recording.json` 记着 `meeting_id`、`server`、`user_id`、`title`、`started_at`、`next_seq`（录好了几片）、`uploaded`（从第 0 片起连续传上去了几片）、`marks`、`seconds`、`status`（`recording`、`stopped`、`interrupted`、`completed`、`failed`）、`error`；先写临时文件再改名。
+- 界面能调用的命令（出错时返回给用户看的中文）：
+
+| 命令 | 做什么 |
+|---|---|
+| `recorder_devices()` | `{ microphones: [{ uid, name, default }] }` |
+| `recorder_start({ meetingId, mic, system })` | 会议要先在服务器上建好（`source: "desktop"`）。mic 是麦克风的 uid 或 `"default"`，null 是不录麦克风；麦克风和电脑的声音至少录一个。这台电脑上有这场会议中断了的录音时接着录。等录音小程序报了 `started` 才返回（最多等 2 分钟，留给权限弹窗） |
+| `recorder_pause()`、`recorder_resume()` | 暂停、继续 |
+| `recorder_mark()` | 记下现在录到第几秒（精确到 0.1 秒，1 秒内连着点只算一次，最多 500 个），顺带把整份标记存到服务器（`PUT …/marks`，存不上也没关系，complete 时一起交） |
+| `recorder_stop()` | 结束，等最后一片写完。都传完以后 `POST …/complete {chunks: next_seq, marks}` |
+| `recorder_finish({ meetingId })` | 中断了的录音不接着录了：传完录好的、complete（中断前最后一片之后点的标记不要）。传不上去的也可以用它再试一次 |
+| `recorder_discard({ meetingId })` | 删掉这台电脑上一段中断了的、传不上去的录音（服务器上已经收到的不动） |
+| `recorder_state()` | 现在的状态 |
+
+- 事件 `recorder://state`：状态一变就发，录音时随音量约每 100 毫秒发一次。内容（各个命令的返回值也是它）：`{ status, meetingId, title, seconds, level: { mic, system } 或 null, mic, system, marks, warnings: [{ code, message }], error, uploads: [{ meetingId, title, recorded, uploaded, status, error }] }`。
+  - `status`：`idle`、`starting`（在等录音小程序开始，可能在等权限弹窗）、`recording`、`paused`、`stopping`（在等最后一片写完）。
+  - `warnings`：有一路录不了的提醒；没能开始录音时留着录音小程序说的原因，下次开始录音时清掉。`error`：上一场不正常结束的原因（中断了、录满 6 小时自动结束了）。
+  - `uploads`：当前账号在这台电脑上的录音，`status` 是 `recording`（边录边传）、`uploading`、`waiting`（暂时传不上去，过一会儿自动再试）、`completing`、`completed`（App 重启前一直留着）、`interrupted`、`failed`。录音时就传不上去了（会议被删了）也是 `failed`，录音照常进行。
+- 接着录：从 `recording.json` 的 `next_seq`、目录里已有分片的下一片、服务器已经收到的分片（`GET …/chunks`）的下一片里取最大的开始写，哪一片都不会被覆盖。秒数和标记接着上次的：新标记的时间从已经写好的分片的总时长算起，和服务器接起来的录音对得上。
+- 上传：后台一直在跑，只传当前登录的账号（同一个服务器地址、同一个用户 id）的录音，用它的令牌；别的账号的录音留在本地、界面上也不显示。按开始录音的先后，每场按序号一片一片地 `PUT /api/meetings/{id}/chunks/{seq}`（`Content-Type: audio/aac`，body 是分片本身），记下传到哪一片以后再删本地的文件。
+  - 连不上、超时、5xx、408、429：这一场等一会儿再试（1、2、5、10、20、30 秒，之后每 30 秒），不耽误别的；登录的账号一变就马上再试。
+  - 401：App 退出登录，同一个账号重新登录以后接着传。录音不停。
+  - 403、404、其他 4xx、分片返回 409（会议已经上传完成）：不再传，算失败，等用户删掉。
+  - complete 返回 409：看一眼会议，已经不在 `uploading` 就算完成（上次其实成功了），否则算失败，显示服务器说的原因。完成以后删掉整个目录。
+  - App 重启以后接着传；状态还是 `recording` 的（录音小程序已经不在了）算中断，中断的录音先把录好的传着，等用户选接着录、直接结束还是删掉。
+- 最长 6 小时（服务器单场最多处理 6 小时）：录到 5 小时 58 分自动结束，录好的照常上传。
+- 账号：退出登录、切换服务器会先结束正在录的那一场（界面上先确认），换成别的账号登录时也结束；录音留在本地，只等原来的账号登录。
+- 菜单栏：录音时图标旁边显示录了多久（每秒更新，暂停时加「已暂停」），菜单里有 暂停/继续、标记重点、结束录音，还有没传完、需要处理的录音。关掉窗口录音不停；退出 App（菜单栏的「退出」、⌘Q、关机）时先让录音小程序结束，最多等 5 秒写完最后一片，没传完的下次打开接着传。
+
+#### 界面（`web/src/platform/`，只在桌面版里）
+
+- 录音页 `/record`（`DesktopRecord.tsx`，不是网页录音的 MediaRecorder）：开始前填标题、模板、本场热词、谁能看（和网页录音一样），选麦克风（或者不录）、录不录电脑里的声音（说明是录飞书、腾讯会议这些会议软件里其他人的声音）。开始时先通过平常的接口客户端（本地代理）`POST /api/meetings {title, source: "desktop", template, hotwords, visibility}`，再 `recorder_start`；开始不了就删掉刚建的空会议。录音中：时长、两路音量、暂停/继续、标记重点（显示个数）、结束录音（要确认）、提醒（没有权限时说去哪里打开）。结束以后：上传进度，传完给会议链接。
+- 别的页面（`DesktopRecordings.tsx`）：录音时顶上一条（时长、回到录音），没传完的录音一行一个（接着录、传上去生成纪要、删除）；会议页面上，这场会议正在这台电脑上录、在传时显示出来。
+- 网页版的构建里没有这些代码。
+
+#### 测试
+
+- `desktop/recorder/test.sh`：录音小程序的单元测试（事件格式、ADTS、分片、混音、编码、暂停）和端到端测试（真的跑 zsmeet-recorder，用 `--input-file`，ffmpeg、ffprobe 检查分片能解码、接起来的时长对得上）。
+- `cargo test`：假的录音小程序（一个 sh 脚本，照协议说话）加假的服务器，测录音、上传、断网、401、中断和接着录、换账号。
+- `real_helper` 开头的 Rust 测试（`#[ignore]`）：真的录音小程序（`ZSMEET_RECORDER`，`--input-file`）加 App 的录音管理和假的服务器，录一遍、暂停、标记、结束、传完，用 ffprobe 检查服务器收到的分片接起来能完整解码，时长和原来的声音相差不到 50 毫秒。`make desktop-test` 和 CI 都会跑。
+- 没法自动测的：真的麦克风、电脑声音和权限弹窗。用打包出来的 App（`make desktop-build`）试：第一次录音时两个弹窗都写着 zsmeet，说话时麦克风的音量条会动，放视频、开会时电脑声音的音量条会动，录出来两路都有。开发模式（`make desktop-dev`）下权限算在终端头上。
 
 ## 分阶段
 
 1. **服务端**：App 令牌、授权页、设备管理、`desktop` 来源、`api` 版本号。
 2. **桌面外壳**：Tauri 项目、本地代理和离线缓存、登录、钥匙串、菜单栏、平台差异、CI 打包。
-3. **录音**：Swift 录音程序、上传、录音页和菜单栏的录音控制。
+3. **录音**：Swift 录音程序、上传、录音页和菜单栏的录音控制。已完成，真的麦克风和电脑声音还要在真机上试（见上面的「测试」）。
 4. **收尾**：审查、在真机上试、文档、发布流程。

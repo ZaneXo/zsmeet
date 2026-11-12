@@ -4,6 +4,7 @@ import { api, errorMessage, unwrap } from "./api/client";
 import { Shell } from "./components/Shell";
 import { isDesktop } from "./platform";
 import { switchServer } from "./platform/desktop";
+import { DesktopRecordPage } from "./platform/DesktopRecord";
 import { DesktopNotInitialized, DesktopSessionExpired } from "./platform/DesktopScreens";
 import { Button, Notice, Spinner } from "./components/ui";
 import { APP_AUTHORIZE_PATH, pendingAuthorize } from "./lib/appAuthorize";
@@ -78,8 +79,8 @@ export function App() {
             />
           }
         />
-        {/* 桌面版的录音是原生录音（第三阶段），网页录音不放进 App */}
-        <Route path="/record" element={isDesktop ? <Navigate to="/" replace /> : <RecordPage user={data.user} />} />
+        {/* 桌面版用 App 自己的录音（录电脑里会议软件的声音和麦克风），不用网页录音 */}
+        <Route path="/record" element={isDesktop ? <DesktopRecordPage /> : <RecordPage user={data.user} />} />
         <Route path="/settings/:section?" element={<SettingsPage user={data.user} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

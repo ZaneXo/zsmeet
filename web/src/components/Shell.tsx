@@ -1,14 +1,18 @@
 import { useMutation } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useLocation } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import { AppLink } from "./AppLink";
 import { api, unwrap } from "../api/client";
 import type { User } from "../api/client";
-import { hms, session, useRecording } from "../lib/recording/session";
+import { hms } from "../lib/format";
+import { session, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
 import { isDesktop } from "../platform";
 import { logout as desktopLogout } from "../platform/desktop";
+import { DesktopRecorderBanner, DesktopRecordingBadge } from "../platform/DesktopRecordings";
 import { OfflineBanner } from "../platform/OfflineBanner";
+import { recorderState } from "../platform/recorder";
+import { signOutNote } from "../platform/recorderView";
 import { AbandonedRecordingsBanner } from "./LocalRecordings";
 import { Icon } from "./ui";
 
@@ -22,6 +26,8 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
       if (!isDesktop) window.location.assign("/");
     },
   });
+
+  const navigate = useNavigate();
 
   // 会议详情页也算在「会议」下面
   const { pathname } = useLocation();
@@ -44,14 +50,12 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
           <Icon name="list" />
           会议
         </AppLink>
-        {/* 桌面版的录音（录电脑里会议软件的声音）在第三阶段做，先不放网页录音的入口 */}
-        {!isDesktop && (
-          <AppLink to="/record" className={navClass(section === "record")} aria-current={section === "record" ? "page" : undefined}>
-            <Icon name="mic" />
-            网页录音
-            <RecordingBadge />
-          </AppLink>
-        )}
+        {/* 桌面版是 App 自己的录音（录电脑里会议软件的声音和麦克风），网页版是浏览器录音 */}
+        <AppLink to="/record" className={navClass(section === "record")} aria-current={section === "record" ? "page" : undefined}>
+          <Icon name="mic" />
+          {isDesktop ? "录音" : "网页录音"}
+          {isDesktop ? <DesktopRecordingBadge /> : <RecordingBadge />}
+        </AppLink>
         <AppLink to="/settings" className={navClass(section === "settings")} aria-current={section === "settings" ? "page" : undefined}>
           <Icon name="settings" />
           设置
@@ -69,7 +73,11 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
             type="button"
             title="退出登录"
             aria-label="退出登录"
-            onClick={() => logout.mutate()}
+            onClick={() => {
+              // 桌面版正在录音、有录音没传完：先到账号页，说清楚退出以后录音会怎样，再确认退出
+              if (isDesktop && signOutNote(recorderState(), "退出登录")) navigate("/settings?logout=1");
+              else logout.mutate();
+            }}
             className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-muted hover:bg-subtle hover:text-ink"
           >
             <Icon name="logout" />
@@ -80,11 +88,9 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
         <div className="mx-auto w-full max-w-5xl empty:hidden">
           <OfflineBanner />
         </div>
-        {!isDesktop && (
-          <div className="mx-auto w-full max-w-5xl empty:hidden">
-            <AbandonedRecordingsBanner user={user} skip={meetingId} />
-          </div>
-        )}
+        <div className="mx-auto w-full max-w-5xl empty:hidden">
+          {isDesktop ? <DesktopRecorderBanner skip={meetingId} /> : <AbandonedRecordingsBanner user={user} skip={meetingId} />}
+        </div>
         <div>{children}</div>
       </main>
     </div>

@@ -5,17 +5,22 @@ import Foundation
 /// 录音的流程：分片、目录、暂停、按时钟混音
 let recordingTests: [(String, () throws -> Void)] = [
     ("分片：按包切，写的时候是 .part，写满落盘改名", testChunkWriter),
+    ("分片：最后一片（第 3999 片）够长了也不切，写到服务器能收的大小为止，不会有第 4000 片", testChunkWriterLastChunk),
     ("分片：从文件名认出序号", testChunkSeqFromFileName),
     ("录音目录：建好，不覆盖已经录好的分片", testOutputDirectory),
     ("录音目录：列不出里面有什么时不录（看不到已经录好的分片，会覆盖掉）", testOutputDirectoryUnreadable),
     ("分片和录音小程序新建的目录只有自己能读写", testPrivatePermissions),
     ("暂停：丢掉暂停期间的声音，正在写的分片先落盘", testPipelinePause),
+    ("录满 4000 片：最后一片够长了提醒一次，后面的声音都写进它", testPipelineChunkLimit),
+    ("录满 4000 片：暂停时写好的是最后一片，提醒，继续以后的声音没地方放", testPipelinePauseOnLastChunk),
     ("现场录音：按时钟出声音，两路时钟快慢不一也对得上", testLiveEngineFollowsClock),
     ("现场录音：处理线程卡住 2 秒，补上时一点声音都不丢", testLiveEngineCatchesUpAfterStall),
     ("现场录音：点暂停前采到的都编进去，暂停期间采到的一点都不编", testLiveEnginePause),
     ("现场录音：麦克风一直全是 0 时提醒一次", testLiveEngineSilenceWarning),
     ("现场录音：一路的采样率处理不了时只去掉这一路并提醒，另一路照常录", testLiveEngineDropsUnsupportedSource),
     ("现场录音：转换采样率出错时提醒一次，录音不停", testLiveEngineConversionError),
+    ("现场录音：最后一片写不下了自己结束，和收到 stop 一样", testLiveEngineStopsWhenLastChunkIsFull),
+    ("读文件录音：最后一片写不下了自己结束，和读完了一样", testFileEngineStopsWhenLastChunkIsFull),
 ]
 
 /// 数一数 ADTS 帧，不是完整的 ADTS 流时返回 nil
@@ -70,6 +75,48 @@ func testChunkWriter() throws {
     expectEqual(writer.nextSeq, 7)
     let names = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
     expectEqual(names, ["4.aac", "5.aac", "6.aac"])
+}
+
+func testChunkWriterLastChunk() throws {
+    let directory = try temporaryDirectory("last-chunk")
+    let packet = [UInt8](repeating: 0xAB, count: 100)
+    // 每片 5 包（0.1 秒）；最后一片最多 12 包（每包连帧头 107 字节）
+    let writer = ChunkWriter(directory: directory, startSeq: ChunkWriter.lastSeq - 1, chunkSeconds: 0.1, maxBytes: 12 * 107)
+    /// 写 count 个包，返回写好的分片的序号
+    func append(_ count: Int, to writer: ChunkWriter) throws -> [Int] {
+        try (0..<count).compactMap { _ in try packet.withUnsafeBytes { try writer.append(packet: $0) }?.seq }
+    }
+    expectEqual(try append(5, to: writer), [3998], "最后一片之前照常切")
+    expectEqual(try append(4, to: writer), [])
+    expect(!writer.reachedChunkLimit, "最后一片还不够一片长")
+    expectEqual(try append(1, to: writer), [], "最后一片够长了也不切")
+    expect(writer.reachedChunkLimit, "到了片数上限")
+    expectEqual(try append(7, to: writer), [], "后面的接着写进最后一片")
+    expect(!writer.isFull, "正好 12 包还放得下")
+    expectEqual(try append(1, to: writer), [])
+    expect(writer.isFull, "再写就超过最多的字节数：不写了")
+    let last = try writer.finishChunk()
+    expectEqual(last?.seq, 3999)
+    expectEqual(last?.packets, 12)
+    expectEqual(last?.bytes, 12 * 107)
+    expectEqual(writer.nextSeq, ChunkWriter.maxChunks)
+    // 最后一片写好了：什么都不写，不会有第 4000 片
+    expectEqual(try append(10, to: writer), [])
+    expectEqual(try writer.finishChunk(), nil)
+    expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), ["3998.aac", "3999.aac"])
+    expectEqual(adtsFrameCount(try Data(contentsOf: ChunkWriter.url(directory: directory, seq: 3999))), 12)
+
+    // 最后一片还不够长就写好了（暂停时）：也到了上限，之后什么都不写
+    let pausedDirectory = try temporaryDirectory("last-chunk-paused")
+    let paused = ChunkWriter(directory: pausedDirectory, startSeq: ChunkWriter.lastSeq, chunkSeconds: 10)
+    expectEqual(try append(3, to: paused), [])
+    expect(!paused.reachedChunkLimit)
+    expectEqual(try paused.finishChunk()?.seq, 3999)
+    expect(paused.reachedChunkLimit, "最后一片写好了")
+    expect(!paused.isFull, "还没有声音没地方放")
+    expectEqual(try append(1, to: paused), [])
+    expect(paused.isFull, "最后一片写好了，放不下新的包")
+    expectEqual(try FileManager.default.contentsOfDirectory(atPath: pausedDirectory.path), ["3999.aac"])
 }
 
 func testChunkSeqFromFileName() {
@@ -150,30 +197,31 @@ private func sine(seconds: Double, frequency: Double = 300) -> [Float] {
     (0..<Int(seconds * 48_000)).map { Float(0.3 * sin(2 * Double.pi * frequency * Double($0) / 48_000)) }
 }
 
+/// 喂 seconds 秒的正弦波，每次 960 个采样（20 毫秒，正好 6 个周期），平方和记 1
+private func feed(_ pipeline: RecordingPipeline, seconds: Double) throws {
+    let block = sine(seconds: 0.02)
+    var remaining = Int(seconds * 48_000)
+    while remaining > 0 {
+        let n = min(block.count, remaining)
+        try block.withUnsafeBufferPointer { buffer in
+            try pipeline.feed(UnsafeBufferPointer(rebasing: buffer[0..<n]), micEnergy: 1, systemEnergy: 0)
+        }
+        remaining -= n
+    }
+}
+
 func testPipelinePause() throws {
     let directory = try temporaryDirectory("pipeline")
     let events = RecordedEvents()
     let pipeline = RecordingPipeline(encoder: try AACEncoder(),
                                      chunks: ChunkWriter(directory: directory, startSeq: 0, chunkSeconds: 1),
                                      events: events)
-    let audio = sine(seconds: 1)
-    func feed(seconds: Double) throws {
-        var remaining = Int(seconds * 48_000)
-        while remaining > 0 {
-            let n = min(960, remaining)
-            try audio.withUnsafeBufferPointer { buffer in
-                try pipeline.feed(UnsafeBufferPointer(rebasing: buffer[0..<n]), micEnergy: 1, systemEnergy: 0)
-            }
-            remaining -= n
-        }
-    }
-
-    try feed(seconds: 1.5)
+    try feed(pipeline, seconds: 1.5)
     try pipeline.pause()
-    try feed(seconds: 1)
+    try feed(pipeline, seconds: 1)
     expectEqual(pipeline.recordedSamples, 72_000, "暂停期间的声音不算")
     pipeline.resume()
-    try feed(seconds: 0.5)
+    try feed(pipeline, seconds: 0.5)
     let result = try pipeline.finish()
     expectEqual(result, RecordingResult(nextSeq: 3, seconds: 2))
 
@@ -187,6 +235,51 @@ func testPipelinePause() throws {
     let frames = try (0..<3).map { try adtsFrameCount(Data(contentsOf: ChunkWriter.url(directory: directory, seq: $0))) ?? -1 }
     expectEqual(frames[0], 47, "1 秒 = 46.9 包，向上取整")
     expectEqual(frames.reduce(0, +), Int((Double(96_000 + 2_112) / 1_024).rounded(.up)) - 2)
+}
+
+func testPipelineChunkLimit() throws {
+    let directory = try temporaryDirectory("pipeline-limit")
+    let events = RecordedEvents()
+    // 从倒数第 2 片开始录，每片 1 秒
+    let pipeline = RecordingPipeline(encoder: try AACEncoder(),
+                                     chunks: ChunkWriter(directory: directory, startSeq: ChunkWriter.lastSeq - 1, chunkSeconds: 1),
+                                     events: events)
+    try feed(pipeline, seconds: 1.5)
+    expectEqual(events.names.filter { $0 != "level" }, ["chunk"], "第 3998 片照常切")
+    try feed(pipeline, seconds: 2.9)
+    // 第 3999 片够 1 秒了也不切，提醒一次（App 收到就结束录音）；后面的声音接着写进它
+    expectEqual(events.names.filter { $0 != "level" }, ["chunk", "warning"])
+    expect(events.all.contains(#"{"event":"warning","code":"chunk_limit","message":"\#(RecordingPipeline.chunkLimitMessage)"}"#), "提醒")
+    expect(!pipeline.isFull, "最后一片还写得下")
+    let result = try pipeline.finish()
+    expectEqual(result, RecordingResult(nextSeq: ChunkWriter.maxChunks, seconds: 4.4))
+    expectEqual(events.names.filter { $0 != "level" }, ["chunk", "warning", "chunk"], "结束时写好最后一片，不再提醒")
+    expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), ["3998.aac", "3999.aac"])
+    // 最后一片装下了第 1 秒以后的全部声音
+    let frames = try [3998, 3999].map { try adtsFrameCount(Data(contentsOf: ChunkWriter.url(directory: directory, seq: $0))) ?? -1 }
+    expectEqual(frames[0], 47)
+    expectEqual(frames.reduce(0, +), Int((Double(211_200 + 2_112) / 1_024).rounded(.up)) - 2)
+}
+
+func testPipelinePauseOnLastChunk() throws {
+    let directory = try temporaryDirectory("pipeline-limit-pause")
+    let events = RecordedEvents()
+    let pipeline = RecordingPipeline(encoder: try AACEncoder(),
+                                     chunks: ChunkWriter(directory: directory, startSeq: ChunkWriter.lastSeq, chunkSeconds: 10),
+                                     events: events)
+    try feed(pipeline, seconds: 0.5)
+    expectEqual(events.names.filter { $0 != "level" }, [], "最后一片还不够 10 秒，不提醒")
+    try pipeline.pause()
+    // 暂停时写好的是最后一片：paused 前面照常紧跟着它；后面录不了了，提醒
+    expectEqual(events.names.filter { $0 != "level" }, ["chunk", "paused", "warning"])
+    expect(!pipeline.isFull, "暂停着，没有声音没地方放")
+    pipeline.resume()
+    try feed(pipeline, seconds: 0.5)
+    expect(pipeline.isFull, "继续以后的声音没地方放：引擎看到它就结束录音")
+    let result = try pipeline.finish()
+    expectEqual(result.nextSeq, ChunkWriter.maxChunks)
+    expectEqual(events.names.filter { $0 != "level" }, ["chunk", "paused", "warning", "resumed"], "只提醒一次，没有别的分片")
+    expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["3999.aac"])
 }
 
 /// 测试用的声音来源：测试直接往环形缓冲里写
@@ -409,4 +502,72 @@ func testLiveEngineConversionError() throws {
         Harness.fail("没有正常结束")
         return
     }
+}
+
+/// 文件有多少字节，读不到时是 -1
+private func fileSize(_ url: URL) -> Int {
+    (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? -1
+}
+
+func testLiveEngineStopsWhenLastChunkIsFull() throws {
+    let directory = try temporaryDirectory("live-limit")
+    let events = RecordedEvents()
+    // 从最后一片开始录，每片 0.5 秒（24 包）。最后一片最多 20 KB：一个包最多 775 字节，够一片长时一定还写得下
+    let maxBytes = 20_000
+    let pipeline = RecordingPipeline(encoder: try AACEncoder(),
+                                     chunks: ChunkWriter(directory: directory, startSeq: ChunkWriter.lastSeq, chunkSeconds: 0.5, maxBytes: maxBytes),
+                                     events: events)
+    let mic = FakeSource(kind: .mic)
+    let clock = ManualClock()
+    let engine = try LiveEngine(sources: [mic], pipeline: pipeline, events: events, clock: { clock.now })
+    var result: Result<RecordingResult, RecorderFailure>?
+    engine.onFinished = { result = $0 }
+    engine.queue.sync { engine.startClock() }
+    // App 一直不结束录音：最后一片写满了自己结束（每包至少有 7 个字节的帧头，2 分钟以内一定写满）
+    for _ in 0..<6_000 where result == nil {
+        clock.advance(milliseconds: 20)
+        mic.push(960)
+        engine.queue.sync { engine.tick() }
+    }
+    guard case .success(let recording)? = result else {
+        Harness.fail("最后一片写不下了也没有自己结束：\(String(describing: result))")
+        return
+    }
+    expect(mic.stopped, "结束时停掉了声音来源")
+    expectEqual(recording.nextSeq, ChunkWriter.maxChunks)
+    expect(recording.seconds > 0.5, "提醒以后接着录了：一共 \(recording.seconds) 秒")
+    expectEqual(events.names.filter { $0 != "level" }, ["warning", "chunk"], "先提醒，最后写好最后一片")
+    expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["3999.aac"])
+    let size = fileSize(ChunkWriter.url(directory: directory, seq: ChunkWriter.lastSeq))
+    expect(size <= maxBytes && size > maxBytes - ADTS.maxFrameLength, "最后一片写到了 \(size) 字节")
+}
+
+func testFileEngineStopsWhenLastChunkIsFull() throws {
+    let directory = try temporaryDirectory("file-limit")
+    let input = directory.appendingPathComponent("in.wav")
+    try writeWAV(input, sine(seconds: 30))
+    let out = try temporaryDirectory("file-limit-out")
+    let events = RecordedEvents()
+    let maxBytes = 20_000
+    let pipeline = RecordingPipeline(encoder: try AACEncoder(),
+                                     chunks: ChunkWriter(directory: out, startSeq: ChunkWriter.lastSeq, chunkSeconds: 0.5, maxBytes: maxBytes),
+                                     events: events)
+    let engine = try FileEngine(reader: try AudioFileReader(path: input.path), pipeline: pipeline)
+    let finished = DispatchSemaphore(value: 0)
+    var result: Result<RecordingResult, RecorderFailure>?
+    engine.onFinished = {
+        result = $0
+        finished.signal()
+    }
+    engine.start()
+    guard finished.wait(timeout: .now() + 30) == .success, case .success(let recording)? = result else {
+        Harness.fail("最后一片写不下了也没有自己结束：\(String(describing: result))")
+        return
+    }
+    expectEqual(recording.nextSeq, ChunkWriter.maxChunks)
+    expect(recording.seconds > 0.5 && recording.seconds < 29, "没读完就结束了：录了 \(recording.seconds) 秒")
+    expectEqual(events.names.filter { $0 != "level" }, ["warning", "chunk"], "先提醒，最后写好最后一片")
+    expectEqual(try FileManager.default.contentsOfDirectory(atPath: out.path), ["3999.aac"])
+    let size = fileSize(ChunkWriter.url(directory: out, seq: ChunkWriter.lastSeq))
+    expect(size <= maxBytes && size > maxBytes - ADTS.maxFrameLength, "最后一片写到了 \(size) 字节")
 }

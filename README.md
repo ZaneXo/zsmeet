@@ -216,7 +216,7 @@ macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自�
 - 录到一半 zsmeet 意外退出、电脑断电：已经录好的部分都在。再打开 zsmeet 时会提示这场录音中断了，可以「接着录」（接在后面，标记的重点也都在），也可以「传上去生成纪要」，或者删掉。
 - 录音的电脑找不回来了（丢了、坏了、一直连不上网）：已经传到服务器的部分还在。会议的创建者或管理员在网页上（或者另一台电脑的 zsmeet 里）打开这场会议，可以先用已经收到的部分生成纪要。那台电脑上还没传上来的部分就用不上了，它之后再打开 zsmeet 会显示这段录音传不上去，删掉就行。
 - 退出登录、切换服务器会先结束正在录的那一场（点的时候会先提醒你）。录好的留在这台电脑上，以后用这个账号登录这台服务器时接着传，换别的账号登录看不到、也不会传。
-- 录音存在 `~/Library/Application Support/io.github.zanexo.zsmeet/recordings/` 下，只有你自己的 macOS 账户能打开；每一片传上去就删掉，整场传完后整个删掉。
+- 录音存在 `~/Library/Application Support/io.github.zanexo.zsmeet/recordings/` 下，只有你自己的 macOS 账户能打开。传上去的分片先留着，等服务器确认整场都收到、开始处理以后才整个删掉（万一有一片其实没传成功，还能补传）；6 小时的录音大约占 170 MB。
 
 **开发**：需要 Rust（[rustup](https://rustup.rs)，版本由 `desktop/src-tauri/rust-toolchain.toml` 固定）和上面「开发」一节的 Node + pnpm。
 

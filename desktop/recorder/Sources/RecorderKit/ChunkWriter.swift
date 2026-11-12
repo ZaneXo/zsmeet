@@ -16,23 +16,45 @@ public struct ChunkInfo: Equatable {
 /// 把编好的 AAC 包加上 ADTS 头分到一个个分片文件里：先写 <seq>.aac.part，
 /// 写满（或者暂停、结束时）先落盘再改名成 <seq>.aac，所以看得到 <seq>.aac 就说明它是完整的。
 /// 只是按包切，不碰编码器，分片拼起来还是同一路流。
+///
+/// 服务器一场会议最多收 maxChunks 片，序号不小于它的分片一个都不写：最后一片（lastSeq）够长了也不切，
+/// 后面的包接着写进它，等 App 结束录音；它再写就超过服务器能收的大小（maxBytes）时不写了（isFull）。
 public final class ChunkWriter {
+    /// 服务器一场会议最多收这么多片（序号 0 到 3999，见 internal/service/meetings.go 的 MaxChunks）
+    public static let maxChunks = 4_000
+    /// 服务器能收的最后一片的序号
+    public static let lastSeq = maxChunks - 1
+    /// 服务器收的一片最多这么多字节（internal/api/meetings.go 的 maxChunkBytes）。64 kbps 的声音约 16 分钟
+    public static let maxChunkBytes = 8 << 20
+
     public let directory: URL
     /// 每片多少个 AAC 包（每包 1024 个采样，约 21 毫秒）
     public let packetsPerChunk: Int
+    /// 最后一片最多多少字节（测试时改小）
+    let maxBytes: Int
     /// 下一个要写的分片序号；正在写的那片也是这个号
     public private(set) var nextSeq: Int
+    /// 写不下了：最后一片放不下新的包（再写就超过 maxBytes，或者它已经写好了），这个包和之后的都没写。
+    /// 录音该结束了
+    public private(set) var isFull = false
 
     private var file: Int32 = -1
     private var buffer: [UInt8] = []
     private var bytes = 0
     private var packets = 0
 
-    public init(directory: URL, startSeq: Int, chunkSeconds: Double) {
+    public init(directory: URL, startSeq: Int, chunkSeconds: Double, maxBytes: Int = ChunkWriter.maxChunkBytes) {
         self.directory = directory
         nextSeq = startSeq
         let packets = chunkSeconds * Double(AACEncoder.sampleRate) / Double(AACEncoder.samplesPerPacket)
         packetsPerChunk = max(1, Int(packets.rounded(.up)))
+        self.maxBytes = maxBytes
+    }
+
+    /// 到了服务器能收的片数上限，App 该结束录音了：正在写的最后一片已经够一片长了（不会再切），
+    /// 或者最后一片已经写好了
+    public var reachedChunkLimit: Bool {
+        isFull || nextSeq > Self.lastSeq || (nextSeq == Self.lastSeq && packets >= packetsPerChunk)
     }
 
     deinit {
@@ -52,18 +74,29 @@ public final class ChunkWriter {
     }
 
     /// 写一个 AAC 包。这一片写满了就落盘，返回它。
+    /// 最后一片写满了也不切，接着往里写；它放不下这个包时什么都不写，isFull 变成 true
     public func append(packet: UnsafeRawBufferPointer) throws -> ChunkInfo? {
+        let frameLength = ADTS.headerLength + packet.count
+        if nextSeq > Self.lastSeq || (nextSeq == Self.lastSeq && packets > 0 && bytes + frameLength > maxBytes) {
+            if !isFull {
+                isFull = true
+                log("服务器能收的最后一片（第 \(Self.lastSeq) 片）放不下了，后面的声音不录了，结束录音")
+            }
+            return nil
+        }
         if file < 0 {
             try openPart()
         }
         buffer.append(contentsOf: ADTS.header(payloadLength: packet.count))
         buffer.append(contentsOf: packet)
-        bytes += ADTS.headerLength + packet.count
+        bytes += frameLength
         packets += 1
         if buffer.count >= 64 * 1_024 {
             try flush()
         }
-        return packets >= packetsPerChunk ? try finishChunk() : nil
+        // 最后一片够长了也不切：再切出来的序号服务器不收
+        guard packets >= packetsPerChunk, nextSeq < Self.lastSeq else { return nil }
+        return try finishChunk()
     }
 
     /// 把正在写的这一片落盘、改成正式的文件名（暂停、结束时调用）。还没有内容时什么都不做，返回 nil。

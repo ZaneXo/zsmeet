@@ -392,8 +392,9 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
     // 录音在别的电脑上（网页版里总是这样）：服务器收到了多少，录音的电脑找不回来时可以先用收到的部分生成纪要
     const elsewhere = <ReceivedSoFar meeting={m} />;
     // 桌面版：这场会议正在这台电脑上录、录音正从这台电脑传的话，照旧显示这台电脑上录音、上传的情况
-    // （那里能接着录、把录下的传上去），不在这里收尾
-    return isDesktop ? <ThisComputerRecording meetingId={m.id} elsewhere={elsewhere} /> : elsewhere;
+    // （那里能接着录、把录下的传上去），不在这里收尾。这台电脑上的录音传不上去了的话（比如断网时接着录的分片
+    // 和服务器上已有的序号重了），那一行只能删掉录音：在它下面也能用服务器已经收到的部分生成纪要，不然这场会议一直结束不了
+    return isDesktop ? <ThisComputerRecording meetingId={m.id} elsewhere={elsewhere} stuck={<ReceivedSoFar meeting={m} here />} /> : elsewhere;
   }
 
   if (m.status === "uploading") {
@@ -527,6 +528,8 @@ type UnfinishedText = {
   live: (last: string) => string;
   /** 录音不传了：可能是怎么了，恢复以后会怎样 */
   stalled: string;
+  /** 跟在「服务器已经收到几片」后面：什么时候可以先用这一部分生成纪要 */
+  offer: string;
   /** 用已经收到的部分生成纪要之前的提醒 */
   confirm: string;
 };
@@ -536,28 +539,45 @@ const UNFINISHED_TEXT: Record<RecordingSource, UnfinishedText> = {
     others: (live) => (live ? "正在录这场会议" : "录的这场会议还没有传完"),
     live: (last) => `这场会议正在录音（${last}）。录音的网页点「结束录音」以后会自动开始处理。`,
     stalled: "录音的网页可能关掉了、断网了，或者正暂停着；它恢复以后会自动接着传。",
+    offer: "如果录音的那台电脑找不回来了，可以先用这一部分生成纪要。",
     confirm: "确定吗？如果录音的网页其实还开着（比如暂停着、断网了），开始处理以后它后面录的部分就传不上来了。",
   },
   // 桌面版录的：录音存在录音的那台电脑上，zsmeet 桌面版开着、连上网就自动接着传（docs/desktop.md 的「上传」）。
-  // 在这里开始处理以后，那台电脑再传分片会得到 409，桌面版把这段录音显示成传不上去，等用户删掉
+  // 在这里开始处理以后，那台电脑再传分片会得到 409，桌面版把这段录音显示成传不上去，等用户删掉。
+  // 那台电脑上的录音也可能自己传不上去了（比如断网时接着录的分片和服务器上已有的序号重了），这时也只能这样结束
   desktop: {
     others: (live) => (live ? "正在用 zsmeet 桌面版录这场会议" : "用 zsmeet 桌面版录的这场会议还没有传完"),
     live: (last) => `这场会议正在用 zsmeet 桌面版录音（${last}）。在录音的电脑上点「结束录音」，录音传完以后会自动开始处理。`,
     stalled:
       "录音的电脑可能断网了、关机了、退出了 zsmeet，或者录音正暂停着。那台电脑上的 zsmeet 桌面版再打开、连上网以后，会自动把剩下的录音传上来。",
+    offer: "如果录音的那台电脑找不回来了，或者那台电脑上的录音传不上来了，可以先用这一部分生成纪要。",
     confirm:
       "确定吗？开始处理以后，那台电脑上还没传上来的录音就用不上了，zsmeet 桌面版会显示这段录音传不上去，可以在那里删掉。如果那台电脑其实还在录（比如暂停着、断网了），后面录的也传不上来。",
   },
 };
 
 /**
+ * 桌面版里，这场会议的录音就在这台电脑上，却传不上去了（platform/recorderView.ts 的 stuckHere）。
+ * 为什么传不上去，上面那一行已经说了，这里只说服务器收到了多少。
+ */
+const STUCK_HERE_TEXT: Pick<UnfinishedText, "stalled" | "offer" | "confirm"> = {
+  stalled: "",
+  offer: "可以先用这一部分生成纪要。",
+  confirm: "确定吗？开始处理以后，这台电脑上没传上去的部分就传不上去了（还留在这台电脑上，不需要的话可以删掉）。",
+};
+
+/**
  * 网页录音、桌面版录音还没传完，录音又不在这个网页（这台电脑）上：服务器已经收到了多少。
  * 录音还在传时只说正在录；不传了的话，创建者和管理员可以先用服务器从第 0 片起连续收到的部分生成纪要
  * （录音的电脑找不回来时用）。
+ * here：桌面版里录音就在这台电脑上，却传不上去了，显示在这台电脑的那一行下面（ThisComputerRecording 的 stuck）。
+ * 这时只有收尾这一件事要说：别人看不到；服务器最近还收到过分片时（比如这台电脑刚把前面的分片传完）先不显示，
+ * 和别的情况一样，不传了才给。
  */
-function ReceivedSoFar({ meeting: m }: { meeting: Meeting }) {
+function ReceivedSoFar({ meeting: m, here = false }: { meeting: Meeting; here?: boolean }) {
   const source: RecordingSource = m.source === "desktop" ? "desktop" : "record";
   const text = UNFINISHED_TEXT[source];
+  const card = here ? STUCK_HERE_TEXT : text;
   // 录音还在不在传、多久以前收到的，按服务器算好的 upload_idle_sec（会议每 10 秒重新取一次）。
   // 定时重画是给还没有这一项的旧版本服务器的：那时按这台电脑的时钟算，录音中断以后，
   // 即使服务器返回的数据没变，「录音中」也要变成「还没有传完」
@@ -581,6 +601,7 @@ function ReceivedSoFar({ meeting: m }: { meeting: Meeting }) {
   });
 
   if (!m.can_manage) {
+    if (here) return null;
     return (
       <Notice tone="info">
         {m.owner_name}
@@ -588,17 +609,15 @@ function ReceivedSoFar({ meeting: m }: { meeting: Meeting }) {
       </Notice>
     );
   }
-  if (live) return <Notice tone="info">{text.live(last)}</Notice>;
+  if (live) return here ? null : <Notice tone="info">{text.live(last)}</Notice>;
 
   return (
     <Card className="flex flex-col gap-3 p-5">
       <div className="flex flex-col gap-1">
         <b className="text-[15px] font-semibold">录音还没有传完</b>
         <span className="text-sm leading-relaxed text-ink-2">
-          {last}。{text.stalled}
-          {received > 0
-            ? `服务器已经收到 ${received} 片（大约 ${duration(receivedSeconds(source, received, SLICE_MS))}）。如果录音的那台电脑找不回来了，可以先用这一部分生成纪要。`
-            : ""}
+          {last}。{card.stalled}
+          {received > 0 ? `服务器已经收到 ${received} 片（大约 ${duration(receivedSeconds(source, received, SLICE_MS))}）。${card.offer}` : ""}
         </span>
       </div>
       {chunks.isError && <Notice tone="bad">{errorMessage(chunks.error)}</Notice>}
@@ -606,7 +625,7 @@ function ReceivedSoFar({ meeting: m }: { meeting: Meeting }) {
       {received > 0 &&
         (confirming ? (
           <div className="flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-sm">
-            <span className="text-ink-2">{text.confirm}</span>
+            <span className="text-ink-2">{card.confirm}</span>
             <span className="flex gap-2">
               <Button size="sm" variant="primary" disabled={finish.isPending} onClick={() => finish.mutate()}>
                 确定，开始处理

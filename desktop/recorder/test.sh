@@ -8,6 +8,7 @@
 #
 # 用法：desktop/recorder/test.sh
 #       只跑名字里有某几个字的测试：ZSMEET_RECORDER_TEST_FILTER=暂停 desktop/recorder/test.sh
+#       （一个测试都没选中时算没通过，多半是写错了）
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

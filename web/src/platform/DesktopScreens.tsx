@@ -10,10 +10,12 @@ import {
   loginStart,
   sessionExpired,
   setServer,
+  SIGNING_OUT,
   startDesktop,
   switchServer,
   useDesktopState,
   useLoginError,
+  useSigningOut,
 } from "./desktop";
 import type { DesktopState } from "./desktop";
 import { useRecorder } from "./recorder";
@@ -87,6 +89,9 @@ function BrowserLogin({ state }: { state: DesktopState }) {
   const start = useMutation({ mutationFn: loginStart });
   const cancel = useMutation({ mutationFn: loginCancel });
   const failure = start.error ?? cancel.error;
+  // 还在退出登录、切换服务器（比如退出到一半登录失效了，先到了这里）：这时登录的话会被它退掉，等它做完再登录
+  const signingOut = useSigningOut();
+  const reason = signingOut ? SIGNING_OUT : undefined;
 
   if (state.login_pending) {
     return (
@@ -99,7 +104,7 @@ function BrowserLogin({ state }: { state: DesktopState }) {
           {loginError && <Notice tone="bad">{loginError}</Notice>}
           {failure && <Notice tone="bad">{errorMessage(failure)}</Notice>}
           <div className="flex flex-col gap-2">
-            <Button onClick={() => start.mutate()} disabled={start.isPending}>
+            <Button onClick={() => start.mutate()} disabled={start.isPending || signingOut} title={reason}>
               重新打开浏览器
             </Button>
             <Button variant="ghost" onClick={() => cancel.mutate()} disabled={cancel.isPending}>
@@ -118,7 +123,7 @@ function BrowserLogin({ state }: { state: DesktopState }) {
         {state.expired && <Notice tone="warn">登录已经失效（可能在别的地方退出了这台电脑，或者改过密码），请重新登录。</Notice>}
         {loginError && <Notice tone="bad">{loginError}</Notice>}
         {failure && <Notice tone="bad">{errorMessage(failure)}</Notice>}
-        <Button variant="primary" onClick={() => start.mutate()} disabled={start.isPending}>
+        <Button variant="primary" onClick={() => start.mutate()} disabled={start.isPending || signingOut} title={reason}>
           在浏览器里登录
         </Button>
         <p className="text-center text-xs leading-relaxed text-muted">
@@ -142,13 +147,17 @@ export function SwitchServerButton({ variant = "default", size = "md" }: { varia
   const [confirming, setConfirming] = useState(false);
   const change = useMutation({ mutationFn: switchServer });
   const failure = change.isError && <Notice tone="bad">{errorMessage(change.error)}</Notice>;
+  // 退出登录、切换服务器一次只做一个（见 desktop.ts）：不管是在哪里点的，正在做的时候这里也变灰
+  const signingOut = useSigningOut();
+  const busy = signingOut || change.isPending;
+  const reason = signingOut ? SIGNING_OUT : undefined;
 
   if (confirming && note) {
     return (
       <div className="flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-left text-sm">
         <span className="text-ink-2">{note}</span>
         <span className="flex gap-2">
-          <Button size="sm" variant="primary" disabled={change.isPending} onClick={() => change.mutate()}>
+          <Button size="sm" variant="primary" disabled={busy} title={reason} onClick={() => change.mutate()}>
             仍然切换
           </Button>
           <Button size="sm" onClick={() => setConfirming(false)}>
@@ -161,7 +170,7 @@ export function SwitchServerButton({ variant = "default", size = "md" }: { varia
   }
   return (
     <>
-      <Button variant={variant} size={size} disabled={change.isPending} onClick={() => (note ? setConfirming(true) : change.mutate())}>
+      <Button variant={variant} size={size} disabled={busy} title={reason} onClick={() => (note ? setConfirming(true) : change.mutate())}>
         换一个服务器
       </Button>
       {failure}

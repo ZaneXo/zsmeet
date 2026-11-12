@@ -84,7 +84,9 @@ pub async fn put_marks(
     send(req).await
 }
 
-/// 全部传完了：告诉服务器一共几片、标记了哪些重点，服务器开始处理。
+/// 全部传完了：告诉服务器一共几片、标记了哪些重点，服务器开始处理。成功了服务器返回整场会议，这台电脑上的录音随后就删掉，
+/// 所以回的不是这场会议、或者它还在等上传时不算成功：可能不是服务器回的（比如中间的设备冒充服务器回了个
+/// `{"ok":true}`），算看不懂、过一会儿再试。其实已经成功了的话，再试时服务器说「已经在处理了」（409）。
 pub async fn complete(
     client: &reqwest::Client,
     account: &Account,
@@ -103,10 +105,15 @@ pub async fn complete(
         .bearer_auth(&account.token)
         .timeout(REQUEST_TIMEOUT)
         .json(&json!({ "chunks": chunks, "marks": marks }));
-    send(req).await
+    match send(req).await {
+        Outcome::Done(meeting) if !processing_started(&meeting, meeting_id) => {
+            Outcome::Retry(UNREADABLE.into())
+        }
+        other => other,
+    }
 }
 
-/// 取会议详情（标题、状态），最多等 timeout。
+/// 取会议详情（标题、状态），最多等 timeout。回的不是这场会议（比如中间的设备冒充服务器回了别的 JSON）时算看不懂。
 pub async fn meeting(
     client: &reqwest::Client,
     account: &Account,
@@ -118,9 +125,25 @@ pub async fn meeting(
     };
     let req = client.get(url).bearer_auth(&account.token).timeout(timeout);
     match send(req).await {
-        Outcome::Done(v) => Ok(v),
+        Outcome::Done(v) if is_meeting(&v, meeting_id) => Ok(v),
+        Outcome::Done(_) => Err(Outcome::Retry(UNREADABLE.into())),
         other => Err(other),
     }
+}
+
+/// 是不是服务器回的这场会议：id 对得上（会议 id 是 UUID，不分大小写）。
+fn is_meeting(v: &Value, meeting_id: &str) -> bool {
+    v.get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.eq_ignore_ascii_case(meeting_id))
+}
+
+/// 服务器回的这场会议已经不在等上传了：开始处理了（或者已经处理完、处理失败了）。
+pub fn processing_started(v: &Value, meeting_id: &str) -> bool {
+    is_meeting(v, meeting_id)
+        && v.get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s != "uploading")
 }
 
 /// 服务器已经收到了哪几片（序号），最多等 timeout。回复看不懂（比如中间的代理返回了一个网页）时
@@ -179,7 +202,7 @@ async fn send(req: reqwest::RequestBuilder) -> Outcome {
         .and_then(|b| serde_json::from_slice::<Value>(b).ok());
     if success {
         // 有内容却不是 JSON：不是服务器回的（比如连的网络要先登录，中间的设备返回了一个网页）。
-        // 不能当成成功：传分片时会以为传上去了，把这台电脑上的分片删掉
+        // 不能当成成功：传分片时会以为传上去了，要到告诉服务器传完之前核对时才发现缺了、再重传
         let unreadable = body
             .as_deref()
             .is_some_and(|b| b.iter().any(|c| !c.is_ascii_whitespace()))
@@ -299,6 +322,64 @@ mod tests {
             }
         });
         account
+    }
+
+    /// 200、内容是 body 这段 JSON 的回复。
+    fn json_reply(body: &str) -> &'static [u8] {
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        Box::leak(reply.into_bytes().into_boxed_slice())
+    }
+
+    #[tokio::test]
+    async fn only_the_meeting_itself_counts_as_completed() {
+        let client = server::http_client();
+        // 中间的设备冒充服务器回了个 200 和一段 JSON：不能当成服务器开始处理了，这台电脑上的录音随后就要删掉
+        for body in [
+            r#"{"ok":true}"#,
+            r#"{"status":"success"}"#,
+            r#"{"id":"m2","status":"queued"}"#,
+            "null",
+        ] {
+            let account = answer_once(json_reply(body), false).await;
+            assert_eq!(
+                complete(&client, &account, "m1", 3, &[]).await,
+                Outcome::Retry(UNREADABLE.into()),
+                "{body}"
+            );
+        }
+        // 没有内容的 204 也不是服务器对 complete 的回复
+        let account = answer_once(b"HTTP/1.1 204 No Content\r\n\r\n", false).await;
+        assert_eq!(
+            complete(&client, &account, "m1", 3, &[]).await,
+            Outcome::Retry(UNREADABLE.into())
+        );
+        // 说的是这场会议，可还在等上传：也不算
+        let account = answer_once(json_reply(r#"{"id":"m1","status":"uploading"}"#), false).await;
+        assert_eq!(
+            complete(&client, &account, "m1", 3, &[]).await,
+            Outcome::Retry(UNREADABLE.into())
+        );
+        // 服务器开始处理了，返回整场会议（会议 id 是 UUID，不分大小写）
+        let body = r#"{"id":"M1","title":"周会","status":"queued"}"#;
+        let account = answer_once(json_reply(body), false).await;
+        assert_eq!(
+            complete(&client, &account, "m1", 3, &[]).await,
+            Outcome::Done(serde_json::from_str(body).unwrap())
+        );
+
+        // 看一眼会议也一样：回的不是这场会议就是看不懂
+        let account = answer_once(json_reply(r#"{"status":"queued"}"#), false).await;
+        assert_eq!(
+            meeting(&client, &account, "m1", REQUEST_TIMEOUT).await,
+            Err(Outcome::Retry(UNREADABLE.into()))
+        );
+        let account = answer_once(json_reply(r#"{"id":"m1","status":"queued"}"#), false).await;
+        assert!(meeting(&client, &account, "m1", REQUEST_TIMEOUT)
+            .await
+            .is_ok());
     }
 
     /// 请求头、请求体（按 Content-Length）都收齐了。

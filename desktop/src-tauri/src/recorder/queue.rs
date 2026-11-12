@@ -3,7 +3,11 @@
 //! 一次做一件事：存标记、按序号传一片、全部传完以后告诉服务器开始处理（请求在 upload.rs 里发）。
 //! 只做当前登录的账号（同一台服务器、同一个用户）的录音，用它的令牌；暂时失败的那一场等一会儿再试，
 //! 不耽误别的；重试也没用的记下原因，不再传。
+//!
+//! 传分片时的「成功」不一定是服务器回的（比如中间的设备冒充服务器回了 200 和一段 JSON），所以这台电脑上的分片
+//! 传完也先留着：告诉服务器传完之前先问它收到了哪几片，缺的从这台电脑上重传；服务器开始处理以后才删掉整个目录。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,7 +16,7 @@ use tokio::time::Instant;
 
 use super::local::{self, Status};
 use super::upload::{self, Outcome};
-use super::{Local, Recorder, RELOGIN};
+use super::{Local, Recorder, NOT_SAVED, PROCESSED_ELSEWHERE, RELOGIN};
 use crate::core::Account;
 
 /// 上传任务下一步做什么。
@@ -27,6 +31,13 @@ enum Job {
         meeting_id: String,
         account: Account,
         marks: Vec<f64>,
+    },
+    /// 断网时接着录的那部分（序号 from 起）还没和服务器核对过：前面的分片传完了就先问服务器收到了哪几片，
+    /// 核对过了才传其中的分片、告诉服务器传完了
+    Check {
+        meeting_id: String,
+        account: Account,
+        from: u32,
     },
     Chunk {
         meeting_id: String,
@@ -128,6 +139,15 @@ impl Recorder {
                     marks: l.rec.marks.clone(),
                 });
             }
+            // 断网时接着录的那部分（from 起）还没和服务器核对过：前面的传完了就先核对，再传其中的分片、告诉服务器
+            // 传完了。服务器上已经有的序号不能覆盖：核对过之前其中的序号一片也不传，服务器上有的就都不是这场录音传的
+            if let Some(from) = l.rec.unverified_from.filter(|from| l.rec.uploaded >= *from) {
+                return Next::Job(Job::Check {
+                    meeting_id,
+                    account,
+                    from,
+                });
+            }
             if l.rec.uploaded < l.rec.next_seq {
                 return Next::Job(Job::Chunk {
                     meeting_id,
@@ -158,6 +178,16 @@ impl Recorder {
                 let outcome = upload::put_marks(&self.client, &account, &meeting_id, &marks).await;
                 self.marks_done(&meeting_id, &account, &marks, outcome);
             }
+            Job::Check {
+                meeting_id,
+                account,
+                from,
+            } => {
+                let received =
+                    upload::received(&self.client, &account, &meeting_id, upload::REQUEST_TIMEOUT)
+                        .await;
+                self.check_done(&meeting_id, &account, from, received);
+            }
             Job::Chunk {
                 meeting_id,
                 account,
@@ -173,11 +203,52 @@ impl Recorder {
                 chunks,
                 marks,
             } => {
+                // 先核对服务器真的收到了第 0 到 chunks-1 片：传分片时的「成功」不一定是服务器回的。
+                // 缺的从这台电脑上还留着的分片重传，都收到了才告诉服务器传完了
+                let received = match upload::received(
+                    &self.client,
+                    &account,
+                    &meeting_id,
+                    upload::REQUEST_TIMEOUT,
+                )
+                .await
+                {
+                    Ok(received) => received.into_iter().collect::<BTreeSet<u32>>(),
+                    Err(outcome) => return self.complete_done(&meeting_id, &account, outcome),
+                };
+                if let Some(missing) = (0..chunks).find(|seq| !received.contains(seq)) {
+                    // 服务器开始处理以后，拼好整段录音就删掉分片：上一次其实已经成功、只是没收到回复的话，
+                    // 这时也查不到分片。先看一眼会议：已经不在上传状态、这台电脑又告诉过服务器传完了，就算成功；
+                    // 没告诉过的是在别处开始处理的，服务器用的不一定是这台电脑录的全部（比如有几片的「成功」不是
+                    // 服务器回的），不能当成传完了、删掉录音。还在等上传才是真缺了，重传
+                    let outcome = match upload::meeting(
+                        &self.client,
+                        &account,
+                        &meeting_id,
+                        upload::REQUEST_TIMEOUT,
+                    )
+                    .await
+                    {
+                        Ok(meeting) if upload::processing_started(&meeting, &meeting_id) => {
+                            if self.complete_sent(&meeting_id) {
+                                Outcome::Done(meeting)
+                            } else {
+                                Outcome::Fatal(PROCESSED_ELSEWHERE.into())
+                            }
+                        }
+                        Ok(_) => return self.resend(&meeting_id, chunks, missing),
+                        Err(outcome) => outcome,
+                    };
+                    return self.complete_done(&meeting_id, &account, outcome);
+                }
+                // 服务器都收到了：先记下要告诉它传完了，再告诉它
+                self.sending_complete(&meeting_id, chunks);
                 let mut outcome =
                     upload::complete(&self.client, &account, &meeting_id, chunks, &marks).await;
                 if let Outcome::Conflict(reason) = &outcome {
                     // 上一次其实已经成功、只是没收到回复的话，再提交会得到 409（「已经在处理了」）：
-                    // 看一眼会议，已经不在上传状态就算成功
+                    // 看一眼会议，已经不在上传状态就算成功。刚核对过服务器收到了全部分片，处理的就是它们
+                    // （服务器收到的分片比声明的多时不肯开始处理，别处没法只用其中一部分）
                     outcome = match upload::meeting(
                         &self.client,
                         &account,
@@ -186,10 +257,10 @@ impl Recorder {
                     )
                     .await
                     {
-                        Ok(meeting) => match meeting.get("status").and_then(Value::as_str) {
-                            Some(status) if status != "uploading" => Outcome::Done(meeting),
-                            _ => Outcome::Fatal(reason.clone()),
-                        },
+                        Ok(meeting) if upload::processing_started(&meeting, &meeting_id) => {
+                            Outcome::Done(meeting)
+                        }
+                        Ok(_) => Outcome::Fatal(reason.clone()),
                         Err(Outcome::Conflict(reason)) => Outcome::Fatal(reason),
                         Err(other) => other,
                     };
@@ -199,7 +270,7 @@ impl Recorder {
         }
     }
 
-    /// 传一片。这台电脑上没有这一片的文件时问一下服务器：服务器已经收到了（上次传完还没记下来）就算传过了。
+    /// 传一片。这台电脑上没有这一片的文件时（以前的版本传上去就删了）问一下服务器：服务器已经收到了就算传过了。
     async fn send_chunk(
         &self,
         meeting_id: &str,
@@ -235,18 +306,97 @@ impl Recorder {
             let mut inner = self.inner.lock().unwrap();
             if let Some(l) = inner.recordings.get_mut(meeting_id) {
                 if l.rec.uploaded == seq {
+                    // 记下传到了哪一片（中间 App 退出了，最多重传这一片）。这台电脑上的分片先不删：这次的「成功」
+                    // 不一定是服务器回的，告诉服务器传完之前还要核对，服务器开始处理以后整个目录一起删
                     l.rec.uploaded = seq + 1;
-                    // 先记下传到了哪一片，记下了再删文件：中间 App 退出了，最多重传这一片。
-                    // 没记下（磁盘满了）就先留着文件：下次打开 App 时照着文件就知道录到了哪一片，
-                    // 不会把已经传上去的序号当成没录过、接着录时覆盖掉
-                    if l.save() {
-                        let _ = std::fs::remove_file(local::chunk_path(&l.dir, seq));
-                    }
+                    l.save();
                 }
                 l.ready();
             }
         } else {
             self.trouble(meeting_id, account, outcome);
+        }
+        self.changed();
+    }
+
+    /// 核对完断网时接着录的序号（from 起）：服务器上一片都没有的话记下核对过了，接着传；
+    /// 已经有了的话不能覆盖，这场录音算传不上去了（录下的都留在这台电脑上）。
+    fn check_done(
+        &self,
+        meeting_id: &str,
+        account: &Account,
+        from: u32,
+        received: Result<Vec<u32>, Outcome>,
+    ) {
+        let received = match received {
+            Ok(received) => received,
+            Err(outcome) => {
+                self.trouble(meeting_id, account, outcome);
+                self.changed();
+                return;
+            }
+        };
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(l) = inner
+                .recordings
+                .get_mut(meeting_id)
+                .filter(|l| l.rec.unverified_from == Some(from))
+            {
+                if let Some(reason) = l.taken_on_server(&received) {
+                    l.fail(reason);
+                } else {
+                    l.rec.unverified_from = None;
+                    // 记下了才能接着传：没记下就传了的话，下次打开 App 再核对时，这台电脑传上去的那几片
+                    // 会被当成服务器上本来就有的
+                    if l.save() {
+                        l.ready();
+                    } else {
+                        l.rec.unverified_from = Some(from);
+                        l.backoff(NOT_SAVED.into(), &self.opts.retry_waits);
+                    }
+                }
+            }
+        }
+        self.changed();
+    }
+
+    /// 核对过服务器收到了第 0 到 chunks-1 片，马上要告诉它传完了：先记下来（见 Recording::complete_sent）。
+    /// 存不下来也照样告诉服务器：App 没退出就还记得；退出了、回复又没收到的话，下次当成在别处开始处理的，录音留着。
+    fn sending_complete(&self, meeting_id: &str, chunks: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(l) = inner.recordings.get_mut(meeting_id).filter(|l| {
+            l.rec.status == Status::Stopped
+                && l.rec.next_seq == chunks
+                && l.rec.uploaded == chunks
+                && !l.rec.complete_sent
+        }) {
+            l.rec.complete_sent = true;
+            l.save();
+        }
+    }
+
+    /// 这台电脑核对过服务器收到了全部分片、告诉过它传完了（见 Recording::complete_sent）。
+    fn complete_sent(&self, meeting_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .recordings
+            .get(meeting_id)
+            .is_some_and(|l| l.rec.complete_sent)
+    }
+
+    /// 告诉服务器传完之前发现它缺第 seq 片（之前那次「成功」不是服务器回的）：从这一片起重传。
+    fn resend(&self, meeting_id: &str, chunks: u32, seq: u32) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            // 核对的时候没变过（还是在等告诉服务器传完了）才改
+            if let Some(l) = inner.recordings.get_mut(meeting_id).filter(|l| {
+                l.rec.status == Status::Stopped
+                    && l.rec.next_seq == chunks
+                    && l.rec.uploaded == chunks
+            }) {
+                l.resend_from(seq, &self.opts.retry_waits);
+            }
         }
         self.changed();
     }

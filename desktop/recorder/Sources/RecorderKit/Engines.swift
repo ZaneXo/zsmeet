@@ -20,7 +20,7 @@ public protocol CaptureSource: AnyObject {
 
 /// 录音引擎：现场录音（LiveEngine），或者测试时直接读文件（FileEngine）
 public protocol RecordingEngine: AnyObject {
-    /// 结束时（收到 stop、文件读完了、出错了）调用一次，在引擎自己的线程上
+    /// 结束时（收到 stop、文件读完了、服务器能收的最后一片写不下了、出错了）调用一次，在引擎自己的线程上
     var onFinished: ((Result<RecordingResult, RecorderFailure>) -> Void)? { get set }
     func start()
     func pause()
@@ -59,6 +59,8 @@ public final class LiveEngine: RecordingEngine {
     private var rejectedRates: [Double?]
     /// 每一路是不是已经提醒过「转换出错，少了一小段」（只提醒一次）
     private var conversionWarned: [Bool]
+    /// 在结束了（stopNow 里），tick 不用再看最后一片写不写得下
+    private var stopping = false
     private var finished = false
 
     private struct SilenceWatch {
@@ -137,32 +139,38 @@ public final class LiveEngine: RecordingEngine {
             // 暂停期间采到的声音都丢掉：按时间混到现在（还暂停着，混出来的不编码），再清掉各路攒着的。
             // 继续以后重新攒，编进去的只有点了继续以后采到的声音
             self.tick()
+            // 最后一片写不下了的话，tick 已经结束了录音
+            guard !self.finished else { return }
             self.mixer.reset()
             self.pipeline.resume()
         }
     }
 
     public func stop() {
-        queue.async {
-            guard !self.finished else { return }
-            self.timer?.cancel()
-            self.timer = nil
-            self.tick()
-            for source in self.sources {
-                source.stop()
+        queue.async { self.stopNow() }
+    }
+
+    /// 结束（在 queue 上）：收到了 stop，或者服务器能收的最后一片写不下了（见 tick）
+    private func stopNow() {
+        guard !finished, !stopping else { return }
+        stopping = true
+        timer?.cancel()
+        timer = nil
+        tick()
+        for source in sources {
+            source.stop()
+        }
+        // 设备停了，环形缓冲不会再变：剩下的都取出来、混完、编完
+        do {
+            for index in sources.indices {
+                pull(index, final: true)
             }
-            // 设备停了，环形缓冲不会再变：剩下的都取出来、混完、编完
-            do {
-                for index in self.sources.indices {
-                    self.pull(index, final: true)
-                }
-                try self.feedQueued()
-                let result = try self.pipeline.finish()
-                self.logStats()
-                self.finish(.success(result))
-            } catch {
-                self.fail(error)
-            }
+            try feedQueued()
+            let result = try pipeline.finish()
+            logStats()
+            finish(.success(result))
+        } catch {
+            fail(error)
         }
     }
 
@@ -194,6 +202,10 @@ public final class LiveEngine: RecordingEngine {
             }
         } catch {
             fail(error)
+        }
+        // 服务器能收的最后一片写不下了，后面的声音没地方放：自己结束录音，和收到 stop 一样
+        if pipeline.isFull && !stopping {
+            stopNow()
         }
     }
 
@@ -378,7 +390,8 @@ public final class FileEngine: RecordingEngine {
     private func step() {
         guard !finished else { return }
         do {
-            let samples = stopRequested ? [] : try reader.read(maxFrames: 48_000)
+            // 收到了 stop，或者服务器能收的最后一片写不下了：和文件读完了一样结束
+            let samples = stopRequested || pipeline.isFull ? [] : try reader.read(maxFrames: 48_000)
             if samples.isEmpty {
                 try resampler.finish(into: &converted)
                 try feedConverted(all: true)

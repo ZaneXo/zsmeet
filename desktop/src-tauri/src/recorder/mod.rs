@@ -5,7 +5,8 @@
 //!   可以接着录（从下一片的序号开始写），也可以直接结束、把录好的传上去。
 //! - 每场录音在本地一个目录（local.rs）：recording.json 记着录到第几片、传到第几片、标记、状态。
 //!   App 重启以后照着它接着传；上次还在录的算中断。
-//! - 上传任务一直在后台跑（upload.rs 发请求）：按序号一片一片地传，传完一片删一片，全部传完告诉服务器开始处理。
+//! - 上传任务一直在后台跑（queue.rs，upload.rs 发请求）：按序号一片一片地传，全部传完、核对过服务器都收到了以后
+//!   告诉服务器开始处理，服务器开始处理以后才删掉这台电脑上的录音。
 //!   只传当前登录的账号（同一台服务器、同一个用户）的录音、用它的令牌；别的账号的录音留在本地、界面上也不显示，
 //!   等那个账号登录了再传。断网、服务器出错就等一会儿再试。
 //! - 状态一变（录音时还有每 100 毫秒左右的音量）就通过 RecorderEvents 告诉界面和菜单栏。
@@ -42,7 +43,8 @@ const MAX_SECONDS: f64 = 6.0 * 3600.0 - 120.0;
 /// 一场最多标记多少个重点，和服务器一致。
 const MAX_MARKS: usize = 500;
 /// 服务器一场会议最多收多少片（序号 0 到 3999，见 internal/service/meetings.go 的 MaxChunks）。
-/// 录音程序的 --start-seq 也只收这个范围
+/// 录音程序的 --start-seq 也只收这个范围。下一片是最后一片（MAX_CHUNKS - 1）时就要结束录音：
+/// 结束时录音程序把手上剩下的声音写成最后一片，再往后的序号服务器不收
 const MAX_CHUNKS: u32 = 4000;
 /// 暂停、继续最多等录音程序多久。
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -72,10 +74,13 @@ const KILLED: &str = "录音程序一直没能结束，被强制关掉了，最�
 const APP_QUIT: &str =
     "录音时 zsmeet 意外退出了。已经录好的部分都在，可以接着录，也可以直接结束、把录好的传上去";
 const NOTHING_RECORDED: &str = "什么也没有录下来。";
-const CHUNKS_FULL: &str = "这场录音的分片数已经到了服务器能收的上限（4000 片），不能再接着录了。可以直接结束、把录好的传上去";
+const CHUNKS_FULL: &str = "这场录音的分片数已经到了服务器能收的上限（一场会议最多 4000 片），不能再接着录了。可以直接结束、把录好的传上去";
+const CHUNKS_REACHED: &str = "这场录音暂停、接着录的次数太多（每次都会多出一片），分片数到了服务器能收的上限（一场会议最多 4000 片），自动结束了。录好的部分会照常上传；还要接着录的话，请新建一场会议";
 const MAX_REACHED: &str =
     "已经录了将近 6 个小时，达到单场录音的上限，自动结束了。录好的部分会照常上传";
 const RELOGIN: &str = "登录已失效，重新登录这个账号后会自动接着传";
+const NOT_SAVED: &str = "这台电脑上存不下录音的记录了，请检查磁盘空间。空出来以后会自动接着传";
+const PROCESSED_ELSEWHERE: &str = "这场会议已经在别处开始处理了，用的是服务器当时收到的录音，这台电脑上录的可能有一部分不在里面。这台电脑上的录音没有删，确认会议的录音完整以后可以删掉";
 
 /// 发给界面和菜单栏的录音状态（事件 recorder://state，命令的返回值）。
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -237,6 +242,8 @@ struct Local {
     marks_dirty: bool,
     /// 连着失败了几次，决定下次等多久
     attempts: usize,
+    /// 告诉服务器传完之前发现服务器缺了已经「传上去」的分片、重传了几次（见 Local::resend_from）
+    resends: usize,
     retry_at: Option<Instant>,
     /// 暂时传不上去的原因，传成功了就清掉
     trouble: Option<String>,
@@ -391,7 +398,7 @@ impl Recorder {
             self.create_recording(id, meeting_id, &account).await
         } else {
             match self.received_chunks(meeting_id, &account).await {
-                Ok(received) => self.reopen_recording(id, meeting_id, &received),
+                Ok(received) => self.reopen_recording(id, meeting_id, received.as_deref()),
                 Err(e) => Err(e),
             }
         };
@@ -402,8 +409,9 @@ impl Recorder {
                 return Err(e);
             }
         };
-        if start_seq >= MAX_CHUNKS {
-            // 再录的分片服务器也不收了。录音程序也不接受这样的 --start-seq，它说的是参数的事，用户看不懂
+        if start_seq >= MAX_CHUNKS - 1 {
+            // 只剩最后一片了：开始了也得马上结束（见 on_event），再往后的分片服务器不收。
+            // 录音程序也不接受 4000 以上的 --start-seq，它说的是参数的事，用户看不懂
             self.abandon(id);
             return Err(CHUNKS_FULL.into());
         }
@@ -562,6 +570,8 @@ impl Recorder {
             seconds: 0.0,
             status: Status::Recording,
             error: None,
+            unverified_from: None,
+            complete_sent: false,
         };
         // 新录的：目录里要是有以前留下的东西（上次没开始成），都不要了
         let _ = std::fs::remove_dir_all(&dir);
@@ -583,22 +593,22 @@ impl Recorder {
     /// 接着录、直接结束之前问服务器已经收到了哪几片：接着录的分片不能占用它们的序号，complete 的片数也要算上它们
     /// （见 Local::catch_up）。
     ///
-    /// 连不上服务器、服务器出错、回复看不懂时照这台电脑上记着的来，也不会占用服务器上已有的序号：一片传上去以后，
-    /// 要等记着它的 recording.json（next_seq、uploaded 都算上了它）存好了才删本地的文件，所以服务器上的每一片，
-    /// 要么 recording.json 的 next_seq 已经算上了，要么文件还在这台电脑上，resume_seq 都会跳过。
-    /// 问服务器是多一道保险，防的是 recording.json 退回了上一份这类意外。
+    /// 连不上服务器、服务器出错、回复看不懂时返回 None，照这台电脑上记着的来（断网也要能接着录）。这台电脑上录的分片
+    /// 要等服务器开始处理以后才删，resume_seq 都会跳过；服务器上却可能有这台电脑不知道的分片（以前的版本传上去就删了、
+    /// recording.json 又退回了上一份，或者不是这台电脑传的）。所以接着录时记下从哪一片起没核对过
+    /// （Recording::unverified_from），传之前再核对（见 queue.rs），不会悄悄覆盖服务器上的录音。
     async fn received_chunks(
         &self,
         meeting_id: &str,
         account: &Account,
-    ) -> Result<Vec<u32>, String> {
+    ) -> Result<Option<Vec<u32>>, String> {
         match upload::received(&self.client, account, meeting_id, TITLE_TIMEOUT).await {
-            Ok(received) => Ok(received),
+            Ok(received) => Ok(Some(received)),
             Err(Outcome::Retry(reason)) => {
                 log::warn!(
                     "{meeting_id}：没能问到服务器收到了哪几片（{reason}），照这台电脑上记着的来"
                 );
-                Ok(Vec::new())
+                Ok(None)
             }
             Err(Outcome::Unauthorized) => {
                 self.core.unauthorized(&account.token);
@@ -606,16 +616,16 @@ impl Recorder {
             }
             // 会议被删了、没有权限了：接着录也传不上去
             Err(Outcome::Fatal(reason) | Outcome::Conflict(reason)) => Err(reason),
-            Err(Outcome::Done(_)) => Ok(Vec::new()),
+            Err(Outcome::Done(_)) => Ok(None),
         }
     }
 
-    /// 接着录一场中断了的：从下一片的序号开始写，秒数接着上次的。received：服务器已经收到的分片。
+    /// 接着录一场中断了的：从下一片的序号开始写，秒数接着上次的。received：服务器已经收到的分片，问不到时是 None。
     fn reopen_recording(
         &self,
         id: u64,
         meeting_id: &str,
-        received: &[u32],
+        received: Option<&[u32]>,
     ) -> Result<(PathBuf, u32), String> {
         let mut inner = self.inner.lock().unwrap();
         let Inner {
@@ -630,7 +640,18 @@ impl Recorder {
         let l = recordings.get_mut(meeting_id).ok_or(NOT_HERE)?;
         local::remove_partials(&l.dir);
         local::recover(&l.dir, &mut l.rec);
-        l.catch_up(received, self.opts.chunk_seconds);
+        if let Some(reason) = received.and_then(|r| l.taken_on_server(r)) {
+            // 上次断网时接着录的部分和服务器上已有的分片用了同样的序号：不能再录了。上传任务马上照常传完前面的分片，
+            // 再核对、把它算成传不上去
+            l.ready();
+            self.wake.notify_one();
+            return Err(reason);
+        }
+        l.catch_up(received.unwrap_or_default(), self.opts.chunk_seconds);
+        if received.is_none() {
+            // 没能和服务器核对：从这一片起录的，传之前先核对（之前就有没核对过的，从更早的那一片起）
+            l.rec.unverified_from.get_or_insert(l.rec.next_seq);
+        }
         // 接着录的声音从已经存下的部分后面算起：中断前最后一片之后点的标记会指到新录的声音上，不要了
         l.drop_lost_marks();
         l.rec.status = Status::Recording;
@@ -651,7 +672,12 @@ impl Recorder {
                 if let Some(l) = inner.recordings.remove(&session.meeting_id) {
                     let _ = std::fs::remove_dir_all(&l.dir);
                 }
-            } else if let Some(l) = inner.recordings.get_mut(&session.meeting_id) {
+            } else if let Some(l) = inner
+                .recordings
+                .get_mut(&session.meeting_id)
+                // 已经改成接着录了的改回中断；发现传不上去了的（Failed）不动
+                .filter(|l| l.rec.status == Status::Recording)
+            {
                 l.rec.status = Status::Interrupted;
                 l.save();
             }
@@ -788,6 +814,12 @@ impl Recorder {
                         l.rec.seconds += seconds;
                         l.save();
                         chunk = true;
+                        // 下一片就是服务器能收的最后一片了（每暂停一次多出一片，暂停得多的话不到 6 小时也会到这里）：
+                        // 现在就结束，录音程序把剩下的写成最后一片。再往后的分片服务器不收，这场录音就交不上去了
+                        if l.rec.next_seq >= MAX_CHUNKS - 1 && !s.stop_requested {
+                            s.request_stop();
+                            *error = Some(CHUNKS_REACHED.into());
+                        }
                     }
                 }
                 Event::Paused => {
@@ -798,6 +830,14 @@ impl Recorder {
                 Event::Resumed => {
                     if s.phase == Phase::Paused {
                         s.phase = Phase::Recording;
+                    }
+                }
+                Event::Warning { code, .. } if code == helper::CHUNK_LIMIT => {
+                    // 录音程序在写服务器能收的最后一片了，不会再切新的分片（平常收到前一片时就已经结束了，见上面）：
+                    // 现在结束。原因放在 error 里，不放进 warnings：它说的「请结束录音」马上就过时了
+                    if !s.stop_requested {
+                        s.request_stop();
+                        *error = Some(CHUNKS_REACHED.into());
                     }
                 }
                 Event::Warning { code, message } => {
@@ -1036,37 +1076,51 @@ impl Recorder {
     /// 中断了的录音不接着录了：把录好的传完，告诉服务器开始处理。传不上去的录音也可以用它再试一次。
     /// 和接着录一样，先问服务器收到了哪几片：recording.json 记少了的话，complete 的片数要算上服务器上、
     /// 这台电脑上已有的（不然服务器会说收到的分片比声明的多），时长也要算上，丢掉的标记才对。
+    /// 断网时接着录的部分和服务器上已有的分片用了同样的序号时不传（会覆盖服务器上的录音），返回原因。
     pub async fn finish(&self, meeting_id: &str) -> Result<RecorderState, String> {
         let account = self.core.account().ok_or("请先登录")?;
         if finishable(&mut self.inner.lock().unwrap(), meeting_id, &account)?.is_none() {
             return Ok(self.state());
         }
         let received = self.received_chunks(meeting_id, &account).await?;
-        {
+        let finished = {
             let mut inner = self.inner.lock().unwrap();
             // 等服务器回话的时候可能变了（接着录了、删掉了、已经结束了）：再看一遍
             let finished = match finishable(&mut inner, meeting_id, &account)? {
-                Some(l) => {
-                    l.catch_up(&received, self.opts.chunk_seconds);
-                    // 中断前最后一片之后点的标记不要了；服务器上存过的话也换掉，complete 带的标记是空的时
-                    // 服务器会留着原来的
-                    l.drop_lost_marks();
-                    l.rec.status = Status::Stopped;
-                    l.rec.error = None;
-                    l.fatal = false;
-                    l.ready();
-                    l.save();
-                    true
-                }
-                None => false,
+                Some(l) => match received.as_deref().and_then(|r| l.taken_on_server(r)) {
+                    // 上传任务马上照常传完前面的分片，再核对、把它算成传不上去
+                    Some(reason) => {
+                        l.ready();
+                        Err(reason)
+                    }
+                    None => {
+                        l.catch_up(
+                            received.as_deref().unwrap_or_default(),
+                            self.opts.chunk_seconds,
+                        );
+                        // 中断前最后一片之后点的标记不要了；服务器上存过的话也换掉，complete 带的标记是空的时
+                        // 服务器会留着原来的
+                        l.drop_lost_marks();
+                        l.rec.status = Status::Stopped;
+                        l.rec.error = None;
+                        // 从头核对、再告诉服务器传完了：以前告诉过的不算（见 Recording::complete_sent）
+                        l.rec.complete_sent = false;
+                        l.fatal = false;
+                        l.ready();
+                        l.save();
+                        Ok(true)
+                    }
+                },
+                None => Ok(false),
             };
-            if finished {
+            if finished == Ok(true) {
                 inner.error = None;
             }
-        }
+            finished
+        };
         self.wake.notify_one();
         self.changed();
-        Ok(self.state())
+        finished.map(|_| self.state())
     }
 
     /// 删掉一段中断了的、传不上去的录音（只删这台电脑上的，服务器上已经收到的部分不动）。
@@ -1110,6 +1164,7 @@ impl Local {
             rec,
             dir,
             attempts: 0,
+            resends: 0,
             retry_at: None,
             trouble: None,
             fatal: false,
@@ -1129,6 +1184,8 @@ impl Local {
     /// 接着录、直接结束之前：这台电脑上、服务器上（received）有 recording.json 没记上的分片时（比如 recording.json
     /// 退回了上一份），下一片的序号挪到它们后面（见 local::resume_seq），绝不覆盖已有的分片，complete 的片数也对；
     /// 跳过的分片的时长也算上，新标记的时间、丢掉哪些标记、录满 6 小时自动结束都和服务器上接起来的录音对得上。
+    /// 这台电脑上的分片照着文件算；只在服务器上的量不了，按每片 10 秒算（见 local::skipped_seconds），
+    /// 其中有暂停时的短片的话会差一点。
     /// 跳过的分片服务器上有的，上传时会认出来；都没有的话这段录音缺了一块，上传时会说明。
     fn catch_up(&mut self, received: &[u32], chunk_seconds: u32) {
         let next = local::resume_seq(&self.dir, &self.rec, received);
@@ -1164,14 +1221,51 @@ impl Local {
     }
 
     fn backoff(&mut self, reason: String, waits: &[Duration]) {
+        self.retry_later(self.attempts, reason, waits);
+        self.attempts += 1;
+    }
+
+    /// 第 n 次（从 0 算起）没成功：等 waits[n] 再试，后面一直按最后一个间隔。
+    fn retry_later(&mut self, n: usize, reason: String, waits: &[Duration]) {
         let wait = waits
-            .get(self.attempts)
+            .get(n)
             .or(waits.last())
             .copied()
             .unwrap_or(Duration::from_secs(30));
-        self.attempts += 1;
         self.retry_at = Some(Instant::now() + wait);
         self.trouble = Some(reason);
+    }
+
+    /// 告诉服务器传完之前，服务器说没有已经「传上去」了的第 seq 片（那次的「成功」不是服务器回的，比如中间的设备冒充
+    /// 服务器回了话）：从这一片起，用这台电脑上留着的分片重传。等一会儿再传；一次次都这样的话等得越来越久，
+    /// 传成功了也不从头算，免得一直重传。
+    fn resend_from(&mut self, seq: u32, waits: &[Duration]) {
+        self.rec.uploaded = seq;
+        // 服务器又缺了分片：以前核对过、告诉过服务器传完了也不算了，传完、再核对过才算（见 Recording::complete_sent）
+        self.rec.complete_sent = false;
+        self.save();
+        let reason = format!(
+            "服务器上缺第 {} 片录音，稍后会自动重传。一直这样的话，看看连的网络是不是要先登录，或者请管理员检查服务器的设置",
+            seq + 1
+        );
+        self.retry_later(self.resends, reason, waits);
+        self.resends += 1;
+    }
+
+    /// 断网时接着录的部分（unverified_from 起）用的序号，服务器上是不是已经有了：有的话返回给用户看的原因。
+    /// 核对过之前这些序号这台电脑一片也没传过（见 queue.rs），服务器上有的都不是这场录音传的，传上去会把它们覆盖掉。
+    /// 还在录的话，后面录的分片也会排到这些序号上。只有上传任务据此把录音算成传不上去（在那之前把前面的分片传完），
+    /// 接着录、直接结束时据此拒绝。
+    /// 这场会议只能在会议页面上用服务器已经收到的部分结束（web/src/pages/MeetingDetail.tsx 的 ReceivedSoFar，
+    /// 在这台电脑的那一行下面）：原因里的按钮名字、什么时候才有这个按钮（服务器 90 秒没再收到分片，
+    /// web/src/lib/unfinishedRecording.ts 的 RECORDING_STALE_MS）要和那里一致。
+    fn taken_on_server(&self, received: &[u32]) -> Option<String> {
+        let from = self.rec.unverified_from?;
+        let seq = received.iter().copied().filter(|seq| *seq >= from).min()?;
+        Some(format!(
+            "服务器上已经有这场会议的第 {} 片录音，这台电脑上却没有记录；断网时接着录的部分也排到了这里，传上去会把服务器上的录音覆盖掉，所以没有传，录下的都还留在这台电脑上。可以在会议页面上点「用已经收到的部分生成纪要」，先用服务器上的录音生成纪要（服务器 90 秒没再收到录音以后才有这个按钮）",
+            seq + 1
+        ))
     }
 
     /// 传不上去了。还在录的话录音照常进行，录完算失败。

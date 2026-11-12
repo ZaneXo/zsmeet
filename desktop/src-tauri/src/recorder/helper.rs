@@ -15,6 +15,10 @@ use tokio::process::{self, Child, ChildStderr, ChildStdin, ChildStdout};
 
 pub const HELPER_NAME: &str = "zsmeet-recorder";
 
+/// warning 的 code：录音程序在写服务器能收的最后一片（序号 3999），够长了也不再切新的分片，App 该结束录音了。
+/// 一直没结束的话，它写到服务器能收的大小（8 MB）就自己结束。
+pub const CHUNK_LIMIT: &str = "chunk_limit";
+
 /// 列麦克风最多等多久。
 const DEVICES_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -70,7 +74,8 @@ pub enum Event {
     },
     Paused,
     Resumed,
-    /// 有一路声音录不了（没有权限、设备不在），另一路照常录
+    /// 提醒，录音照常进行：有一路声音录不了（没有权限、设备不在），另一路照常录；
+    /// code 是 CHUNK_LIMIT 时是分片数到了服务器能收的上限，该结束录音了
     Warning {
         code: String,
         message: String,

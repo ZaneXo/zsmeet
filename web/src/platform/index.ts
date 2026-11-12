@@ -36,6 +36,12 @@ export function setupApiClient(client: Client<paths>) {
  */
 export const networkMode: NetworkMode = isDesktop ? "always" : "online";
 
+/**
+ * 桌面版有没有正在退出登录、切换服务器（不管是在导航栏还是账号页上点的，一次只做一个，见 desktop.ts）。
+ * 网页版没有这回事，总是 false。
+ */
+export const useSigningOut: () => boolean = isDesktop ? desktop.useSigningOut : () => false;
+
 /** 直接用 fetch 调接口时（上传分片）的完整地址。 */
 export function apiUrl(path: string): string {
   return isDesktop ? desktop.proxyUrl(path) : path;

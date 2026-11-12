@@ -11,11 +11,15 @@ let scratch = FileManager.default.temporaryDirectory
     .appendingPathComponent("zsmeet-recorder-tests", isDirectory: true)
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
-let passed = Harness.run(harnessTests + formatTests + audioTests + recordingTests + endToEndTests)
-if passed {
+switch Harness.run(harnessTests + formatTests + audioTests + recordingTests + endToEndTests) {
+case .passed:
     try? FileManager.default.removeItem(at: scratch)
     print("全部通过")
-} else {
+    exit(0)
+case .failed:
     print("有测试没通过，测试用的文件留在 \(scratch.path)")
+    exit(1)
+case .nothingSelected:
+    print("一个测试都没跑：没有名字里有「\(Harness.filter)」的测试，看看 \(Harness.filterVariable) 是不是写错了")
+    exit(1)
 }
-exit(passed ? 0 : 1)

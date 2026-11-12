@@ -68,8 +68,9 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
     placeholderData: (previous) => previous,
   });
 
-  // 有人在录音时定时重画：录音中断以后，标签要从「录音中」变成「录音未传完」（桌面版录的从「电脑录音中」变成
-  // 「等电脑传完录音」），即使服务器返回的数据没变
+  // 有人在录音时定时重画，给还没有 upload_idle_sec 的旧版本服务器用（见 unfinishedRecording.ts 的 idleMs）：
+  // 那时按这台电脑的时钟算，录音中断以后，即使服务器返回的数据没变，标签也要从「录音中」变成「录音未传完」
+  // （桌面版录的从「电脑录音中」变成「等电脑传完录音」）
   useTicker(15_000, (meetings.data?.items ?? []).some(waitingForRecording));
 
   const retry = useMutation({

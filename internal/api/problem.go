@@ -164,11 +164,16 @@ func unmarshalJSON(data []byte, v any) error {
 	return err
 }
 
-// problemDetails 是 huma 自己写死的几种 detail（huma.go 的 WriteErr、contextError）。
-// validation failed 和请求太大的 detail 另外拼。
-var problemDetails = map[string]string{
-	"request body is required":   "没有收到要提交的内容，请重新提交",
-	"request body read timeout":  "内容没能及时传完，请检查网络后重试",
+// readDetails 是 huma 读请求内容出错时写的 detail（huma.go 的 contextError），太大的另外拼（见 tooLarge）。
+// 这几种的 errors 是 huma 读请求内容之前已经查出来的参数错误（地址里的 id 不是 UUID 之类），没有就是空的。
+var readDetails = map[string]string{
+	"request body is required":  "没有收到要提交的内容，请重新提交",
+	"request body read timeout": "内容没能及时传完，请检查网络后重试",
+}
+
+// goErrorDetails 是 huma 写死的另外几种 detail（huma.go 的 WriteErr、contextError）。
+// 它们的 errors 里是 Go 的英文报错（处理函数返回的错误、读请求时网络断了……），不给用户看。
+var goErrorDetails = map[string]string{
 	"cannot read request body":   "没能收完提交的内容，请检查网络后重试",
 	"unexpected error occurred":  "服务器内部出错了，请稍后再试",
 	"unable to marshal response": "没法按要求的格式返回结果，请在请求头 Accept 里接受 application/json",
@@ -182,17 +187,12 @@ func localizeProblem(_ huma.Context, _ string, v any) (any, error) {
 		return v, nil
 	}
 	out := *p
-	switch {
-	case p.Detail == "validation failed":
+	if p.Detail == "validation failed" {
 		out.Errors = localizeDetails(p.Errors)
 		out.Detail = summarize(out.Errors)
-	case strings.HasPrefix(p.Detail, "request body is too large"):
-		out.Detail = tooLarge(p.Detail)
-	default:
-		zh, ok := problemDetails[p.Detail]
-		if !ok {
-			return v, nil
-		}
+		return &out, nil
+	}
+	if zh, ok := goErrorDetails[p.Detail]; ok {
 		if p.Detail == "unexpected error occurred" {
 			// 处理函数返回了不认识的错误：和 status 一样只进日志，不给用户看
 			for _, e := range p.Errors {
@@ -201,8 +201,24 @@ func localizeProblem(_ huma.Context, _ string, v any) (any, error) {
 				}
 			}
 		}
-		// 剩下的 errors 是 Go 的英文报错（读请求时网络断了之类），detail 已经说清楚了
+		// errors 不给用户看，detail 已经说清楚了
 		out.Detail, out.Errors = zh, nil
+		return &out, nil
+	}
+	zh, ok := readDetails[p.Detail]
+	if strings.HasPrefix(p.Detail, "request body is too large") {
+		zh, ok = tooLarge(p.Detail), true
+	}
+	if !ok {
+		return v, nil
+	}
+	// 读请求内容时出错（没有、太大、没能及时传完），地址里的参数又不对的话（PUT /api/meetings/xyz/chunks/0
+	// 不带内容），huma 把查出来的参数错误一起放进 errors：和校验没通过时一样换成中文、位置不变，
+	// detail 先说哪个参数不对，再说请求内容的问题
+	out.Errors = localizeDetails(p.Errors)
+	out.Detail = zh
+	if len(out.Errors) > 0 {
+		out.Detail = summarize(out.Errors) + "；" + zh
 	}
 	return &out, nil
 }

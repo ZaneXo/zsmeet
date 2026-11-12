@@ -343,7 +343,7 @@ func (q *Queries) FinishMeeting(ctx context.Context, arg FinishMeetingParams) (i
 }
 
 const getMeeting = `-- name: GetMeeting :one
-SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, u.name AS owner_name
+SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, u.name AS owner_name, now()::timestamptz AS read_at
 FROM meetings m JOIN users u ON u.id = m.owner_id
 WHERE m.id = $1
 `
@@ -351,8 +351,11 @@ WHERE m.id = $1
 type GetMeetingRow struct {
 	Meeting   Meeting
 	OwnerName string
+	ReadAt    time.Time
 }
 
+// read_at 是读的时候数据库的时间：和 created_at、last_chunk_at 是同一个时钟，算多久没收到录音分片时用它去减
+// （见 service.Meeting.UploadIdle）
 func (q *Queries) GetMeeting(ctx context.Context, id uuid.UUID) (GetMeetingRow, error) {
 	row := q.db.QueryRow(ctx, getMeeting, id)
 	var i GetMeetingRow
@@ -387,6 +390,7 @@ func (q *Queries) GetMeeting(ctx context.Context, id uuid.UUID) (GetMeetingRow, 
 		&i.Meeting.Retranscribe,
 		&i.Meeting.AutoSpeakers,
 		&i.OwnerName,
+		&i.ReadAt,
 	)
 	return i, err
 }
@@ -475,7 +479,8 @@ func (q *Queries) ListChunks(ctx context.Context, meetingID uuid.UUID) ([]ListCh
 
 const listMeetings = `-- name: ListMeetings :many
 SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, u.name AS owner_name,
-       (mm.user_id IS NOT NULL)::bool AS is_member, coalesce(mm.can_edit, false)::bool AS member_can_edit
+       (mm.user_id IS NOT NULL)::bool AS is_member, coalesce(mm.can_edit, false)::bool AS member_can_edit,
+       now()::timestamptz AS read_at
 FROM meetings m
 JOIN users u ON u.id = m.owner_id
 LEFT JOIN meeting_search s ON s.meeting_id = m.id
@@ -506,12 +511,14 @@ type ListMeetingsRow struct {
 	OwnerName     string
 	IsMember      bool
 	MemberCanEdit bool
+	ReadAt        time.Time
 }
 
 // 只列 viewer 能看的会议（管理员都能看，见 service.Access）。
 // query 是 Go 里拼好的 tsquery（见 search.TSQuery），为空表示不筛选。
 // owner 不为空时只列这个人创建的。
 // before_at、before_id 用来翻页：只列排在这场会议后面的（搜索时一页一页取候选）。
+// read_at 和 GetMeeting 的一样。
 func (q *Queries) ListMeetings(ctx context.Context, arg ListMeetingsParams) ([]ListMeetingsRow, error) {
 	rows, err := q.db.Query(ctx, listMeetings,
 		arg.Viewer,
@@ -562,6 +569,7 @@ func (q *Queries) ListMeetings(ctx context.Context, arg ListMeetingsParams) ([]L
 			&i.OwnerName,
 			&i.IsMember,
 			&i.MemberCanEdit,
+			&i.ReadAt,
 		); err != nil {
 			return nil, err
 		}

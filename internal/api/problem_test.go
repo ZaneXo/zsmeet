@@ -80,6 +80,12 @@ func TestRequestErrorsInChinese(t *testing.T) {
 			"没有收到要提交的内容，请重新提交"},
 		{"纪要太大", c.do("PUT", meeting+"/minutes", obj{"content": strings.Repeat("纪", 1<<20)}), 413, "",
 			"提交的内容太大了，最多 2 MB，请删减一些再提交"},
+		// 请求内容有问题，地址里的参数也不对：huma 先查参数，查出的错误和请求内容的错误一起返回。
+		// 参数错误也是中文、位置不变，detail 先说参数
+		{"空的分片，会议 ID 也不对", c.do("PUT", "/api/meetings/xyz/chunks/0", []byte{}), 400, "path.id",
+			"地址里的 id 格式不对，应该是一串 UUID，请检查是否完整；没有收到要提交的内容，请重新提交"},
+		{"分片太大，序号也不对", c.do("PUT", meeting+"/chunks/abc", make([]byte, maxChunkBytes+1)), 413, "path.seq",
+			"地址里的 seq 应该是整数；提交的内容太大了，最多 8 MB，请删减一些再提交"},
 		{"登录时没填邮箱", c.do("POST", "/api/login", obj{"password": password}), 422, "body",
 			"提交的内容缺少「email」，请补上"},
 		{"登录的内容不是合法的 JSON", c.post("/api/login", "application/json", `{"email": "lihang@example.com", "password": "`+password+`",}`), 400, "body",
@@ -193,6 +199,49 @@ func verbs(format string) string {
 		}
 	}
 	return string(out)
+}
+
+// 读请求内容出错时（没有内容、太大、没能及时传完），huma 把读之前查出来的参数错误一起放进 errors：照样换成中文、
+// 不带提交的值，detail 先说参数。errors 里是 Go 报错的（读到一半网络断了）只说 detail，不带 errors。
+// 超时在 HTTP 测试里不好造，这里直接调 localizeProblem。
+func TestBodyReadErrorsKeepParamErrors(t *testing.T) {
+	badSeq := &huma.ErrorDetail{Message: "invalid integer", Location: "path.seq", Value: "abc"}
+	for _, tc := range []struct {
+		name string
+		err  huma.StatusError
+		// 第一处错误的位置；为空表示不该有 errors
+		location string
+		detail   string
+	}{
+		{"没能及时传完，序号也不对", huma.NewError(http.StatusRequestTimeout, "request body read timeout", badSeq), "path.seq",
+			"地址里的 seq 应该是整数；内容没能及时传完，请检查网络后重试"},
+		{"没能及时传完", huma.NewError(http.StatusRequestTimeout, "request body read timeout"), "",
+			"内容没能及时传完，请检查网络后重试"},
+		{"太大，序号也不对", huma.NewError(http.StatusRequestEntityTooLarge, "request body is too large limit=8388608 bytes", badSeq), "path.seq",
+			"地址里的 seq 应该是整数；提交的内容太大了，最多 8 MB，请删减一些再提交"},
+		{"读到一半网络断了", huma.NewError(http.StatusInternalServerError, "cannot read request body", errors.New("unexpected EOF")), "",
+			"没能收完提交的内容，请检查网络后重试"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := localizeProblem(nil, "", tc.err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := out.(*huma.ErrorModel)
+			if p.Status != tc.err.GetStatus() || p.Detail != tc.detail {
+				t.Errorf("detail 应该是「%s」：%+v", tc.detail, p)
+			}
+			if tc.location == "" {
+				if len(p.Errors) != 0 {
+					t.Errorf("不应该有 errors：%+v", p.Errors[0])
+				}
+				return
+			}
+			if len(p.Errors) != 1 || p.Errors[0].Location != tc.location || p.Errors[0].Message != "应该是整数" || p.Errors[0].Value != nil {
+				t.Errorf("参数错误应该是中文、位置不变、不带提交的值：%+v", p.Errors)
+			}
+		})
+	}
 }
 
 // 处理函数返回了不认识的错误时，huma 会把 Go 的报错原文放进 errors。不能给用户看：换成笼统的一句，原文只进日志。

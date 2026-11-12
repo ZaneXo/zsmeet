@@ -471,8 +471,7 @@ func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Se
 		}
 		cur := toMeeting(m)
 		switch {
-		// Meeting 里有切片和指针，要比较内容
-		case !reflect.DeepEqual(cur, last):
+		case meetingChanged(cur, last):
 			if send.Data(cur) != nil {
 				return
 			}
@@ -495,6 +494,13 @@ func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Se
 		case <-ticker.C:
 		}
 	}
+}
+
+// meetingChanged 看会议和上次推送的比有没有变化。Meeting 里有切片和指针，要比较内容。
+// upload_idle_sec 不算：等录音传完时它每秒都在变，只为它不推（新收到分片时 last_chunk_at 会变，照样推）。
+func meetingChanged(cur, last Meeting) bool {
+	cur.UploadIdleSec, last.UploadIdleSec = nil, nil
+	return !reflect.DeepEqual(cur, last)
 }
 
 var retranscribeOp = huma.Operation{

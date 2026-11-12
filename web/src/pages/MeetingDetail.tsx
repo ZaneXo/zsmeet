@@ -11,7 +11,7 @@ import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STA
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { waitingForRecording } from "../lib/meetingStatus";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
-import { chunksFlowing, contiguous, receivedSeconds } from "../lib/unfinishedRecording";
+import { chunksFlowing, contiguous, lastReceived, receivedSeconds } from "../lib/unfinishedRecording";
 import type { RecordingSource } from "../lib/unfinishedRecording";
 import { useTicker } from "../lib/useTicker";
 import { isDesktop, mediaUrl, subscribe } from "../platform";
@@ -494,15 +494,6 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
   );
 }
 
-/** 多久以前，给「最后一次收到录音」用。 */
-function ago(iso: string): string {
-  const sec = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
-  if (sec < 60) return "刚刚";
-  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
-  return dateTime(iso);
-}
-
 /**
  * 网页录音还没传完的会议：可能正在录，也可能录音的网页关掉了、断网了、暂停着。
  * 这台电脑上有没传完的录音时接着传；找不回来的话，可以先用服务器已经收到的部分生成纪要。
@@ -567,10 +558,12 @@ const UNFINISHED_TEXT: Record<RecordingSource, UnfinishedText> = {
 function ReceivedSoFar({ meeting: m }: { meeting: Meeting }) {
   const source: RecordingSource = m.source === "desktop" ? "desktop" : "record";
   const text = UNFINISHED_TEXT[source];
-  // 定时重画：录音中断以后，即使服务器返回的数据没变，「录音中」也要变成「还没有传完」
+  // 录音还在不在传、多久以前收到的，按服务器算好的 upload_idle_sec（会议每 10 秒重新取一次）。
+  // 定时重画是给还没有这一项的旧版本服务器的：那时按这台电脑的时钟算，录音中断以后，
+  // 即使服务器返回的数据没变，「录音中」也要变成「还没有传完」
   useTicker(10_000);
   const live = chunksFlowing(m, Date.now());
-  const last = m.last_chunk_at ? `最后一次收到录音：${ago(m.last_chunk_at)}` : "服务器还没有收到录音";
+  const last = lastReceived(m, Date.now());
 
   const chunks = useQuery({
     queryKey: ["chunks", m.id],

@@ -484,9 +484,19 @@ fn failure_message(e: &tauri_plugin_updater::Error) -> String {
         E::Reqwest(e) if e.is_decode() => format!(
             "新版本的信息看不懂（连的网络可能要先登录），请稍后再试。一直这样的话，到 {RELEASES_PAGE} 下载新版本"
         ),
-        E::Reqwest(_) | E::Network(_) => format!(
+        E::Reqwest(_) => format!(
             "连不上 GitHub（新版本放在 GitHub 上），请检查网络（用代理上网的，看看代理开着没有）后再试。也可以到 {RELEASES_PAGE} 下载新版本"
         ),
+        // 插件只在下载安装包时 GitHub 回的不是 2xx 才给这个错误（比如 404：这个版本的安装包撤下来了、重新发布时正在换文件）。
+        // 连得上，不要让人去查网络和代理
+        E::Network(detail) => {
+            let status = detail
+                .rsplit_once("status: ")
+                .map_or(detail.as_str(), |(_, status)| status);
+            format!(
+                "GitHub 上暂时下载不到新版本的安装包（{status}），请稍后再试。一直这样的话，到 {RELEASES_PAGE} 下载新版本"
+            )
+        }
         E::ReleaseNotFound => {
             "没取到新版本的信息（GitHub 上暂时没有，或者连的网络要先登录），请稍后再试".into()
         }
@@ -706,9 +716,14 @@ mod tests {
         let io = |kind| E::Io(std::io::Error::from(kind));
         let cases = [
             (E::ReleaseNotFound, "没取到新版本的信息"),
+            // 下载安装包时 GitHub 回了 404、5xx（插件 2.14 的写法）：网是通的
             (
-                E::Network("Download request failed with status: 404".into()),
-                "连不上 GitHub",
+                E::Network("Download request failed with status: 404 Not Found".into()),
+                "GitHub 上暂时下载不到新版本的安装包（404 Not Found）",
+            ),
+            (
+                E::Network("Download request failed with status: 503 Service Unavailable".into()),
+                "（503 Service Unavailable），请稍后再试",
             ),
             (
                 E::TargetsNotFound(vec!["darwin-aarch64".into()]),
@@ -739,6 +754,15 @@ mod tests {
             let message = failure_message(&error);
             assert!(message.contains(expected), "{error:?}：{message}");
         }
+        // 下载不到安装包不是网络的问题，不让人去查网络和代理
+        let missing = failure_message(&E::Network(
+            "Download request failed with status: 404 Not Found".into(),
+        ));
+        assert!(
+            !missing.contains("连不上") && !missing.contains("代理"),
+            "{missing}"
+        );
+        assert!(missing.contains(RELEASES_PAGE), "{missing}");
     }
 
     // ---- 装新版本的几步：假的来源、假的录音 ----

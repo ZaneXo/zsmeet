@@ -475,7 +475,12 @@ func testCancellerSpeed() {
     let perBatch = s.mic.count / 480 / batches
     // 量这个线程用掉的 CPU 时间（被换下去的时间不算）。分 10 段量、看最快的一段：机器很忙（别的程序在编译）时
     // 线程会被排到能效核上、和别的程序抢缓存，慢两三倍，最快的那段最接近它本来要花的时间。
-    // 量的时候按「用户交互」的优先级跑，尽量排在性能核上
+    // 量的时候按「用户交互」的优先级跑，尽量排在性能核上。
+    // 在 Rosetta 下跑的（test.sh 用 Intel 那一份再跑一遍）不能这样量：那里线程的 CPU 时钟给的是 24 MHz 的计数，
+    // 当成纳秒就小了约 41.7 倍，没开优化的也「够快」。改量经过的时间（CLOCK_UPTIME_RAW 在 Rosetta 下是对的），
+    // 一样按「用户交互」的优先级跑、看最快的一段，很少被换下去
+    let rosetta = runningUnderRosetta()
+    let clock = rosetta ? CLOCK_UPTIME_RAW : CLOCK_THREAD_CPUTIME_ID
     let previousQoS = qos_class_self()
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
     defer { pthread_set_qos_class_self_np(previousQoS, 0) }
@@ -485,12 +490,12 @@ func testCancellerSpeed() {
         s.mic.withUnsafeBufferPointer { mic in
             output.withUnsafeMutableBufferPointer { out in
                 for batch in 0..<batches {
-                    let started = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                    let started = clock_gettime_nsec_np(clock)
                     for frame in (batch * perBatch)..<((batch + 1) * perBatch) {
                         _ = canceller.render(far.baseAddress! + frame * 480)
                         _ = canceller.capture(mic.baseAddress! + frame * 480, into: out.baseAddress!)
                     }
-                    let elapsed = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - started
+                    let elapsed = clock_gettime_nsec_np(clock) - started
                     total += elapsed
                     fastest = min(fastest, Double(elapsed) / 1_000 / Double(perBatch))
                 }
@@ -498,7 +503,9 @@ func testCancellerSpeed() {
         }
     }
     let average = Double(total) / 1_000 / Double(perBatch * batches)
-    report("每帧 \(format(fastest)) 微秒（最快的一段，平均 \(format(average)) 微秒；10 毫秒的声音），约占一个核的 \(String(format: "%.2f", fastest / 100))%")
+    let measured = rosetta ? "在 Rosetta 下，量的是经过的时间" : "量的是线程用掉的 CPU 时间"
+    report("每帧 \(format(fastest)) 微秒（最快的一段，平均 \(format(average)) 微秒；10 毫秒的声音；\(measured)），"
+        + "约占一个核的 \(String(format: "%.2f", fastest / 100))%")
     // 量到的：直接用 C 调用约 55 微秒（M4 Pro，同时在编译别的东西），这里约 130 微秒。CI 的虚拟机慢一些。
     // 最快的一段也超过 250 微秒（一个核的 2.5%）多半是编错了（比如没开优化，要慢 5 到 10 倍）。
     // 机器很忙（最近 1 分钟的平均负载超过核数的 3/4，比如几个工作区同时在编译）时所有的核都降频、抢缓存，
@@ -507,6 +514,13 @@ func testCancellerSpeed() {
     let busy = getloadavg(&load, 1) == 1 && load[0] > Double(ProcessInfo.processInfo.activeProcessorCount) * 0.75
     let limit = busy ? 500.0 : 250.0
     expect(fastest < limit, "每帧要 \(fastest) 微秒（平均 \(average) 微秒，1 分钟平均负载 \(load[0])，上限 \(limit) 微秒）")
+}
+
+/// 这个测试程序是不是在 Rosetta 下跑的（Apple 芯片上跑 Intel 那一份）
+func runningUnderRosetta() -> Bool {
+    var translated: Int32 = 0
+    var size = MemoryLayout<Int32>.size
+    return sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0) == 0 && translated == 1
 }
 
 func testCancellerLatency() {

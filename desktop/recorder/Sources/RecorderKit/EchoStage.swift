@@ -35,8 +35,12 @@ final class EchoStage {
         /// 参考来晚了，麦克风在 lead 之外最多再等多久，再晚的帧直接用原声。
         /// 不能等太久：等完一下子交出去，TimeMixer 那一路积压超过 0.5 秒会丢掉
         var maxWait = 0.25
-        /// 不做回声消除时麦克风在 lead 之外多等一会儿：这时参考一般已经到了，电脑声音恢复时马上就能重新打开
+        /// 不做回声消除时麦克风在 lead 之外多等一会儿（参考一般比麦克风晚到几十毫秒，这样和做的时候等得差不多，
+        /// 开、关切换时麦克风那一路交得快慢变化小）。电脑声音又跟上了没有不靠它判断，见 referenceCaughtUp
         var bypassExtra = 0.06
+        /// 电脑声音断了以后又来了：比麦克风晚得不到 maxWait - recoverMargin 秒才接着做（见 referenceCaughtUp）。
+        /// 正好在边上的话，刚打开又因为一直来晚了关掉，来回开、关
+        var recoverMargin = 0.02
         /// 电脑声音这么久没来新的就算断了
         var stallTimeout = 0.3
         /// 刚开始录的这一段时间里电脑声音还没来，不算断了（设备启动有快有慢）
@@ -261,8 +265,7 @@ final class EchoStage {
         mic.withUnsafeSamples { all in
             lane.append(UnsafeBufferPointer(rebasing: all[fromQueue...]))
         }
-        dump?.writeOutput(shadow[min(skipOutput, shadow.count)...])
-        mic.withUnsafeSamples { all in dump?.writeOutput(UnsafeBufferPointer(rebasing: all[fromQueue...])) }
+        // 调试用的录音（--aec-dump）这里不写：之后处理出来、跳过的那一份照样写（见 emit），一个采样对一个采样
         skipOutput = total
     }
 
@@ -350,7 +353,7 @@ final class EchoStage {
             return true
         }
         // 没在消除。是因为电脑声音断了的话，看它是不是又跟上了
-        if !flushing, referenceMissing, let ideal, covers(ideal) {
+        if !flushing, referenceMissing, referenceCaughtUp(now: now) {
             referenceMissing = false
             lateFrames = 0
             log("回声消除：电脑声音又跟上了")
@@ -369,6 +372,21 @@ final class EchoStage {
     /// 参考已经到了从 start 开始的一帧（多留两个采样，补、丢一个采样时也够）
     private func covers(_ start: Double) -> Bool {
         Double(referenceHead) + Double(reference.count) >= start + Double(Self.frameSize) + 2
+    }
+
+    /// 电脑声音断了（或者一直来得太晚）以后又跟上了没有：它又在来了，并且按时间戳，最新的参考采样比最新的麦克风采样
+    /// 晚不到 maxWait - recoverMargin。做回声消除时每一帧最多压 lead + maxWait，参考比麦克风晚 maxWait 以内都等得到，
+    /// 跟上了就是这个意思。不能看最前面那一帧的参考到没到：不做的时候麦克风只压 lead + bypassExtra 就交出去，
+    /// 电脑声音一直比麦克风晚 0.07 到 0.25 秒时（做的时候等得到），就再也打不开了；麦克风卡了一下、一下子来了一大批时，
+    /// 最前面那一帧又早得参考已经到了，打开了马上又因为来晚了关掉
+    private func referenceCaughtUp(now: Double) -> Bool {
+        guard let last = referenceLastArrival, now - last <= config.stallTimeout,
+              let micTime = micTimeline.time(at: Double(micHead) + Double(mic.count)),
+              let referenceTime = referenceTimeline.time(at: Double(referenceHead) + Double(reference.count))
+        else { return false }
+        // 麦克风有一阵没交数据了（卡了一下、一批一批地交）的话，这段时间里采到的还没到这里，也算上
+        let micPending = now - (micLastArrival ?? now)
+        return micTime + micPending - referenceTime <= config.maxWait - config.recoverMargin
     }
 
     /// 做回声消除：喂一帧参考，处理一帧麦克风。ideal 是这一帧该从参考的哪个采样开始，nil：这段时间没有参考，喂 0
@@ -492,9 +510,12 @@ final class EchoStage {
         shadow.append(contentsOf: micFrame[(Self.frameSize - latency)...])
     }
 
-    /// 交给麦克风那一路（要跳过的先跳过）
+    /// 交给麦克风那一路（要跳过的先跳过）。调试用的录音（--aec-dump）里跳过的也写：暂停时已经先原样交出去的、
+    /// 继续时不要的（暂停期间采到的）都写处理出来的这一份，mic-out.wav 的第 n 个采样一直是 mic-in.wav 的
+    /// 第 n 个采样处理出来的，暂停几次都对得上
     private func emit(_ samples: ArraySlice<Float>, into lane: inout SampleFIFO) {
         guard !samples.isEmpty else { return }
+        dump?.writeOutput(samples)
         var start = samples.startIndex
         if skipOutput > 0 {
             let skipped = min(skipOutput, samples.count)
@@ -503,7 +524,6 @@ final class EchoStage {
         }
         guard start < samples.endIndex else { return }
         lane.append(samples[start...])
-        dump?.writeOutput(samples[start...])
     }
 
     /// 参考里 end 之前的采样不会再用了（留 20 毫秒，补采样、往回对齐时要用），丢掉

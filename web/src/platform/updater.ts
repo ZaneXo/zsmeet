@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useSyncExternalStore } from "react";
-import { errorMessage } from "../api/client";
-import { normalizeCheck, normalizeInfo, normalizeProgress, parseDismissed } from "./updateView";
+// 引用别的文件里的值要带 .ts 后缀：updater.test.ts 用 Node 直接跑（经过 desktop.ts），它不会自己补后缀
+import { normalizeCheck, normalizeInfo, normalizeProgress, parseDismissed } from "./updateView.ts";
 import type { Dismissed, InstallPhase } from "./updateView";
 
 /**
@@ -11,6 +11,9 @@ import type { Dismissed, InstallPhase } from "./updateView";
  * - App 打开 10 秒左右、之后每 6 小时自己检查一次，有新版本时推 update://available；设置里也能点「检查更新」（update_check）。
  * - 用户点了「更新并重启」才下载安装（update_install），下载时推 update://progress。正在录音、正在结束录音、
  *   还有录音没传完时 App 不装，返回原因。
+ * - App 推过来的消息，Tauri 只交给推的时候已经订阅了的界面，不替还没订阅的留着。所以一启动就订阅（desktop.ts 的
+ *   startDesktop 调用 startUpdater），不等用到更新状态的界面出来：打开 10 秒左右查到的新版本只推这一次，那时界面
+ *   可能还停在「正在启动」、连服务器的画面上。
  *
  * 这里只在桌面版里用到；网页版的构建里没有这些代码（模块顶层没有副作用，没用到就整个去掉）。
  */
@@ -62,20 +65,21 @@ function setAvailable(available: UpdateInfo | null) {
   update(changed ? { available, phase: "idle", error: "", progress: null } : { available });
 }
 
-let started = false;
+let started: Promise<void> | undefined;
 
-/** 第一次用到时：读出点过的「以后再说」，订阅 App 推过来的新版本和下载进度。 */
-function start() {
-  if (started) return;
-  started = true;
-  let dismissed: Dismissed | null = null;
-  try {
-    dismissed = parseDismissed(localStorage.getItem(DISMISSED_KEY));
-  } catch {
-    // 读不到：当成没点过
-  }
-  update({ dismissed });
-  void (async () => {
+/**
+ * 读出点过的「以后再说」，订阅 App 推过来的新版本和下载进度。App 一启动就调用（desktop.ts 的 startDesktop），
+ * 订阅好了才返回；多次调用只做一次（界面用到更新状态时也会调用，以防万一）。
+ */
+export function startUpdater(): Promise<void> {
+  started ??= (async () => {
+    let dismissed: Dismissed | null = null;
+    try {
+      dismissed = parseDismissed(localStorage.getItem(DISMISSED_KEY));
+    } catch {
+      // 读不到：当成没点过
+    }
+    update({ dismissed });
     try {
       await listen<unknown>(EVENT_AVAILABLE, (e) => setAvailable(normalizeInfo(e.payload)));
       await listen<unknown>(EVENT_PROGRESS, (e) => update({ progress: normalizeProgress(e.payload) }));
@@ -83,19 +87,25 @@ function start() {
       // 订阅不上（不太可能）：只是不会自己提示新版本，设置里照样能检查、能更新
     }
   })();
+  return started;
 }
 
 function subscribe(listener: () => void) {
-  start();
+  void startUpdater();
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
 }
 
+/** 自动更新现在的状态（不在 React 组件里时用）。 */
+export function getUpdaterSnapshot(): UpdaterSnapshot {
+  return snap;
+}
+
 /** 自动更新的整体状态。整个 App 只有一份：在哪一页点的「更新并重启」，别的页面上也看得到进度。 */
 export function useUpdater(): UpdaterSnapshot {
-  return useSyncExternalStore(subscribe, () => snap);
+  return useSyncExternalStore(subscribe, getUpdaterSnapshot);
 }
 
 // ---- 命令（desktop/src-tauri 里的 update_*）。出错时 Rust 返回给人看的中文 ----
@@ -119,7 +129,9 @@ export async function installUpdate(): Promise<void> {
     await invoke("update_install");
     update({ phase: "installed" });
   } catch (e) {
-    update({ phase: "failed", progress: null, error: errorMessage(e) });
+    // App 给的原因是一句话（字符串）。和 api/client 的 errorMessage 一样处理，不引用它：那边会带进整个接口客户端，
+    // 测试时 Node 就加载不了这个文件
+    update({ phase: "failed", progress: null, error: e instanceof Error ? e.message : String(e) });
   }
 }
 

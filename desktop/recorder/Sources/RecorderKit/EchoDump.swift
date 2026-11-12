@@ -3,8 +3,9 @@ import AVFoundation
 /// --aec-dump <目录>：把回声消除每一帧的麦克风原声、喂给 AEC3 的参考、处理后的麦克风写成三个
 /// 48 kHz 单声道的 WAV（mic-in.wav、reference.wav、mic-out.wav），在真机上排查、调参用。
 /// 三个文件的第 n 个采样是对应的：mic-in 是送进去的麦克风原声，reference 是和它配对、喂给 AEC3 的参考
-/// （提前了 lead 的那一段；没做回声消除的帧参考是 0），mic-out 是交出去的（处理过的，或者原样通过的）。
-/// 结束时最后不到 9 毫秒（AEC3 的处理延迟）是原样交出的。
+/// （提前了 lead 的那一段；没做回声消除的帧参考是 0），mic-out 是 EchoStage 处理出来的（处理过的，或者原样通过的）。
+/// 暂停、继续时录音里不要、或者先原样交出去了的那一小段（见 EchoStage 的 previewHeld、discardHeld），mic-out 里
+/// 照样是处理出来的那一份，三个文件一直一个采样对一个采样。结束时最后不到 9 毫秒（AEC3 的处理延迟）是原样交出的。
 /// 文件只留在这台电脑上（只有自己能读），录音照常上传，和它没有关系。写不进去就不写了，录音照常。
 final class EchoDump {
     static let fileNames = ["mic-in.wav", "reference.wav", "mic-out.wav"]
@@ -48,13 +49,8 @@ final class EchoDump {
         }
     }
 
-    /// 交出去的麦克风声音（处理过的，或者原样通过的），和送进去的一个对一个
+    /// 处理出来的麦克风声音（处理过的，或者原样通过的），和送进去的一个对一个
     func writeOutput(_ samples: ArraySlice<Float>) {
-        guard !failed else { return }
-        pending[2].append(contentsOf: samples)
-    }
-
-    func writeOutput(_ samples: UnsafeBufferPointer<Float>) {
         guard !failed else { return }
         pending[2].append(contentsOf: samples)
     }

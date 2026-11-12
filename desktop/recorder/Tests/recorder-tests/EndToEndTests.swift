@@ -417,8 +417,8 @@ func testEndToEndBadArguments() throws {
     expectEqual(lastEvent(run)["message"] as? String, "--chunk-seconds 要在 0.5 到 600 秒之间，现在是 0")
 }
 
-/// 读 WAV（mono，48 kHz 的 float），回声消除的 --aec-dump 写的就是这种
-private func readWAV(_ url: URL) throws -> [Float] {
+/// 读 WAV（mono，48 kHz 的 float），回声消除的 --aec-dump 写的就是这种（EchoStageTests.swift 也用）
+func readWAV(_ url: URL) throws -> [Float] {
     let reader = try AudioFileReader(path: url.path)
     var samples: [Float] = []
     while true {

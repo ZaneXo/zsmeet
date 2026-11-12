@@ -42,6 +42,8 @@ WebRTC 用不到哈希容器，那些文件也没挑进来，挑进来的文件�
 2. 用 `clang -MM`（只做预处理：不编译，不用 meson，也不运行源码包里的任何脚本）找出 `webrtc-sources.txt` 里的源文件
    和 `Sources/CRecorder/zr_aec.cc` 在 Apple 芯片、Intel 上用到的全部头文件，参数和编译时一样（`webrtc-flags.sh`）。
 3. 只留下这些源文件、头文件和上面的许可证文件，别的都删掉（挑完约 5 MB）。
+4. 上面这些都在这个目录下的一个临时目录里做，都没问题了才换掉原来的 `webrtc-audio-processing/`、`abseil-cpp/`；
+   中途出错（比如 `clang -MM` 没通过）就停下、说明原因，原来的文件一个不动。macOS 自带的 bash 3.2 就能运行它。
 
 ## 编译
 

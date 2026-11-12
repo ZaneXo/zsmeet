@@ -12,11 +12,14 @@ let echoStageTests: [(String, () throws -> Void)] = [
     ("回声消除：每一帧麦克风配上提前 170 毫秒的参考，一帧参考一帧麦克风", testStagePairsByTime),
     ("回声消除：麦克风进多少出多少、顺序不变（交付时快时慢、成批到、卡住、电脑声音断了）", testStageConservesSamples),
     ("回声消除：电脑声音断了就不做（no_reference），麦克风不会一直等；恢复了接着做", testStageReferenceStall),
+    ("回声消除：电脑声音一直比麦克风晚 0.1 秒时断了、晚开始，跟上了照样接着做；一直晚得等不到的关掉以后不来回开关",
+     testStageLateReferenceRecovers),
     ("回声消除：两路时钟差 100 ppm，参考补、丢采样跟上，模拟一小时对齐一直在 1 毫秒以内", testStageDrift),
     ("回声消除：时间戳断开就重新对齐，偏了 20 毫秒以上 AEC3 从头开始", testStageRealign),
     ("回声消除：不做的时候原样通过（一个比特都不变），开、关切换时不多不少", testStageBypassIsExact),
     ("回声消除：输出路线变了要稳定 1 秒才跟着变", testStageRouteDebounce),
     ("回声消除：暂停前压着的先原样交出，暂停期间的不要，结束时全部交出", testStagePauseResumeFinish),
+    ("回声消除：--aec-dump 的三个文件在暂停、继续以后也一个采样对一个采样", testStageDumpStaysAligned),
     ("回声消除：麦克风断了（不来新的了），压着的 0.5 秒以后就交出去，不等到结束", testStageMicStall),
     ("回声消除：AEC3 出错时这一帧用原声，连续出错就关掉（on 模式提醒）", testStageCancellerFailure),
     ("回声消除：建不了回声消除器时原样录麦克风，started 报 unavailable，on 模式提醒", testEngineCancellerUnavailable),
@@ -189,12 +192,13 @@ final class StageRun {
     private var constantBatch: [Float] = []
 
     init(mic: SimStream, reference: SimStream?, canceller: EchoCanceller, mode: EchoCancelMode = .on,
-         lead: Int = 170, route: OutputRouteSource? = nil, configure: (inout EchoStage.Configuration) -> Void = { _ in }) {
+         lead: Int = 170, route: OutputRouteSource? = nil, dump: EchoDump? = nil,
+         configure: (inout EchoStage.Configuration) -> Void = { _ in }) {
         self.mic = mic
         self.reference = reference
         var configuration = EchoStage.Configuration(mode: mode, leadMilliseconds: lead)
         configure(&configuration)
-        stage = EchoStage(configuration: configuration, canceller: canceller, route: route, events: events, now: 0)
+        stage = EchoStage(configuration: configuration, canceller: canceller, route: route, events: events, dump: dump, now: 0)
         stage.begin(now: 0)
     }
 
@@ -483,6 +487,56 @@ func testStageReferenceStall() {
     expect(fake.resets >= 1, "恢复时 AEC3 从头开始")
 }
 
+func testStageLateReferenceRecovers() {
+    // 电脑声音一直比麦克风晚 0.1 秒交来（输出的缓冲大，比如蓝牙音箱）：做回声消除时麦克风多等一会儿就等得到。
+    // 不做的时候麦克风只压 lead + bypassExtra（0.24 秒）就交出去，断了以后跟上了没有不能看那时参考到没到，
+    // 不然这样晚的电脑声音一断，这场录音后面就再也不做了
+    let on = #"{"event":"echo","active":true,"reason":"forced"}"#
+    let off = #"{"event":"echo","active":false,"reason":"no_reference"}"#
+    let count = 30 * 48_000
+    let fake = FakeCanceller()
+    // 10 秒时交不过来 0.5 秒（之后一起到）；20 秒时设备停了 0.5 秒（这段时间的采样没有，序号接着、时间跳过去）
+    var reference = SimStream(numbered(count + 96_000, offset: 5_000_000),
+                              segments: [SimStream.Segment(start: 0, time: 0), SimStream.Segment(start: 20 * 48_000, time: 20.5)])
+    reference.holds = [10.0...10.5]
+    let run = StageRun(mic: SimStream(numbered(count)), reference: reference, canceller: fake)
+    run.referenceLatency = run.micLatency + 0.1
+    run.run()
+    run.finish()
+    expectEqual(run.output, numbered(count), "进多少出多少")
+    expectEqual(run.events.all, [on, off, on, off, on], "两次断了都接着做")
+    let counters = run.stage.counters
+    expectEqual(counters.stalls, 2)
+    // 每次断了不到一秒不做（断 0.5 秒，0.3 秒没来才算断了，之前压着的那些帧也等不到参考）
+    expect(counters.processed >= count / 480 - 200, "做了回声消除的帧太少：\(counters)")
+    // 恢复以后照样按时间配参考（设备停过的那次，序号差了停掉的 0.5 秒）
+    let offsets = Set(fake.pairs.filter { $0.reference != 0 }.map { Int($0.reference) - 5_000_000 - Int($0.mic) })
+    expectEqual(offsets, [8_160, 8_160 - 24_000])
+
+    // 电脑声音 2 秒才开始来（过了刚开始录时等它的 1.5 秒），也晚 0.1 秒：先不做，来了就做
+    let lateStart = StageRun(mic: SimStream(numbered(10 * 48_000)),
+                             reference: SimStream(numbered(10 * 48_000, offset: 5_000_000), segments: [SimStream.Segment(start: 0, time: 2)]),
+                             canceller: FakeCanceller())
+    lateStart.referenceLatency = lateStart.micLatency + 0.1
+    lateStart.run()
+    lateStart.finish()
+    expectEqual(lateStart.events.all, [on, off, on])
+    expectEqual(lateStart.output, numbered(10 * 48_000))
+    expect(lateStart.stage.counters.processed >= 10 * 100 - 260, "来了以后都在做：\(lateStart.stage.counters)")
+
+    // 一直晚 0.3 秒（做的时候最多等 0.25 秒，也等不到）：关掉以后不来回开、关。麦克风卡了一下（交不过来，之后
+    // 一下子都到了）的时候也不开：那时压着的最前面那一帧早，参考已经到了，看起来像是跟上了
+    var stuttering = SimStream(numbered(count))
+    stuttering.holds = [10.0...10.3, 20.0...20.45]
+    let behind = StageRun(mic: stuttering, reference: SimStream(numbered(count + 96_000, offset: 5_000_000)), canceller: FakeCanceller())
+    behind.referenceLatency = behind.micLatency + 0.3
+    behind.run()
+    behind.finish()
+    expectEqual(behind.events.all, [on, off])
+    expectEqual(behind.output, numbered(count))
+    expectEqual(behind.stage.counters.stalls, 1)
+}
+
 func testStageDrift() {
     // 电脑声音的时钟比麦克风快 100 ppm：同样一秒，它多出 4.8 个采样。模拟一个小时（只看对齐，不处理声音）
     let ppm = 100e-6
@@ -607,6 +661,47 @@ func testStagePauseResumeFinish() {
     expect(after == Array(numbered(count)[beforeResume...]), "继续以后只有点了继续以后采到的：\(after.first ?? -1) 起，\(after.count) 个")
     expectEqual(fake.calls, String(repeating: "rc", count: fake.calls.count / 2), "暂停期间也一直在处理，一帧参考一帧麦克风")
     expectEqual(run.stage.skipOutput, 0)
+}
+
+func testStageDumpStaysAligned() throws {
+    // 真机上量消掉了多少靠 --aec-dump 的三个文件一个采样对一个采样。暂停、继续以后（包括压着的还没处理完就又暂停、
+    // 又继续）也要对得上：录音里不要的那些，mic-out 里照样写处理出来的。假的回声消除器原样交出（像 AEC3 一样晚
+    // 431 个采样，EchoStage 补齐），mic-out 应该和 mic-in 一模一样。采样的值是序号乘 2 的 -22 次方（在 -1…1 以内，
+    // Float 里是精确的），写进 WAV、读出来不走样
+    let count = 8 * 48_000
+    let scale = Float(1) / 4_194_304
+    let mic = (0..<count).map { Float($0 + 1) * scale }
+    let directory = try temporaryDirectory("aec-dump")
+    autoreleasepool {
+        guard let dump = EchoDump(directory: directory.path) else {
+            Harness.fail("建不了调试用的录音文件")
+            return
+        }
+        let run = StageRun(mic: SimStream(mic), reference: SimStream(numbered(count + 48_000).map { $0 * scale }),
+                           canceller: FakeCanceller(latency: Int(ZR_AEC_LATENCY)), dump: dump)
+        run.run(until: 2.01)
+        run.stage.previewHeld(into: &run.lane)  // 暂停
+        run.run(until: 3.01)
+        run.stage.discardHeld()  // 继续
+        run.run(until: 3.5)
+        // 暂停了马上继续，再马上暂停：压着的都还没处理
+        run.stage.previewHeld(into: &run.lane)
+        run.stage.discardHeld()
+        run.stage.previewHeld(into: &run.lane)
+        run.run(until: 4.6)
+        run.stage.discardHeld()
+        run.run()
+        run.finish()
+    }
+    let micIn = try readWAV(directory.appendingPathComponent("mic-in.wav"))
+    let reference = try readWAV(directory.appendingPathComponent("reference.wav"))
+    let micOut = try readWAV(directory.appendingPathComponent("mic-out.wav"))
+    expectEqual(micIn.count, count)
+    expectEqual(reference.count, count)
+    expectEqual(micOut.count, count)
+    expect(micIn == mic, "mic-in 是送进去的麦克风原声")
+    let mismatch = (0..<min(micIn.count, micOut.count)).first { micIn[$0] != micOut[$0] }
+    expect(mismatch == nil, "mic-out 和 mic-in 从第 \(mismatch ?? -1) 个采样起对不上了")
 }
 
 func testStageMicStall() {

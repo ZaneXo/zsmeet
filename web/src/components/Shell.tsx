@@ -2,12 +2,12 @@ import { useMutation } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { AppLink } from "./AppLink";
-import { api, unwrap } from "../api/client";
+import { api, errorMessage, unwrap } from "../api/client";
 import type { User } from "../api/client";
 import { hms } from "../lib/format";
 import { session, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
-import { isDesktop } from "../platform";
+import { isDesktop, useSigningOut } from "../platform";
 import { logout as desktopLogout } from "../platform/desktop";
 import { DesktopRecorderBanner, DesktopRecordingBadge } from "../platform/DesktopRecordings";
 import { OfflineBanner } from "../platform/OfflineBanner";
@@ -26,6 +26,8 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
       if (!isDesktop) window.location.assign("/");
     },
   });
+  // 桌面版退出登录、切换服务器一次只做一个（platform/desktop.ts）：账号页上正在退出登录、切换服务器时，这里也变灰
+  const signingOut = useSigningOut() || logout.isPending;
 
   const navigate = useNavigate();
 
@@ -61,27 +63,36 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
           设置
         </AppLink>
         <div className="flex-1" />
-        <div className="flex items-center gap-2.5 px-3 md:border-t md:border-line md:pt-3">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-brand-tint text-[13px] font-semibold text-brand-ink" aria-hidden="true">
-            {user.name.slice(0, 1)}
+        <div className="md:border-t md:border-line md:pt-3">
+          <div className="flex items-center gap-2.5 px-3">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-brand-tint text-[13px] font-semibold text-brand-ink" aria-hidden="true">
+              {user.name.slice(0, 1)}
+            </div>
+            <div className="hidden min-w-0 flex-1 md:block">
+              <div className="truncate text-[13px] font-semibold">{user.name}</div>
+              <div className="text-xs text-muted">{user.role === "admin" ? "管理员" : "成员"}</div>
+            </div>
+            <button
+              type="button"
+              title={signingOut ? "正在退出登录…" : "退出登录"}
+              aria-label="退出登录"
+              disabled={signingOut}
+              onClick={() => {
+                // 桌面版正在录音、有录音没传完：先到账号页，说清楚退出以后录音会怎样，再确认退出
+                if (isDesktop && signOutNote(recorderState(), "退出登录")) navigate("/settings?logout=1");
+                else logout.mutate();
+              }}
+              className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-muted hover:bg-subtle hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <Icon name="logout" />
+            </button>
           </div>
-          <div className="hidden min-w-0 flex-1 md:block">
-            <div className="truncate text-[13px] font-semibold">{user.name}</div>
-            <div className="text-xs text-muted">{user.role === "admin" ? "管理员" : "成员"}</div>
-          </div>
-          <button
-            type="button"
-            title="退出登录"
-            aria-label="退出登录"
-            onClick={() => {
-              // 桌面版正在录音、有录音没传完：先到账号页，说清楚退出以后录音会怎样，再确认退出
-              if (isDesktop && signOutNote(recorderState(), "退出登录")) navigate("/settings?logout=1");
-              else logout.mutate();
-            }}
-            className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-muted hover:bg-subtle hover:text-ink"
-          >
-            <Icon name="logout" />
-          </button>
+          {/* 没能退出（比如还没来得及变灰就点到了，被正在做的退出登录、切换服务器拒绝）：说明原因，不然看起来点了没反应 */}
+          {logout.isError && (
+            <p role="alert" className="mt-1.5 px-3 text-xs text-bad">
+              {errorMessage(logout.error)}
+            </p>
+          )}
         </div>
       </nav>
       <main className="flex min-w-0 flex-1 flex-col gap-5 px-4 py-6 md:px-10 md:py-7">

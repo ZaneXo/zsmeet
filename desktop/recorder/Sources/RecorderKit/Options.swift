@@ -53,9 +53,9 @@ public enum CommandLineParser {
               再加 --realtime 就按文件的实际时长读。
         """
 
-    /// 服务器一场会议最多收这么多片（序号 0 到 3999，见 internal/service/meetings.go 的 MaxChunks）。
-    /// --start-seq 不能再大：从后面开始录的分片都传不上去，Int.max 这样的数在序号加 1 时还会让程序崩溃
-    static let maxChunks = 4_000
+    /// --start-seq 要小于它（服务器一场会议最多收的片数）：从后面开始录的分片都传不上去。
+    /// 录的过程中也不会超出，见 ChunkWriter
+    static let maxChunks = ChunkWriter.maxChunks
 
     /// args 不含程序名
     public static func parse(_ args: [String]) throws -> Command {

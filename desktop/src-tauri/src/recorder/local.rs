@@ -2,7 +2,8 @@
 //!
 //! 录音程序先写 `<序号>.aac.part`，写完、落盘以后改名成 `<序号>.aac` 再报告，所以 `.aac` 都是完整的。
 //! recording.json 也是先落盘再改名，上一份留在 recording.json.bak：断电后新的那份读不出来时用上一份。
-//! 分片传上去以后就删掉；全部传完、服务器开始处理以后整个目录删掉。
+//! 分片传上去以后也先留着（传分片时的「成功」不一定是服务器回的），全部传完、核对过服务器都收到了、服务器开始处理以后
+//! 整个目录一起删掉。6 小时的录音约 170 MB（64 kbps）。
 //! 录音目录只有自己能进（0700）：同一台 Mac 上的其他用户看不到别人的会议录音。
 
 use std::collections::BTreeSet;
@@ -61,6 +62,10 @@ pub struct Recording {
     /// 中断、传不上去的原因，给用户看
     #[serde(default)]
     pub error: Option<String>,
+    /// 接着录时没能问到服务器收到了哪几片（断网了），从这一片起的序号没和服务器核对过：服务器上可能有这台电脑不知道的
+    /// 分片用了同样的序号。传其中任何一片、告诉服务器传完之前先核对（见 queue.rs），核对过了才清掉
+    #[serde(default)]
+    pub unverified_from: Option<u32>,
 }
 
 impl Recording {
@@ -207,8 +212,9 @@ pub fn resume_seq(dir: &Path, rec: &Recording, received: &[u32]) -> u32 {
         .max(after(received.iter().copied().max()))
 }
 
-/// resume_seq 跳过的分片（序号 from 到 to-1）一共多少秒。这台电脑上还在的照着分片算；不在的（传上去以后删掉了）
-/// 量不了，按每片 chunk_seconds 算：除了暂停、结束前的最后一片，每片都是这么长。
+/// resume_seq 跳过的分片（序号 from 到 to-1）一共多少秒。这台电脑上还在的照着分片算：分片要等服务器开始处理以后才删，
+/// 这台电脑上录的都还在。只在服务器上的（以前的版本传上去就删了，或者不是这台电脑传的）量不了，按每片 chunk_seconds 算：
+/// 除了暂停、结束前的最后一片，每片都是这么长。碰上短的那几片，算出来的时长偏长，新标记的时间、6 小时的上限也跟着差一点。
 pub fn skipped_seconds(dir: &Path, from: u32, to: u32, chunk_seconds: u32) -> f64 {
     // 只看目录里有的：序号可能隔得很远，不一个一个地试
     let here: BTreeSet<u32> = chunk_seqs(dir)
@@ -322,7 +328,16 @@ pub mod tests {
             seconds: 10.0,
             status,
             error: None,
+            unverified_from: None,
         }
+    }
+
+    #[test]
+    fn reads_a_recording_json_written_before_unverified_from_existed() {
+        let json = r#"{"meeting_id":"m1","server":"https://meet.example.com","user_id":"u1","next_seq":3,"uploaded":1,"status":"interrupted"}"#;
+        let rec: Recording = serde_json::from_str(json).unwrap();
+        assert_eq!((rec.next_seq, rec.uploaded), (3, 1));
+        assert_eq!(rec.unverified_from, None);
     }
 
     #[test]

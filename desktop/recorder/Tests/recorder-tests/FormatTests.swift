@@ -43,6 +43,7 @@ func testEventJSON() {
         (.warning(.micUnavailable, "m"), #"{"event":"warning","code":"mic_unavailable","message":"m"}"#),
         (.warning(.systemDenied, "s"), #"{"event":"warning","code":"system_denied","message":"s"}"#),
         (.warning(.systemUnavailable, "s"), #"{"event":"warning","code":"system_unavailable","message":"s"}"#),
+        (.warning(.chunkLimit, "c"), #"{"event":"warning","code":"chunk_limit","message":"c"}"#),
         (.error(RecorderFailure("no_source", "都录不了")), #"{"event":"error","code":"no_source","message":"都录不了"}"#),
         (.stopped(nextSeq: 7, seconds: 61.5), #"{"event":"stopped","next_seq":7,"seconds":61.5}"#),
     ]

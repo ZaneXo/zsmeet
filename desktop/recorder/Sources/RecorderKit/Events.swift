@@ -1,11 +1,14 @@
 import Foundation
 
-/// 有一路声音录不了时的提醒。另一路照常录，App 把 message 显示给用户。
+/// 录音时的提醒，App 把 message 显示给用户。录音照常进行。
 public enum WarningCode: String {
+    /// 这四个：有一路声音录不了或者出了问题，另一路照常录
     case micDenied = "mic_denied"
     case micUnavailable = "mic_unavailable"
     case systemDenied = "system_denied"
     case systemUnavailable = "system_unavailable"
+    /// 分片数到了服务器能收的上限，App 该结束录音了（见 ChunkWriter）。只发一次
+    case chunkLimit = "chunk_limit"
 }
 
 /// 录不下去了：发一个 error 事件，然后以非 0 退出。code 给 App 判断，message 给用户看。

@@ -9,6 +9,7 @@ let endToEndTests: [(String, () throws -> Void)] = [
     ("端到端：拼起来的声音和录音的时间轴对得上（标记重点要用）", testEndToEndAlignment),
     ("端到端：录 10 分钟，分片拼起来不会越录越长", testEndToEndLong),
     ("端到端：从指定的序号接着录，不覆盖已有的分片", testEndToEndStartSeq),
+    ("端到端：录到第 3999 片（服务器能收的最后一片）不再切，提醒，后面的声音都写进它", testEndToEndChunkLimit),
     ("端到端：按实际时长读，暂停、继续，读完自动结束", testEndToEndPauseResume),
     ("端到端：录到一半收到 stop", testEndToEndStop),
     ("端到端：按实际时长读时文件读到一半出错，以 error 结束，不当成读完了", testEndToEndInputFileReadError),
@@ -233,7 +234,7 @@ func testEndToEndFile() throws {
 }
 
 /// 写一个 48 kHz 单声道的 WAV
-private func writeWAV(_ url: URL, _ samples: [Float]) throws {
+func writeWAV(_ url: URL, _ samples: [Float]) throws {
     let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 1, interleaved: false)!
     let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
     let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
@@ -310,6 +311,29 @@ func testEndToEndStartSeq() throws {
     let next = try RecorderRun(["record", "--out", out.path, "--start-seq", "8", "--chunk-seconds", "1", "--input-file", input.path], in: directory)
     expectEqual(next.exitStatus(within: 30), 0)
     checkChunks(next, out: out, firstSeq: 8)
+}
+
+func testEndToEndChunkLimit() throws {
+    guard requireBinary() else { return }
+    let directory = try temporaryDirectory("e2e-limit")
+    let input = directory.appendingPathComponent("in.wav")
+    try FFmpeg.generate(input, "sine=frequency=500:sample_rate=48000:duration=3", channels: 1)
+    let out = directory.appendingPathComponent("out")
+    // 从倒数第 2 片开始录，每片 0.5 秒。没有 App 来结束录音：第 3999 片够长了也不切，读完时才写好
+    let run = try RecorderRun(["record", "--out", out.path, "--start-seq", "3998", "--chunk-seconds", "0.5", "--input-file", input.path], in: directory)
+    expectEqual(run.exitStatus(within: 30), 0)
+    expectEqual(run.names.filter { $0 != "level" }, ["started", "chunk", "warning", "chunk", "stopped"])
+    let warning = run.events.first { $0["event"] as? String == "warning" } ?? [:]
+    expectEqual(warning["code"] as? String, "chunk_limit")
+    expectEqual(warning["message"] as? String, RecordingPipeline.chunkLimitMessage)
+    checkChunks(run, out: out, firstSeq: 3998)
+    expectEqual(lastEvent(run)["next_seq"] as? Int, 4000)
+    expectEqual(try FileManager.default.contentsOfDirectory(atPath: out.path).sorted(), ["3998.aac", "3999.aac"], "不会有第 4000 片")
+    // 最后一片装下了后面的 2.5 秒，拼起来还是完整的 3 秒
+    let all = directory.appendingPathComponent("all.aac")
+    try concatenate(chunkEvents(run), into: all)
+    expectEqual(try FFmpeg.decodeErrors(all), "")
+    expectClose(try FFmpeg.decodedSeconds(all), 3, within: 0.05, "拼起来的时长和输入一样")
 }
 
 func testEndToEndPauseResume() throws {

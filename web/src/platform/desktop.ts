@@ -104,13 +104,17 @@ export async function setServer(url: string) {
 
 /**
  * 正在退出登录或者切换服务器。两个都会先结束录音、再退出这台服务器上的登录，改的是同一份登录状态，
- * 一起做的话谁后做完界面就停在谁那里。所以一次只做一个：正在做的时候再要做（导航栏、账号页上都能点）直接报错，
- * 界面上这时把这两个按钮变灰（useSigningOut）。
+ * 一起做的话谁后做完界面就停在谁那里。所以一次只做一个：正在做的时候再要做直接报错（SIGNING_OUT）。
+ * 这时也不能「在浏览器里登录」：退出时 Rust 会丢掉正在等的登录，刚登录上的也会被一起退出。
+ * 界面上这时把这些按钮都变灰：导航栏、账号页、登录页上的都看 useSigningOut。
  */
 let signingOut = false;
 
+/** 正在退出登录、切换服务器时，再点退出登录、切换服务器或者登录得到的原因。 */
+export const SIGNING_OUT = "正在退出登录，请稍等";
+
 async function signOutWith(command: "logout" | "switch_server") {
-  if (signingOut) throw new Error("正在退出登录，请稍等");
+  if (signingOut) throw new Error(SIGNING_OUT);
   signingOut = true;
   try {
     setLoginError(""); // 顺带通知了界面：按钮变灰
@@ -132,6 +136,7 @@ export function switchServer(): Promise<void> {
 }
 
 export async function loginStart() {
+  if (signingOut) throw new Error(SIGNING_OUT);
   setLoginError("");
   setState(await invoke<DesktopState>("login_start"));
 }

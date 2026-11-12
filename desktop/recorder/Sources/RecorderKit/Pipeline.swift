@@ -11,6 +11,8 @@ public struct RecordingResult: Equatable {
 public final class RecordingPipeline {
     /// 每 0.1 秒的声音发一次音量
     public static let levelInterval = 4_800
+    /// 分片数到了服务器能收的上限时的提醒（chunk_limit）
+    static let chunkLimitMessage = "这场录音的分片数到了服务器能收的上限（\(ChunkWriter.maxChunks) 片），录不了多久了。请结束录音，录好的部分会照常上传。"
 
     public private(set) var recordedSamples: Int64 = 0
     public private(set) var isPaused = false
@@ -21,6 +23,7 @@ public final class RecordingPipeline {
     private var micEnergy = 0.0
     private var systemEnergy = 0.0
     private var levelSamples = 0
+    private var chunkLimitWarned = false
 
     public init(encoder: AACEncoder, chunks: ChunkWriter, events: EventSink) {
         self.encoder = encoder
@@ -33,9 +36,16 @@ public final class RecordingPipeline {
         Double(recordedSamples) / Double(AACEncoder.sampleRate)
     }
 
+    /// 服务器能收的最后一片写不下了（见 ChunkWriter.isFull）：后面的声音没地方放，
+    /// 引擎看到它就自己结束录音，和收到 stop 一样（最后一片照常写好，发 stopped）
+    public var isFull: Bool {
+        chunks.isFull
+    }
+
     /// 喂进一段混好的声音。micEnergy、systemEnergy 是两路各自这一段的平方和（算音量）
     public func feed(_ samples: UnsafeBufferPointer<Float>, micEnergy: Double, systemEnergy: Double) throws {
-        guard !isPaused, !samples.isEmpty else { return }
+        // 写不下了：不编码，也不算录到的时间（引擎马上就结束录音）
+        guard !isPaused, !samples.isEmpty, !chunks.isFull else { return }
         try encoder.encode(samples) { try write($0) }
         recordedSamples += Int64(samples.count)
         self.micEnergy += micEnergy
@@ -49,6 +59,7 @@ public final class RecordingPipeline {
             ))
             resetLevel()
         }
+        warnAtChunkLimit()
     }
 
     /// 暂停：正在写的那一片先落盘，这样暂停期间 App 被关掉也不丢，录好的部分也可以先传上去
@@ -58,6 +69,8 @@ public final class RecordingPipeline {
         resetLevel()
         try finishChunk()
         events.send(.paused)
+        // 写好的是最后一片的话，后面就录不了了（paused 前面还是紧跟着这一片）
+        warnAtChunkLimit()
     }
 
     public func resume() {
@@ -92,6 +105,15 @@ public final class RecordingPipeline {
 
     private func send(_ chunk: ChunkInfo) {
         events.send(.chunk(seq: chunk.seq, path: chunk.path, bytes: chunk.bytes, seconds: chunk.seconds))
+    }
+
+    /// 到了服务器能收的片数上限（见 ChunkWriter.reachedChunkLimit）时提醒一次，App 收到就结束录音。
+    /// 结束时（finish）不提醒：已经在结束了
+    private func warnAtChunkLimit() {
+        guard !chunkLimitWarned, chunks.reachedChunkLimit else { return }
+        chunkLimitWarned = true
+        log("到了服务器能收的分片数上限（第 \(ChunkWriter.lastSeq) 片是最后一片），不再切新的分片，等 App 结束录音")
+        events.send(.warning(.chunkLimit, Self.chunkLimitMessage))
     }
 
     private func resetLevel() {

@@ -4,6 +4,14 @@ import Foundation
 /// 极简的测试框架：只装了 Command Line Tools 的机器上没有 XCTest，所以测试是一个普通的程序，
 /// 用 desktop/recorder/test.sh 编译、运行（Package.swift 里是 swift run recorder-tests）。
 enum Harness {
+    /// 一次运行的结果
+    enum Outcome {
+        case passed
+        case failed
+        /// 设了 ZSMEET_RECORDER_TEST_FILTER，却一个测试都没选中（多半是写错了）：什么都没测，不能算通过
+        case nothingSelected
+    }
+
     private static var failures = 0
     private static var currentTest = ""
     /// 在测断言本身（countFailures）：没通过的地方不打印
@@ -11,10 +19,17 @@ enum Harness {
 
     /// 只跑名字里有这几个字的测试，不设就全跑：ZSMEET_RECORDER_TEST_FILTER=暂停 desktop/recorder/test.sh
     static let filterVariable = "ZSMEET_RECORDER_TEST_FILTER"
-    private static let filter = ProcessInfo.processInfo.environment[filterVariable] ?? ""
+    static let filter = ProcessInfo.processInfo.environment[filterVariable] ?? ""
+    /// 设成 1 时，一个测试都没选中也算通过。只给故意一个都不跑的时候用（测试框架自己的测试会这样再启动一次）
+    static let allowEmptyVariable = "ZSMEET_RECORDER_TEST_ALLOW_EMPTY"
+    private static let allowEmpty = ProcessInfo.processInfo.environment[allowEmptyVariable] == "1"
 
-    static func run(_ tests: [(String, () throws -> Void)]) -> Bool {
-        for (name, body) in tests where filter.isEmpty || name.contains(filter) {
+    static func run(_ tests: [(String, () throws -> Void)]) -> Outcome {
+        let selected = tests.filter { filter.isEmpty || $0.0.contains(filter) }
+        if selected.isEmpty && !allowEmpty {
+            return .nothingSelected
+        }
+        for (name, body) in selected {
             currentTest = name
             let before = failures
             do {
@@ -24,7 +39,7 @@ enum Harness {
             }
             print(failures == before ? "  通过  \(name)" : "  失败  \(name)")
         }
-        return failures == 0
+        return failures == 0 ? .passed : .failed
     }
 
     static func fail(_ message: String, file: StaticString = #fileID, line: UInt = #line) {
@@ -51,6 +66,7 @@ enum Harness {
 let harnessTests: [(String, () throws -> Void)] = [
     ("测试框架：差得太多、有一边是 NaN 时 expectClose 都算没通过", testExpectClose),
     ("测试框架：同时跑两次测试，不会删掉对方正在用的临时目录", testScratchIsPerRun),
+    ("测试框架：ZSMEET_RECORDER_TEST_FILTER 一个测试都没选中时算没通过", testFilterSelectingNothingFails),
 ]
 
 func testExpectClose() {
@@ -62,18 +78,36 @@ func testExpectClose() {
 
 func testScratchIsPerRun() throws {
     let mine = try temporaryDirectory("parallel")
-    // 这时候又开始了一次测试：一个测试都不跑，只有开始、结束时建、删临时目录的那部分
+    // 这时候又开始了一次测试：一个测试都不跑（明确允许），只有开始、结束时建、删临时目录的那部分
+    let other = try runSelectingNothing(allowEmpty: true)
+    expectEqual(other.status, 0, "另一次测试")
+    expect(FileManager.default.fileExists(atPath: mine.path), "另一次测试删掉了这次正在用的临时目录")
+}
+
+func testFilterSelectingNothingFails() throws {
+    // 名字写错了，一个测试都没跑：不能说「全部通过」
+    let other = try runSelectingNothing(allowEmpty: false)
+    expectEqual(other.status, 1, "一个测试都没跑")
+    expect(!other.output.contains("全部通过"), other.output)
+    expect(other.output.contains("一个测试都没跑"), other.output)
+}
+
+/// 再启动一次这个测试程序，ZSMEET_RECORDER_TEST_FILTER 谁都不匹配，一个测试都不选中。
+/// allowEmpty：明确允许这样（ZSMEET_RECORDER_TEST_ALLOW_EMPTY=1）。返回它的退出码和标准输出
+private func runSelectingNothing(allowEmpty: Bool) throws -> (status: Int32, output: String) {
     let other = Process()
     other.executableURL = Bundle.main.executableURL
     var environment = ProcessInfo.processInfo.environment
     environment[Harness.filterVariable] = "（一个测试都不跑）"
+    environment[Harness.allowEmptyVariable] = allowEmpty ? "1" : nil
     other.environment = environment
-    other.standardOutput = FileHandle.nullDevice
+    let output = Pipe()
+    other.standardOutput = output
     other.standardError = FileHandle.nullDevice
     try other.run()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
     other.waitUntilExit()
-    expectEqual(other.terminationStatus, 0, "另一次测试")
-    expect(FileManager.default.fileExists(atPath: mine.path), "另一次测试删掉了这次正在用的临时目录")
+    return (other.terminationStatus, String(decoding: data, as: UTF8.self))
 }
 
 func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "条件不成立",

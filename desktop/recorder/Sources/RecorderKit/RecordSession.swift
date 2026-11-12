@@ -47,7 +47,8 @@ final class RecordSession {
     /// 准备的时候 App 让停止了
     private struct Cancelled: Error {}
 
-    /// 结束时最多等这么久。超时多半是 Core Audio 卡住了，不等了
+    /// 结束时最多等这么久。超时多半是 Core Audio 卡住了，不等了。
+    /// App 那边（desktop/src-tauri 的 RecorderOptions.stop_timeout，10 秒）要等得比这个久，改了这里那边也要跟着改
     static let stopTimeout: TimeInterval = 8
 
     private let options: RecordOptions
@@ -109,8 +110,12 @@ final class RecordSession {
         guard options.realtime else {
             return Setup(engine: try FileEngine(reader: reader, pipeline: pipeline), sources: [], micName: reader.name, system: false)
         }
+        // 文件的采样率处理不了时直接报错（unsupported_format），和不加 --realtime 时一样
+        _ = try Resampler(inputRate: reader.sampleRate)
         let source = try RealtimeFileSource(reader: reader)
         source.onEnded = { DispatchQueue.main.async { self.requestStop() } }
+        // 读到一半出错：以 error 结束，不能当成读完了、正常结束（后面的声音就悄悄没了）
+        source.onFailed = { failure in DispatchQueue.main.async { self.fail(failure) } }
         let engine = try LiveEngine(sources: [source], pipeline: pipeline, events: events)
         try source.start()
         return Setup(engine: engine, sources: [source], micName: reader.name, system: false)
@@ -118,23 +123,24 @@ final class RecordSession {
 
     private func prepareDevices(pipeline: RecordingPipeline) throws -> Setup {
         var sources: [CaptureSource] = []
-        var micName: String?
-        var system = false
         if options.mic != .none, let mic = openMicrophone() {
             sources.append(mic)
-            micName = mic.name
         }
         if isStopWanted { throw Cancelled() }
         if options.system, let capture = openSystemAudio() {
             sources.append(capture)
-            system = true
         }
         if isStopWanted { throw Cancelled() }
         if sources.isEmpty {
             // 每一路为什么录不了，前面已经各发了一个 warning（App 和它一起显示）
-            throw RecorderFailure("no_source", "麦克风和电脑声音都录不了，没法开始录音。按提示处理好以后再试。")
+            throw RecorderFailure.noSource
         }
-        return Setup(engine: try LiveEngine(sources: sources, pipeline: pipeline, events: events), sources: sources, micName: micName, system: system)
+        // 采样率处理不了的那一路，LiveEngine 停掉它、发 warning，只录剩下的（一路都不剩时抛出 no_source）
+        let engine = try LiveEngine(sources: sources, pipeline: pipeline, events: events)
+        let recorded = engine.sources
+        return Setup(engine: engine, sources: recorded,
+                     micName: recorded.first { $0.kind == .mic }?.name,
+                     system: recorded.contains { $0.kind == .system })
     }
 
     private func openMicrophone() -> MicCapture? {
@@ -339,14 +345,23 @@ enum OutputDirectory {
     static func prepare(_ path: String, startSeq: Int) throws -> URL {
         let url = URL(fileURLWithPath: path).standardizedFileURL
         do {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            // 这里新建的目录（包括中间的）只有自己能进，和 App 建的一样（0700）；已经有的目录不动
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
         } catch {
             throw RecorderFailure("out_dir", "建不了录音目录 \(url.path)：\(error.localizedDescription)")
         }
         guard access(url.path, W_OK) == 0 else {
             throw RecorderFailure("out_dir", "录音目录 \(url.path) 写不进去，请检查权限。")
         }
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
+        // 列不出里面有什么（比如只能写、不能读）就不录：看不到已经录好的分片，接着录可能把它们覆盖掉
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: url.path)
+        } catch {
+            log("列出录音目录 \(url.path)：\(error.localizedDescription)")
+            throw RecorderFailure("out_dir", "录音目录 \(url.path) 读不了，看不到里面已经录好的分片，接着录可能会覆盖掉它们。请检查权限。")
+        }
         if let taken = names.compactMap(ChunkWriter.seq(fromFileName:)).filter({ $0 >= startSeq }).min() {
             throw RecorderFailure("chunk_exists", "录音目录里已经有 \(taken).aac 了，从第 \(startSeq) 片接着录会把它覆盖掉。")
         }

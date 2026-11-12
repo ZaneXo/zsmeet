@@ -161,6 +161,19 @@ test("录音中：麦克风写名字，想录没录到的说「录不到」", ()
   assert.equal(sourceLabels(state({ warnings: [{ code: "mic_unavailable", message: "" }] })).mic, "录不到（见下面的提示）");
 });
 
+test("录音中在录的这一路有提示（断开了、一直没有声音、改用了别的麦克风）：照旧写名字，指向下面的提示", () => {
+  // 录着录着麦克风断开了：Rust 那边还报着它的名字，不能看起来一切正常
+  const lost = state({ status: "recording", mic: "USB 麦克风", system: true, warnings: [{ code: "mic_unavailable", message: MIC_GONE }] });
+  assert.deepEqual(sourceLabels(lost), { mic: "USB 麦克风（见下面的提示）", system: "正在录" });
+  // 没找到选的麦克风、改用了别的：也是 mic_unavailable，但照常在录，不能说「录不到」
+  const fallback = "没找到选的麦克风（可能已经拔掉了），改用「MacBook Pro 麦克风」。";
+  const switched = state({ status: "recording", mic: "MacBook Pro 麦克风", warnings: [{ code: "mic_unavailable", message: fallback }] });
+  assert.equal(sourceLabels(switched).mic, "MacBook Pro 麦克风（见下面的提示）");
+  // 电脑里的声音也一样
+  const system = state({ status: "recording", system: true, warnings: [{ code: "system_unavailable", message: "" }] });
+  assert.equal(sourceLabels(system).system, "正在录（见下面的提示）");
+});
+
 // App（desktop/src-tauri 的 recorder）给的几种原因，原样拿来测
 const OFFLINE = "连不上服务器，网络恢复后会自动接着传";
 const RELOGIN = "登录已失效，重新登录这个账号后会自动接着传";

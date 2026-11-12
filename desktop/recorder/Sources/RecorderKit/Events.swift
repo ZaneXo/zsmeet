@@ -17,6 +17,9 @@ public struct RecorderFailure: Error, Equatable {
         self.code = code
         self.message = message
     }
+
+    /// 麦克风和电脑声音一路都录不了。每一路为什么录不了，前面已经各发了一个 warning（App 和它一起显示）
+    static let noSource = RecorderFailure("no_source", "麦克风和电脑声音都录不了，没法开始录音。按提示处理好以后再试。")
 }
 
 /// 写到标准输出的事件，一行一个 JSON。日志不在这里，写在标准错误。

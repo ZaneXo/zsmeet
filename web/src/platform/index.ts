@@ -1,3 +1,4 @@
+import type { NetworkMode } from "@tanstack/react-query";
 import type { Client } from "openapi-fetch";
 import { BrowserRouter, HashRouter } from "react-router";
 import type { paths } from "../api/schema";
@@ -25,6 +26,15 @@ export const Router = isDesktop ? HashRouter : BrowserRouter;
 export function setupApiClient(client: Client<paths>) {
   if (isDesktop) client.use(desktop.apiMiddleware);
 }
+
+/**
+ * 系统说断网了的时候，取数据、点按钮（TanStack Query 的 networkMode）要不要先停着。
+ * 网页版：停着，连上了再接着做（默认的 online）。
+ * 桌面版：照常做（always）。请求和命令都先到 App 里（本地代理、Rust），断网时由 App 来答：取过的内容从离线缓存里拿，
+ * 录音的暂停、标记、结束和退出登录照常能用。停着的话，断网时连「结束录音」都点不动。
+ * 连上以后重新取数据靠「离线」提示条（OfflineBanner），不靠系统的联网通知。
+ */
+export const networkMode: NetworkMode = isDesktop ? "always" : "online";
 
 /** 直接用 fetch 调接口时（上传分片）的完整地址。 */
 export function apiUrl(path: string): string {

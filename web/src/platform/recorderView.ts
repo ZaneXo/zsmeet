@@ -154,13 +154,19 @@ export function warningText(w: RecorderWarning): string {
   return message;
 }
 
-/** 录音中显示的「麦克风：…」「电脑里的声音：…」。想录但录不到的（没有权限、找不到设备）说「录不到」。 */
+/**
+ * 录音中显示的「麦克风：…」「电脑里的声音：…」。想录但录不到的（没有权限、找不到设备）说「录不到」。
+ * 在录的这一路有提示时，名字后面也指向提示，不能看起来一切正常：录着录着麦克风断开了、一直没有声音，
+ * Rust 那边照样报着麦克风的名字。这些提示和「没找到选的麦克风，改用了别的」（照常在录）是同一个 code
+ * （mic_unavailable），分不出现在还录不录得到，所以不说「录不到」。
+ */
 export function sourceLabels(state: RecorderState): { mic: string; system: string } {
-  const failed = (prefix: string) => state.warnings.some((w) => w.code.startsWith(prefix));
-  return {
-    mic: state.mic ?? (failed("mic_") ? "录不到（见下面的提示）" : "不录"),
-    system: state.system ? "正在录" : failed("system_") ? "录不到（见下面的提示）" : "不录",
+  const label = (recording: string | null, prefix: string) => {
+    const warned = state.warnings.some((w) => w.code.startsWith(prefix));
+    if (recording === null) return warned ? "录不到（见下面的提示）" : "不录";
+    return warned ? `${recording}（见下面的提示）` : recording;
   };
+  return { mic: label(state.mic, "mic_"), system: label(state.system ? "正在录" : null, "system_") };
 }
 
 /**

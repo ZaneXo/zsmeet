@@ -102,9 +102,33 @@ export async function setServer(url: string) {
   setState(await invoke<DesktopState>("set_server", { url }));
 }
 
-export async function switchServer() {
-  setLoginError("");
-  setState(await invoke<DesktopState>("switch_server"));
+/**
+ * 正在退出登录或者切换服务器。两个都会先结束录音、再退出这台服务器上的登录，改的是同一份登录状态，
+ * 一起做的话谁后做完界面就停在谁那里。所以一次只做一个：正在做的时候再要做（导航栏、账号页上都能点）直接报错，
+ * 界面上这时把这两个按钮变灰（useSigningOut）。
+ */
+let signingOut = false;
+
+async function signOutWith(command: "logout" | "switch_server") {
+  if (signingOut) throw new Error("正在退出登录，请稍等");
+  signingOut = true;
+  try {
+    setLoginError(""); // 顺带通知了界面：按钮变灰
+    setState(await invoke<DesktopState>(command));
+  } finally {
+    signingOut = false;
+    notify();
+  }
+}
+
+/** 有没有正在退出登录、切换服务器（不管是在哪里点的）。 */
+export function useSigningOut(): boolean {
+  return useSyncExternalStore(subscribe, () => signingOut);
+}
+
+/** 换服务器：退出登录，再回到「填服务器地址」。 */
+export function switchServer(): Promise<void> {
+  return signOutWith("switch_server");
 }
 
 export async function loginStart() {
@@ -116,9 +140,8 @@ export async function loginCancel() {
   setState(await invoke<DesktopState>("login_cancel"));
 }
 
-export async function logout() {
-  setLoginError("");
-  setState(await invoke<DesktopState>("logout"));
+export function logout(): Promise<void> {
+  return signOutWith("logout");
 }
 
 /** 服务器已经不认这次登录了（/api/status 里没有用户）：在 App 这边也退出，回到登录页。 */

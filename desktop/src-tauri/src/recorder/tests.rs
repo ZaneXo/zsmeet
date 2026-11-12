@@ -34,8 +34,12 @@ struct Script {
     crash: bool,
     /// 还没开始录就报错退出：错误码、给用户看的原因
     start_error: Option<(&'static str, &'static str)>,
-    /// 开始以后报一个提醒：错误码、给用户看的原因（有 start_error 时在报错之前报）
-    warning: Option<(&'static str, &'static str)>,
+    /// 开始以后按顺序报这几个提醒：错误码、给用户看的原因（有 start_error 时在报错之前报）
+    warnings: &'static [(&'static str, &'static str)],
+    /// 结束时最后一片写到一半就卡住不动，等着被强制结束
+    hang_on_stop: bool,
+    /// 结束时最后一片写到一半就报错退出（比如录音程序自己等了 8 秒还没写完）：错误码、给用户看的原因
+    stop_error: Option<(&'static str, &'static str)>,
 }
 
 /// 假的 zsmeet-recorder：按约定的协议说话，录音时写 `<序号>.aac`（内容是 audio-<序号>）。
@@ -55,7 +59,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 dir="${out%/*}"; dir="${dir%/*}"
-CHUNKS=0; CRASH=0; START_ERROR=""; WARNING=""
+CHUNKS=0; CRASH=0; START_ERROR=""; WARNING=""; HANG_ON_STOP=0; STOP_ERROR=""
 [ -f "$dir/fake.conf" ] && . "$dir/fake.conf"
 echo "$args" >> "$dir/helper-args.log"
 chunk() {
@@ -90,6 +94,12 @@ while IFS= read -r line; do
     *'"stop"'*) break ;;
   esac
 done
+if [ "$HANG_ON_STOP" = 1 ] || [ -n "$STOP_ERROR" ]; then
+  printf 'half' > "$out/$seq.aac.part"
+  [ "$HANG_ON_STOP" = 1 ] && exec sleep 60
+  echo "$STOP_ERROR"
+  exit 1
+fi
 chunk 4
 echo "{\"event\":\"stopped\",\"next_seq\":$seq,\"seconds\":$total}"
 "#;
@@ -133,9 +143,23 @@ fn fake_helper(dir: &Path, script: &Script) -> PathBuf {
         let event = json!({ "event": "error", "code": code, "message": message });
         conf.push_str(&format!("START_ERROR='{event}'\n"));
     }
-    if let Some((code, message)) = script.warning {
-        let event = json!({ "event": "warning", "code": code, "message": message });
-        conf.push_str(&format!("WARNING='{event}'\n"));
+    if !script.warnings.is_empty() {
+        // 一行一个事件，脚本里 echo "$WARNING" 一起报出来
+        let events: Vec<String> = script
+            .warnings
+            .iter()
+            .map(|(code, message)| {
+                json!({ "event": "warning", "code": code, "message": message }).to_string()
+            })
+            .collect();
+        conf.push_str(&format!("WARNING='{}'\n", events.join("\n")));
+    }
+    if script.hang_on_stop {
+        conf.push_str("HANG_ON_STOP=1\n");
+    }
+    if let Some((code, message)) = script.stop_error {
+        let event = json!({ "event": "error", "code": code, "message": message });
+        conf.push_str(&format!("STOP_ERROR='{event}'\n"));
     }
     std::fs::write(dir.join("fake.conf"), conf).unwrap();
     shared_helper()
@@ -174,6 +198,10 @@ struct Mock {
     complete_error: Mutex<HashMap<String, (u16, String)>>,
     /// GET 会议时的 status，默认 uploading
     meeting_status: Mutex<HashMap<String, String>>,
+    /// 设了的话，问收到了哪几片时返回这个网页（200），像是中间的代理拦下了请求
+    received_page: Mutex<Option<&'static str>>,
+    /// 设了的话，传分片时返回这个网页（200），分片并没有收下：像是连的网络要先登录，中间的设备拦下了请求
+    chunk_page: Mutex<Option<&'static str>>,
     /// 浏览器登录换令牌时返回谁
     login_user: Mutex<Value>,
 }
@@ -199,6 +227,37 @@ impl Mock {
             .filter(|(m, _)| m == meeting)
             .map(|(_, body)| body.clone())
             .collect()
+    }
+
+    /// 和服务器一样：收到了哪几片，从小到大、不重复。
+    fn received(&self, meeting: &str) -> Vec<u32> {
+        let mut seqs = self.seqs(meeting);
+        seqs.sort_unstable();
+        seqs.dedup();
+        seqs
+    }
+
+    /// 服务器上已经有这几片（上次运行时传上去的）。
+    fn holds(&self, meeting: &str, seqs: std::ops::Range<u32>) {
+        let mut chunks = self.chunks.lock().unwrap();
+        for seq in seqs {
+            chunks.push(Put {
+                meeting: meeting.into(),
+                seq,
+                body: format!("audio-{seq}").into_bytes(),
+                content_type: Some("audio/aac".into()),
+                auth: Some("Bearer zsm_test".into()),
+            });
+        }
+    }
+
+    fn last_marks(&self, meeting: &str) -> Option<Value> {
+        let marks = self.marks.lock().unwrap();
+        marks
+            .iter()
+            .rev()
+            .find(|(m, _)| m == meeting)
+            .map(|(_, body)| body.clone())
     }
 }
 
@@ -241,6 +300,9 @@ async fn mock_chunk(
     if let Some(status) = m.chunk_error.lock().unwrap().get(&id).copied() {
         return problem(status, "不行");
     }
+    if let Some(page) = *m.chunk_page.lock().unwrap() {
+        return ([(header::CONTENT_TYPE, "text/html")], page).into_response();
+    }
     m.chunks.lock().unwrap().push(Put {
         meeting: id,
         seq,
@@ -255,11 +317,11 @@ async fn mock_chunk(
 }
 
 /// 服务器收到了哪几片：和服务器一样，返回从小到大、不重复的序号。
-async fn mock_received(State(m): State<Arc<Mock>>, Params(id): Params<String>) -> Json<Value> {
-    let mut seqs = m.seqs(&id);
-    seqs.sort_unstable();
-    seqs.dedup();
-    Json(json!({ "received": seqs }))
+async fn mock_received(State(m): State<Arc<Mock>>, Params(id): Params<String>) -> Response {
+    if let Some(page) = *m.received_page.lock().unwrap() {
+        return ([(header::CONTENT_TYPE, "text/html")], page).into_response();
+    }
+    Json(json!({ "received": m.received(&id) })).into_response()
 }
 
 async fn mock_marks(
@@ -278,6 +340,18 @@ async fn mock_complete(
 ) -> Response {
     if let Some((status, detail)) = m.complete_error.lock().unwrap().get(&id).cloned() {
         return problem(status, &detail);
+    }
+    // 和服务器一样：第 0 到 chunks-1 片都要收到，也不能多
+    let chunks = body["chunks"].as_u64().unwrap_or(0);
+    let received = m.received(&id);
+    if let Some(missing) = (0..chunks).find(|seq| !received.contains(&(*seq as u32))) {
+        return problem(
+            409,
+            &format!("第 {} 片还没有传上来，请补传后再试", missing + 1),
+        );
+    }
+    if received.len() as u64 > chunks {
+        return problem(409, "收到的分片比声明的多，请重新上传");
     }
     m.completes.lock().unwrap().push((id.clone(), body));
     // 和服务器一样，返回整场会议
@@ -398,8 +472,12 @@ fn rig_with(mock: Arc<Mock>, server: String, script: Script) -> Rig {
 impl Rig {
     /// 模拟 App 重启：停掉原来的 Recorder，照着同一个目录重新起一个。
     fn restart(&mut self) {
+        self.restart_with(options(&self.root, &self.helper));
+    }
+
+    fn restart_with(&mut self, opts: RecorderOptions) {
         self.run.abort();
-        let (recorder, seen, run) = launch(&self.f, &self.root, &self.helper);
+        let (recorder, seen, run) = launch_with(&self.f, opts);
         (self.recorder, self.seen, self.run) = (recorder, seen, run);
     }
 }
@@ -892,24 +970,17 @@ async fn continuing_never_reuses_a_chunk_number() {
     })
     .await;
     r.run.abort();
-    // recording.json 落后了（比如磁盘满了没存上）：记着录到第 0 片、传了第 0 片；其实服务器已经收到了
-    // 第 0 到 2 片（这台电脑上的文件传完就删了），第 3 片也写好了、还在这台电脑上
+    // recording.json 落后了（比如退回了上一份）：记着录到第 0 片（10 秒）、传了第 0 片；其实服务器已经收到了
+    // 第 0 到 2 片（这台电脑上的文件传完就删了），第 3 片（8 秒）也写好了、还在这台电脑上。
+    // 30 秒的标记落在第 1、2 片里，那段声音在服务器上，不能当成没存下来
     let mut rec = recording(&r.server, "u1", "m1", Status::Interrupted);
-    (rec.next_seq, rec.uploaded) = (1, 1);
-    plant(&r.root, &rec, &[(3, b"audio-3".to_vec())]);
-    for seq in 0..3 {
-        r.mock.chunks.lock().unwrap().push(Put {
-            meeting: "m1".into(),
-            seq,
-            body: format!("audio-{seq}").into_bytes(),
-            content_type: Some("audio/aac".into()),
-            auth: Some("Bearer zsm_test".into()),
-        });
-    }
+    (rec.next_seq, rec.uploaded, rec.marks) = (1, 1, vec![5.0, 30.0]);
+    plant(&r.root, &rec, &[(3, adts(375))]);
+    r.mock.holds("m1", 0..3);
     r.restart();
 
     // 接着录：从第 4 片开始写，不占用服务器上、这台电脑上已有的序号
-    r.recorder.start("m1", None, true).await.unwrap();
+    let state = r.recorder.start("m1", None, true).await.unwrap();
     assert!(
         helper_runs(r.f.dir.path())
             .last()
@@ -918,6 +989,15 @@ async fn continuing_never_reuses_a_chunk_number() {
         "{:?}",
         helper_runs(r.f.dir.path())
     );
+    assert_eq!(state.marks, vec![5.0, 30.0]);
+    // 跳过的分片也算进录了多久：第 1、2 片只在服务器上，量不了，按每片 10 秒算；第 3 片照着文件算 8 秒。
+    // 之前一共 38 秒，这次又录了 10 秒，新的标记和服务器上接起来的录音对得上
+    let state = wait_for(&r.recorder, "录好第 4 片", |s| {
+        upload(s, "m1").is_some_and(|u| u.recorded == 5)
+    })
+    .await;
+    assert_eq!(state.seconds, 48.0);
+    assert_eq!(r.recorder.mark().unwrap().marks, vec![5.0, 30.0, 48.0]);
     r.recorder.stop().await.unwrap();
     wait_for(&r.recorder, "传完", |s| {
         upload_is(s, "m1", UploadStatus::Completed)
@@ -927,8 +1007,95 @@ async fn continuing_never_reuses_a_chunk_number() {
     assert_eq!(r.mock.seqs("m1"), [0, 1, 2, 3, 4, 5]);
     assert_eq!(
         r.mock.completes_of("m1"),
-        [json!({ "chunks": 6, "marks": [] })]
+        [json!({ "chunks": 6, "marks": [5.0, 30.0, 48.0] })]
     );
+}
+
+#[tokio::test]
+async fn finishing_counts_the_chunks_the_server_already_has() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 和上面一样，recording.json 落后了：服务器上有第 0 到 2 片，第 3 片（8 秒）还在这台电脑上。
+    // 一共录下了 38 秒，45 秒的标记落在没存下来的那一段里
+    let mut rec = recording(&r.server, "u1", "m1", Status::Interrupted);
+    (rec.next_seq, rec.uploaded, rec.marks) = (1, 1, vec![5.0, 30.0, 45.0]);
+    plant(&r.root, &rec, &[(3, adts(375))]);
+    r.mock.holds("m1", 0..3);
+    r.restart();
+
+    // 不接着录了，直接结束：和接着录一样算上服务器上、这台电脑上已有的分片。只按 recording.json 的 1 片
+    // 交给服务器的话，服务器会说收到的分片比声明的多，这场录音就传不上去了
+    r.recorder.finish("m1").await.unwrap();
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m1", UploadStatus::Completed)
+    })
+    .await;
+    assert_eq!(r.mock.seqs("m1"), [0, 1, 2, 3]);
+    assert_eq!(
+        r.mock.completes_of("m1"),
+        [json!({ "chunks": 4, "marks": [5.0, 30.0] })]
+    );
+}
+
+#[tokio::test]
+async fn finishing_clears_lost_marks_already_saved_on_the_server() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 中断前录下了 20 秒；25 秒时点的标记已经存到服务器上了，但那段声音没存下来
+    let mut rec = recording(&r.server, "u1", "m1", Status::Interrupted);
+    (rec.next_seq, rec.seconds, rec.marks) = (2, 20.0, vec![25.0]);
+    plant(
+        &r.root,
+        &rec,
+        &[(0, b"audio-0".to_vec()), (1, b"audio-1".to_vec())],
+    );
+    r.restart();
+    // 先存标记、再传分片：两片都传完了，标记也存好了
+    wait_for(&r.recorder, "传完录好的两片", |s| {
+        upload(s, "m1").is_some_and(|u| u.uploaded == 2)
+    })
+    .await;
+    assert_eq!(r.mock.last_marks("m1"), Some(json!({ "marks": [25.0] })));
+
+    // 直接结束：这个标记不要了。complete 带的标记是空的时服务器会留着原来的，所以要先把服务器上的也清掉
+    r.recorder.finish("m1").await.unwrap();
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m1", UploadStatus::Completed)
+    })
+    .await;
+    assert_eq!(r.mock.last_marks("m1"), Some(json!({ "marks": [] })));
+    assert_eq!(
+        r.mock.completes_of("m1"),
+        [json!({ "chunks": 2, "marks": [] })]
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_chunk_list_is_asked_again_not_taken_as_empty() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 第 0 片已经传上去、这台电脑上删掉了，recording.json 却还记着没传（退回了上一份）；第 1 片还在
+    let mut rec = recording(&r.server, "u1", "m1", Status::Stopped);
+    (rec.next_seq, rec.uploaded) = (2, 0);
+    plant(&r.root, &rec, &[(1, b"audio-1".to_vec())]);
+    r.mock.holds("m1", 0..1);
+    // 问服务器收到了哪几片，回来的却是个网页（比如中间的代理拦下了请求）
+    *r.mock.received_page.lock().unwrap() = Some("<html>请先登录</html>");
+    r.restart();
+
+    // 看不懂：过一会儿再问，不能当成服务器上也没有第 0 片、算这场录音传不上去了
+    let state = wait_for(&r.recorder, "等着再问", |s| {
+        upload_is(s, "m1", UploadStatus::Waiting)
+    })
+    .await;
+    let error = upload(&state, "m1").unwrap().error.clone().unwrap();
+    assert!(error.contains("看不懂"), "{error}");
+    *r.mock.received_page.lock().unwrap() = None;
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m1", UploadStatus::Completed)
+    })
+    .await;
+    assert_eq!(r.mock.seqs("m1"), [0, 1]);
 }
 
 #[tokio::test]
@@ -969,7 +1136,7 @@ async fn a_broken_recording_json_falls_back_to_the_previous_copy() {
         upload_is(&state, "m1", UploadStatus::Interrupted),
         "{state:#?}"
     );
-    r.recorder.finish("m1").unwrap();
+    r.recorder.finish("m1").await.unwrap();
     wait_for(&r.recorder, "传完", |s| {
         upload_is(s, "m1", UploadStatus::Completed)
     })
@@ -985,6 +1152,7 @@ async fn finishes_or_discards_interrupted_recordings() {
     let mut m1 = recording(&r.server, "u1", "m1", Status::Recording);
     (m1.next_seq, m1.uploaded, m1.seconds, m1.marks) = (2, 1, 20.0, vec![5.0, 25.0]);
     plant(&r.root, &m1, &[(1, b"audio-1".to_vec())]);
+    r.mock.holds("m1", 0..1);
     let mut m2 = recording(&r.server, "u1", "m2", Status::Interrupted);
     m2.started_at += 1;
     plant(&r.root, &m2, &[(0, b"audio-0".to_vec())]);
@@ -1002,26 +1170,28 @@ async fn finishes_or_discards_interrupted_recordings() {
     assert!(r.recorder.discard("nope").is_err());
 
     // m1 不接着录了：传完告诉服务器开始处理，没存下来的那段里的标记不要了
-    let state = r.recorder.finish("m1").unwrap();
+    let state = r.recorder.finish("m1").await.unwrap();
     assert!(!upload_is(&state, "m1", UploadStatus::Interrupted));
     wait_for(&r.recorder, "m1 传完", |s| {
         upload_is(s, "m1", UploadStatus::Completed)
     })
     .await;
-    assert_eq!(r.mock.seqs("m1"), [1]);
+    assert_eq!(r.mock.seqs("m1"), [0, 1]);
     assert_eq!(
         r.mock.completes_of("m1"),
         [json!({ "chunks": 2, "marks": [5.0] })]
     );
-    // 已经在传、传完了的不能删
+    // 已经在传、传完了的不能删；再点一次结束什么也不用做
     assert!(r.recorder.discard("m1").is_err());
+    let state = r.recorder.finish("m1").await.unwrap();
+    assert!(upload_is(&state, "m1", UploadStatus::Completed));
 
     // m2 删掉：只删本地的，不告诉服务器结束
     let state = r.recorder.discard("m2").unwrap();
     assert!(upload(&state, "m2").is_none());
     assert!(!r.root.join("m2").exists());
     assert!(r.mock.completes_of("m2").is_empty());
-    let err = r.recorder.finish("m2").unwrap_err();
+    let err = r.recorder.finish("m2").await.unwrap_err();
     assert!(err.contains("没有这场会议的录音"), "{err}");
 }
 
@@ -1149,6 +1319,7 @@ fn live_session(server: &str, user: &str, meeting: &str) -> Session {
         error: None,
         stopped: false,
         stop_requested: false,
+        killed: false,
         commands: tokio::sync::mpsc::unbounded_channel().0,
         kill: None,
     }
@@ -1239,7 +1410,7 @@ async fn helper_crash_before_the_first_chunk_says_nothing_was_recorded() {
 async fn reports_why_recording_could_not_start() {
     let r = rig(Script {
         start_error: Some(("no_source", "麦克风和电脑声音都录不了")),
-        warning: Some(("system_denied", "没有录电脑声音的权限")),
+        warnings: &[("system_denied", "没有录电脑声音的权限")],
         ..Script::default()
     })
     .await;
@@ -1296,7 +1467,7 @@ async fn reports_why_recording_could_not_start() {
 #[tokio::test]
 async fn passes_on_warnings_and_lists_microphones() {
     let r = rig(Script {
-        warning: Some(("system_denied", "没有录制电脑声音的权限")),
+        warnings: &[("system_denied", "没有录制电脑声音的权限")],
         ..Script::default()
     })
     .await;
@@ -1327,6 +1498,100 @@ async fn passes_on_warnings_and_lists_microphones() {
 }
 
 #[tokio::test]
+async fn keeps_every_different_warning_of_the_same_kind() {
+    // 同一个 code 先后有几条提醒，说的不是一回事：开始时没找到选的麦克风、改用了别的，录着录着这个麦克风又断开了。
+    // 后面那条不能因为 code 一样就丢掉，不然用户不知道麦克风已经录不到了；一模一样的只留一条
+    const FALLBACK: &str = "没找到选的麦克风（可能已经拔掉了），改用「MacBook Pro 麦克风」。";
+    const LOST: &str = "麦克风「MacBook Pro 麦克风」断开了，后面录不到你这边的声音。接好以后结束这次录音，再重新开始。";
+    const SYSTEM: &str = "处理电脑声音时出错，中间有一小段没录上，录音还在继续。";
+    let r = rig(Script {
+        warnings: &[
+            ("mic_unavailable", FALLBACK),
+            ("mic_unavailable", LOST),
+            ("mic_unavailable", LOST),
+            ("system_unavailable", SYSTEM),
+        ],
+        ..Script::default()
+    })
+    .await;
+    r.recorder.start("m1", None, true).await.unwrap();
+    // 最后一条到了，前面的就都处理过了（录音程序的事件按顺序处理）
+    let state = wait_for(&r.recorder, "提醒", |s| {
+        s.warnings.iter().any(|w| w.message == SYSTEM)
+    })
+    .await;
+    let warning = |code: &str, message: &str| Warning {
+        code: code.into(),
+        message: message.into(),
+    };
+    assert_eq!(
+        state.warnings,
+        [
+            warning("mic_unavailable", FALLBACK),
+            warning("mic_unavailable", LOST),
+            warning("system_unavailable", SYSTEM),
+        ]
+    );
+    r.recorder.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn will_not_continue_past_the_last_chunk_the_server_takes() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 中断前已经录了 4000 片：服务器一场会议最多收这么多（序号 0 到 3999），再录的也传不上去
+    let mut rec = recording(&r.server, "u1", "m1", Status::Interrupted);
+    (rec.next_seq, rec.uploaded) = (4000, 4000);
+    plant(&r.root, &rec, &[]);
+    r.restart();
+
+    // 不启动录音程序（它不接受这样的 --start-seq，说的是参数的事），直接说清楚为什么、能怎么办
+    let err = r.recorder.start("m1", None, true).await.unwrap_err();
+    assert_eq!(err, CHUNKS_FULL);
+    assert!(helper_runs(r.f.dir.path()).is_empty());
+    let state = r.recorder.state();
+    assert_eq!(state.status, Phase::Idle);
+    assert!(upload_is(&state, "m1", UploadStatus::Interrupted));
+    let rec = local::load(&r.root.join("m1")).unwrap();
+    assert_eq!((rec.status, rec.next_seq), (Status::Interrupted, 4000));
+}
+
+#[tokio::test]
+async fn a_web_page_instead_of_the_servers_answer_does_not_count_as_uploaded() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    let rec = recording(&r.server, "u1", "m1", Status::Stopped);
+    plant(&r.root, &rec, &[(0, b"audio-0".to_vec())]);
+    // 传分片时回来的是个网页（200）：连的网络要先登录，中间的设备拦下了请求，分片其实没传上去
+    *r.mock.chunk_page.lock().unwrap() = Some("<html>请先登录这个网络</html>");
+    r.restart();
+
+    // 不能当成传上去了、把这台电脑上的分片删掉：过一会儿再传
+    let state = wait_for(&r.recorder, "等着再传", |s| {
+        upload_is(s, "m1", UploadStatus::Waiting)
+    })
+    .await;
+    let error = upload(&state, "m1").unwrap().error.clone().unwrap();
+    assert!(error.contains("看不懂"), "{error}");
+    assert!(
+        r.root.join("m1").join("0.aac").exists(),
+        "没传上去的分片要留着"
+    );
+    assert_eq!(local::load(&r.root.join("m1")).unwrap().uploaded, 0);
+
+    *r.mock.chunk_page.lock().unwrap() = None;
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m1", UploadStatus::Completed)
+    })
+    .await;
+    assert_eq!(r.mock.received("m1"), [0]);
+    assert_eq!(
+        r.mock.completes_of("m1"),
+        [json!({ "chunks": 1, "marks": [] })]
+    );
+}
+
+#[tokio::test]
 async fn shutdown_stops_and_uploads_continue_next_launch() {
     let mut r = rig(Script {
         chunks: 1,
@@ -1336,7 +1601,7 @@ async fn shutdown_stops_and_uploads_continue_next_launch() {
     r.mock.chunk_error.lock().unwrap().insert("m1".into(), 503);
     r.recorder.start("m1", None, true).await.unwrap();
     // 退出 App：结束录音，等最后一片写完
-    r.recorder.shutdown(Duration::from_secs(5)).await;
+    r.recorder.shutdown().await;
     assert_eq!(r.recorder.state().status, Phase::Idle);
     let rec = local::load(&r.root.join("m1")).unwrap();
     assert_eq!(rec.status, Status::Stopped);
@@ -1349,7 +1614,84 @@ async fn shutdown_stops_and_uploads_continue_next_launch() {
         upload_is(s, "m1", UploadStatus::Completed)
     })
     .await;
-    assert_eq!(r.mock.seqs("m1"), [0, 1]);
+    // 上一个 Recorder 停下时可能正在重传第 0 片，那一次服务器也收到了，新的又传一次：同一片传两次没关系，
+    // 看服务器上有哪几片
+    assert_eq!(r.mock.received("m1"), [0, 1]);
+}
+
+#[test]
+fn waits_longer_than_the_helper_takes_to_stop() {
+    // 录音程序结束时自己最多花 8 秒（RecordSession.stopTimeout）写完最后一片，到时还没写完会报错退出。
+    // 点结束、退出 App 时都要等得比它久，不然它还在写最后一片就被强制关掉了
+    let opts = RecorderOptions::new(PathBuf::new(), None);
+    assert!(
+        opts.stop_timeout > Duration::from_secs(8),
+        "{:?}",
+        opts.stop_timeout
+    );
+}
+
+#[tokio::test]
+async fn a_helper_that_has_to_be_killed_leaves_the_recording_interrupted() {
+    let mut r = rig(Script {
+        chunks: 1,
+        hang_on_stop: true,
+        ..Script::default()
+    })
+    .await;
+    // 结束时只等录音程序一小会儿
+    r.restart_with(RecorderOptions {
+        stop_timeout: Duration::from_millis(300),
+        ..options(&r.root, &r.helper)
+    });
+    r.recorder.start("m1", None, true).await.unwrap();
+    wait_for(&r.recorder, "传完第 0 片", |s| {
+        upload(s, "m1").is_some_and(|u| u.uploaded == 1)
+    })
+    .await;
+
+    // 退出 App：录音程序写最后一片时卡住了，等不及只好强制结束。最后一片没写完，不能当成正常结束、
+    // 直接交给服务器处理：算中断，下次打开时让用户决定接着录还是直接结束
+    r.recorder.shutdown().await;
+    let state = r.recorder.state();
+    assert_eq!(state.status, Phase::Idle);
+    let u = upload(&state, "m1").unwrap();
+    assert_eq!(u.status, UploadStatus::Interrupted);
+    assert_eq!(u.error.as_deref(), Some(KILLED));
+    assert_eq!(state.error.as_deref(), Some(KILLED));
+    let rec = local::load(&r.root.join("m1")).unwrap();
+    assert_eq!((rec.status, rec.next_seq), (Status::Interrupted, 1));
+    assert!(!r.root.join("m1/1.aac.part").exists(), "没写完的不要");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(r.mock.completes_of("m1").is_empty());
+
+    r.restart();
+    assert!(upload_is(
+        &r.recorder.state(),
+        "m1",
+        UploadStatus::Interrupted
+    ));
+}
+
+#[tokio::test]
+async fn a_helper_that_cannot_finish_the_last_chunk_interrupts_the_recording() {
+    const STOP_TIMEOUT: &str = "录音没能正常结束，最后几秒可能没有保存下来。";
+    let r = rig(Script {
+        chunks: 1,
+        stop_error: Some(("stop_timeout", STOP_TIMEOUT)),
+        ..Script::default()
+    })
+    .await;
+    r.recorder.start("m1", None, true).await.unwrap();
+    // 点结束：录音程序自己等了 8 秒还没写完最后一片，报错退出。录好的部分算中断，原因照录音程序说的
+    let state = r.recorder.stop().await.unwrap();
+    assert_eq!(state.status, Phase::Idle);
+    assert_eq!(state.error.as_deref(), Some(STOP_TIMEOUT));
+    let u = upload(&state, "m1").unwrap();
+    assert_eq!((u.status, u.recorded), (UploadStatus::Interrupted, 1));
+    assert_eq!(u.error.as_deref(), Some(STOP_TIMEOUT));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(r.mock.completes_of("m1").is_empty());
 }
 
 #[test]

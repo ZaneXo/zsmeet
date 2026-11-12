@@ -22,13 +22,15 @@ const NO_PERMISSION: &str = "没有权限往这场会议里传录音，录音传
 const MEETING_GONE: &str = "服务器上找不到这场会议了（可能已经被删除），录音传不上去了";
 const ALREADY_FINISHED: &str = "这场会议已经结束录音、开始处理了，剩下的录音传不上去了";
 const BAD_ADDRESS: &str = "服务器地址不对，录音传不上去";
+const UNREADABLE: &str = "服务器返回的内容看不懂，稍后会自动重试。一直这样的话，看看连的网络是不是要先登录，或者请管理员检查服务器的设置";
 
 /// 一个请求的结果。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// 成功（2xx），带着响应的 JSON（没有内容、看不懂时是 Null）
+    /// 成功（2xx），带着响应的 JSON（没有内容时是 Null）
     Done(Value),
-    /// 等一会儿再试就可能好：连不上、超时、服务器出错（5xx）、408、429、跳转到了别处。带着给用户看的原因
+    /// 等一会儿再试就可能好：连不上、超时、服务器出错（5xx）、408、429、跳转到了别处、回复看不懂。
+    /// 带着给用户看的原因
     Retry(String),
     /// 登录失效了（401）
     Unauthorized,
@@ -121,7 +123,8 @@ pub async fn meeting(
     }
 }
 
-/// 服务器已经收到了哪几片（序号），最多等 timeout。
+/// 服务器已经收到了哪几片（序号），最多等 timeout。回复看不懂（比如中间的代理返回了一个网页）时
+/// 算暂时出错（Retry），不能当成一片也没收到。
 pub async fn received(
     client: &reqwest::Client,
     account: &Account,
@@ -136,21 +139,22 @@ pub async fn received(
     };
     let req = client.get(url).bearer_auth(&account.token).timeout(timeout);
     match send(req).await {
-        Outcome::Done(v) => Ok(received_seqs(&v)),
+        Outcome::Done(v) => received_seqs(&v).ok_or_else(|| Outcome::Retry(UNREADABLE.into())),
         other => Err(other),
     }
 }
 
-/// `{"received":[0,1,2]}` 里的序号。看不懂的当作一片也没收到。
-fn received_seqs(body: &Value) -> Vec<u32> {
-    body.get("received")
-        .and_then(Value::as_array)
-        .map(|seqs| {
-            seqs.iter()
-                .filter_map(|s| u32::try_from(s.as_u64()?).ok())
-                .collect()
-        })
-        .unwrap_or_default()
+/// `{"received":[0,1,2]}` 里的序号（null 是 Go 的空切片，也是一片都没收到）。不是这个样子、
+/// 有哪个序号不是非负整数时返回 None：看不懂的回复里可能就有这台电脑上找不到的那一片。
+fn received_seqs(body: &Value) -> Option<Vec<u32>> {
+    match body.get("received")? {
+        Value::Null => Some(Vec::new()),
+        Value::Array(seqs) => seqs
+            .iter()
+            .map(|s| u32::try_from(s.as_u64()?).ok())
+            .collect(),
+        _ => None,
+    }
 }
 
 async fn send(req: reqwest::RequestBuilder) -> Outcome {
@@ -165,6 +169,15 @@ async fn send(req: reqwest::RequestBuilder) -> Outcome {
         .as_deref()
         .and_then(|b| serde_json::from_slice::<Value>(b).ok());
     if (200..300).contains(&status) {
+        // 有内容却不是 JSON：不是服务器回的（比如连的网络要先登录，中间的设备返回了一个网页）。
+        // 不能当成成功：传分片时会以为传上去了，把这台电脑上的分片删掉
+        let unreadable = body
+            .as_deref()
+            .is_some_and(|b| b.iter().any(|c| !c.is_ascii_whitespace()))
+            && json.is_none();
+        if unreadable {
+            return Outcome::Retry(UNREADABLE.into());
+        }
         return Outcome::Done(json.unwrap_or(Value::Null));
     }
     let detail = json
@@ -226,10 +239,24 @@ mod tests {
 
     #[test]
     fn reads_received_chunks() {
-        assert_eq!(received_seqs(&json!({ "received": [0, 1, 5] })), [0, 1, 5]);
-        assert!(received_seqs(&json!({ "received": [] })).is_empty());
-        assert!(received_seqs(&json!({ "received": null })).is_empty());
-        assert_eq!(received_seqs(&json!({ "received": [-1, "x", 2] })), [2]);
-        assert!(received_seqs(&Value::Null).is_empty());
+        assert_eq!(
+            received_seqs(&json!({ "received": [0, 1, 5] })),
+            Some(vec![0, 1, 5])
+        );
+        assert_eq!(received_seqs(&json!({ "received": [] })), Some(vec![]));
+        assert_eq!(received_seqs(&json!({ "received": null })), Some(vec![]));
+        // 看不懂的回复不能当成一片也没收到
+        for body in [
+            json!({ "received": [-1, 2] }),
+            json!({ "received": ["0", 1] }),
+            json!({ "received": [1.5] }),
+            json!({ "received": [4_294_967_296_u64] }),
+            json!({ "received": 3 }),
+            json!({ "chunks": [0, 1] }),
+            json!("<html>请先登录</html>"),
+            Value::Null,
+        ] {
+            assert_eq!(received_seqs(&body), None, "{body}");
+        }
     }
 }

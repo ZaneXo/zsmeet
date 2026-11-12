@@ -11,6 +11,13 @@ public final class Resampler {
     private let outputBuffer: AVAudioPCMBuffer?
     private var pending = SampleFIFO()
     private var ended = false
+    /// 测试用：接下来这么多次转换当成出错（真的转换器几乎不会出错，只能这样测出错以后怎么处理）
+    var simulatedFailures = 0
+
+    /// 给人看的采样率，比如「44100 Hz」。设备报的数不正常（无穷大、不是数）时也不会让程序崩溃
+    static func describe(_ rate: Double) -> String {
+        String(format: "%.0f Hz", rate)
+    }
 
     public init(inputRate: Double) throws {
         self.inputRate = inputRate
@@ -27,7 +34,7 @@ public final class Resampler {
               let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: 4_096),
               let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 16_384)
         else {
-            throw RecorderFailure("unsupported_format", "不支持 \(Int(inputRate)) Hz 的声音")
+            throw RecorderFailure("unsupported_format", "不支持 \(Self.describe(inputRate)) 的声音")
         }
         converter.sampleRateConverterQuality = AVAudioQuality.high.rawValue
         self.converter = converter
@@ -35,29 +42,30 @@ public final class Resampler {
         self.outputBuffer = outputBuffer
     }
 
-    /// 转换 samples，转好的追加到 output（转换器会压着一点点，下次或者 finish 时才出来）
-    public func process(_ samples: UnsafeBufferPointer<Float>, into output: inout SampleFIFO) {
+    /// 转换 samples，转好的追加到 output（转换器会压着一点点，下次或者 finish 时才出来）。
+    /// 转换出错时还没转的这一段丢掉、抛出错误，声音里就少了这一小段；之后还能接着用，调用方决定要不要停下来
+    public func process(_ samples: UnsafeBufferPointer<Float>, into output: inout SampleFIFO) throws {
         guard converter != nil else {
             output.append(samples)
             return
         }
         pending.append(samples)
-        drain(into: &output)
+        try drain(into: &output)
     }
 
-    /// 这一路结束了：把转换器里压着的也取出来。之后不能再用。
-    public func finish(into output: inout SampleFIFO) {
+    /// 这一路结束了：把转换器里压着的也取出来。之后不能再用。出错时和 process 一样
+    public func finish(into output: inout SampleFIFO) throws {
         guard converter != nil, !ended else { return }
         ended = true
-        drain(into: &output)
+        try drain(into: &output)
     }
 
-    private func drain(into output: inout SampleFIFO) {
+    private func drain(into output: inout SampleFIFO) throws {
         guard let converter, let inputBuffer, let outputBuffer else { return }
         while true {
             outputBuffer.frameLength = 0
             var error: NSError?
-            let status = converter.convert(to: outputBuffer, error: &error) { requested, inputStatus in
+            var status = converter.convert(to: outputBuffer, error: &error) { requested, inputStatus in
                 let n = min(Int(requested), self.pending.count, Int(inputBuffer.frameCapacity))
                 guard n > 0 else {
                     inputStatus.pointee = self.ended ? .endOfStream : .noDataNow
@@ -68,6 +76,10 @@ public final class Resampler {
                 inputStatus.pointee = .haveData
                 return inputBuffer
             }
+            if simulatedFailures > 0 {
+                simulatedFailures -= 1
+                status = .error
+            }
             if outputBuffer.frameLength > 0 {
                 output.append(UnsafeBufferPointer(start: outputBuffer.floatChannelData![0], count: Int(outputBuffer.frameLength)))
             }
@@ -75,10 +87,10 @@ public final class Resampler {
             case .haveData:
                 continue
             case .error:
-                // 转换出错时这一段丢掉，不让整场录音停下来
-                log("采样率转换出错：\(error?.localizedDescription ?? "未知原因")")
+                // 还没转的这一段丢掉（不然下次还卡在它上面），转换器从头开始，下次接着用
                 pending.removeAll()
-                return
+                converter.reset()
+                throw RecorderFailure("convert_failed", "转换采样率出错（\(error?.localizedDescription ?? "未知原因")），丢了一小段声音。")
             default:
                 return
             }

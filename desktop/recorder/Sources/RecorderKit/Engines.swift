@@ -40,8 +40,9 @@ public final class LiveEngine: RecordingEngine {
     public var onFinished: ((Result<RecordingResult, RecorderFailure>) -> Void)?
     let queue = DispatchQueue(label: "io.github.zanexo.zsmeet.recorder.engine", qos: .userInitiated)
 
-    private let sources: [CaptureSource]
-    private var resamplers: [Resampler]
+    /// 在录的各路。采样率处理不了的那一路，开始时就去掉了（见 init）
+    let sources: [CaptureSource]
+    private(set) var resamplers: [Resampler]
     let mixer: TimeMixer
     private let pipeline: RecordingPipeline
     private let events: EventSink
@@ -56,6 +57,8 @@ public final class LiveEngine: RecordingEngine {
     private var silence: [SilenceWatch]
     /// 每一路上次换不过去的采样率，免得每次取数据都再试一遍、再写一遍日志
     private var rejectedRates: [Double?]
+    /// 每一路是不是已经提醒过「转换出错，少了一小段」（只提醒一次）
+    private var conversionWarned: [Bool]
     private var finished = false
 
     private struct SilenceWatch {
@@ -63,17 +66,43 @@ public final class LiveEngine: RecordingEngine {
         var heardSomething = false
     }
 
+    /// 每一路配一个转换器。采样率处理不了的那一路停掉、发 warning，只录别的；一路都不剩时抛出 no_source
     public init(sources: [CaptureSource], pipeline: RecordingPipeline, events: EventSink,
                 clock: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) throws {
-        self.sources = sources
-        resamplers = try sources.map { try Resampler(inputRate: $0.sampleRate) }
-        mixer = TimeMixer(kinds: sources.map(\.kind))
+        var usable: [CaptureSource] = []
+        var resamplers: [Resampler] = []
+        for source in sources {
+            let rate = source.sampleRate
+            guard let resampler = try? Resampler(inputRate: rate) else {
+                log("\(source.name) 的采样率是 \(Resampler.describe(rate))，处理不了，不录这一路")
+                source.stop()
+                events.send(Self.unsupportedRateWarning(source, rate: rate))
+                continue
+            }
+            usable.append(source)
+            resamplers.append(resampler)
+        }
+        guard !usable.isEmpty else { throw RecorderFailure.noSource }
+        self.sources = usable
+        self.resamplers = resamplers
+        mixer = TimeMixer(kinds: usable.map(\.kind))
         self.pipeline = pipeline
         self.events = events
         self.clock = clock
-        energy = [Double](repeating: 0, count: sources.count)
-        silence = [SilenceWatch](repeating: SilenceWatch(), count: sources.count)
-        rejectedRates = [Double?](repeating: nil, count: sources.count)
+        energy = [Double](repeating: 0, count: usable.count)
+        silence = [SilenceWatch](repeating: SilenceWatch(), count: usable.count)
+        rejectedRates = [Double?](repeating: nil, count: usable.count)
+        conversionWarned = [Bool](repeating: false, count: usable.count)
+    }
+
+    private static func unsupportedRateWarning(_ source: CaptureSource, rate: Double) -> RecorderEvent {
+        let rate = Resampler.describe(rate)
+        switch source.kind {
+        case .mic:
+            return .warning(.micUnavailable, "麦克风「\(source.name)」的采样率是 \(rate)，处理不了，录不到你这边的声音。到「音频 MIDI 设置」里把它改成 48000 Hz，或者换一个麦克风，再重新开始录音。")
+        case .system:
+            return .warning(.systemUnavailable, "电脑声音的采样率是 \(rate)，处理不了，录不到会议软件里其他人的声音。到「音频 MIDI 设置」里把正在用的扬声器或耳机改成 48000 Hz，再重新开始录音。")
+        }
     }
 
     public func start() {
@@ -203,11 +232,38 @@ public final class LiveEngine: RecordingEngine {
             scratch.withUnsafeBufferPointer { buffer in
                 let samples = UnsafeBufferPointer(rebasing: buffer[0..<count])
                 watchSilence(index, samples)
-                resamplers[index].process(samples, into: &lane.queue)
+                do {
+                    try resamplers[index].process(samples, into: &lane.queue)
+                } catch {
+                    conversionFailed(index, error)
+                }
             }
         }
         if final {
-            resamplers[index].finish(into: &lane.queue)
+            finishResampler(index)
+        }
+    }
+
+    /// 这一路的转换器收尾：压着的声音都取出来
+    private func finishResampler(_ index: Int) {
+        do {
+            try resamplers[index].finish(into: &mixer.lanes[index].queue)
+        } catch {
+            conversionFailed(index, error)
+        }
+    }
+
+    /// 转换出错，这一路少了一小段（混音时补成静音）。录音照常，但要告诉用户，每一路只提醒一次
+    private func conversionFailed(_ index: Int, _ error: Error) {
+        let source = sources[index]
+        log("\(source.name)：\((error as? RecorderFailure)?.message ?? "\(error)")")
+        guard !conversionWarned[index] else { return }
+        conversionWarned[index] = true
+        switch source.kind {
+        case .mic:
+            events.send(.warning(.micUnavailable, "处理麦克风「\(source.name)」的声音时出错，中间有一小段没录上，录音还在继续。经常这样的话，结束录音，换一个麦克风再录。"))
+        case .system:
+            events.send(.warning(.systemUnavailable, "处理电脑声音时出错，中间有一小段没录上，录音还在继续。经常这样的话，结束录音再重新开始。"))
         }
     }
 
@@ -218,13 +274,13 @@ public final class LiveEngine: RecordingEngine {
         guard rate != resamplers[index].inputRate, rate != rejectedRates[index] else { return }
         do {
             let replacement = try Resampler(inputRate: rate)
-            resamplers[index].finish(into: &mixer.lanes[index].queue)
+            finishResampler(index)
             resamplers[index] = replacement
             rejectedRates[index] = nil
-            log("\(source.name) 的采样率变成了 \(Int(rate)) Hz")
+            log("\(source.name) 的采样率变成了 \(Resampler.describe(rate))")
         } catch {
             rejectedRates[index] = rate
-            log("\(source.name) 换成了不支持的采样率 \(Int(rate)) Hz，先按原来的处理")
+            log("\(source.name) 换成了不支持的采样率 \(Resampler.describe(rate))，先按原来的处理")
         }
     }
 
@@ -317,18 +373,19 @@ public final class FileEngine: RecordingEngine {
         queue.async { self.stopRequested = true }
     }
 
-    /// 每次读约 1 秒，读完排到队尾，让排着队的命令（暂停、停止）先执行
+    /// 每次读约 1 秒，读完排到队尾，让排着队的命令（暂停、停止）先执行。
+    /// 读文件、转换采样率出错都以出错结束（测试模式，不能悄悄少一段还算录好了）
     private func step() {
         guard !finished else { return }
         do {
             let samples = stopRequested ? [] : try reader.read(maxFrames: 48_000)
             if samples.isEmpty {
-                resampler.finish(into: &converted)
+                try resampler.finish(into: &converted)
                 try feedConverted(all: true)
                 finish(.success(try pipeline.finish()))
                 return
             }
-            samples.withUnsafeBufferPointer { resampler.process($0, into: &converted) }
+            try samples.withUnsafeBufferPointer { try resampler.process($0, into: &converted) }
             try feedConverted(all: false)
             queue.async { self.step() }
         } catch {

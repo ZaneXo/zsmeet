@@ -89,6 +89,12 @@ func testParseCommandLine() throws {
     defaultMic.outDir = "d"
     expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--mic", "default"]), .record(defaultMic))
 
+    // 服务器最多收 4000 片，最后一片的序号是 3999
+    var lastSeq = RecordOptions()
+    lastSeq.outDir = "d"
+    lastSeq.startSeq = 3_999
+    expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--start-seq", "3999"]), .record(lastSeq))
+
     // 测试模式：文件代替两路声音，所以 --no-mic --no-system 也可以
     var file = RecordOptions()
     file.outDir = "d"
@@ -111,8 +117,12 @@ func testParseErrors() {
         (["record"], "缺少 --out：分片放在哪个目录"),
         (["record", "--out"], "--out 后面缺少值"),
         (["record", "--out", ""], "--out 后面缺少值"),
-        (["record", "--out", "d", "--start-seq", "-1"], "--start-seq 要是不小于 0 的整数，现在是 -1"),
-        (["record", "--out", "d", "--start-seq", "1.5"], "--start-seq 要是不小于 0 的整数，现在是 1.5"),
+        (["record", "--out", "d", "--start-seq", "-1"], "--start-seq 要是 0 到 3999 之间的整数（服务器一场会议最多收 4000 片），现在是 -1"),
+        (["record", "--out", "d", "--start-seq", "1.5"], "--start-seq 要是 0 到 3999 之间的整数（服务器一场会议最多收 4000 片），现在是 1.5"),
+        (["record", "--out", "d", "--start-seq", "4000"], "--start-seq 要是 0 到 3999 之间的整数（服务器一场会议最多收 4000 片），现在是 4000"),
+        // 不限制的话，写完这一片、序号加 1 时溢出，程序崩溃
+        (["record", "--out", "d", "--start-seq", "\(Int.max)"],
+         "--start-seq 要是 0 到 3999 之间的整数（服务器一场会议最多收 4000 片），现在是 \(Int.max)"),
         (["record", "--out", "d", "--chunk-seconds", "0.1"], "--chunk-seconds 要在 0.5 到 600 秒之间，现在是 0.1"),
         (["record", "--out", "d", "--chunk-seconds", "abc"], "--chunk-seconds 要在 0.5 到 600 秒之间，现在是 abc"),
         (["record", "--out", "d", "--mic", "x", "--no-mic"], "--mic 和 --no-mic 只能用一个"),

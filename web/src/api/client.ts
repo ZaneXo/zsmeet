@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import createClient from "openapi-fetch";
-import { setupApiClient } from "../platform";
+import { networkMode, setupApiClient } from "../platform";
 import type { components, paths } from "./schema";
 
 // schema.d.ts 是从后端的接口文档自动生成的（make gen），不要手改。
@@ -27,7 +27,9 @@ setupApiClient(api);
 
 export const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { retry: false, refetchOnWindowFocus: false, staleTime: 5_000 },
+    // networkMode：桌面版断网时也照常发（见 src/platform/）
+    queries: { retry: false, refetchOnWindowFocus: false, staleTime: 5_000, networkMode },
+    mutations: { networkMode },
   },
 });
 

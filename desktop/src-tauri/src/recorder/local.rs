@@ -5,6 +5,7 @@
 //! 分片传上去以后就删掉；全部传完、服务器开始处理以后整个目录删掉。
 //! 录音目录只有自己能进（0700）：同一台 Mac 上的其他用户看不到别人的会议录音。
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -182,13 +183,18 @@ fn chunk_seq(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// 目录里写好的分片中最大的序号，一片都没有时是 None。
-pub fn highest_chunk(dir: &Path) -> Option<u32> {
+/// 目录里写好的分片的序号（没有顺序）。
+fn chunk_seqs(dir: &Path) -> impl Iterator<Item = u32> {
     fs::read_dir(dir)
-        .ok()?
+        .into_iter()
+        .flatten()
         .flatten()
         .filter_map(|e| chunk_seq(&e.file_name().to_string_lossy()))
-        .max()
+}
+
+/// 目录里写好的分片中最大的序号，一片都没有时是 None。
+pub fn highest_chunk(dir: &Path) -> Option<u32> {
+    chunk_seqs(dir).max()
 }
 
 /// 接着录一场中断了的录音时，录音程序从第几片开始写：recording.json 记的下一片、这台电脑上已有的分片之后、
@@ -199,6 +205,24 @@ pub fn resume_seq(dir: &Path, rec: &Recording, received: &[u32]) -> u32 {
     rec.next_seq
         .max(after(highest_chunk(dir)))
         .max(after(received.iter().copied().max()))
+}
+
+/// resume_seq 跳过的分片（序号 from 到 to-1）一共多少秒。这台电脑上还在的照着分片算；不在的（传上去以后删掉了）
+/// 量不了，按每片 chunk_seconds 算：除了暂停、结束前的最后一片，每片都是这么长。
+pub fn skipped_seconds(dir: &Path, from: u32, to: u32, chunk_seconds: u32) -> f64 {
+    // 只看目录里有的：序号可能隔得很远，不一个一个地试
+    let here: BTreeSet<u32> = chunk_seqs(dir)
+        .filter(|seq| (from..to).contains(seq))
+        .collect();
+    let measured: f64 = here
+        .iter()
+        .map(|&seq| match fs::read(chunk_path(dir, seq)) {
+            Ok(data) => adts_seconds(&data),
+            Err(_) => f64::from(chunk_seconds),
+        })
+        .sum();
+    let missing = to.saturating_sub(from) as usize - here.len();
+    measured + missing as f64 * f64::from(chunk_seconds)
 }
 
 /// AAC 的采样率表（ADTS 头里存的是下标）。
@@ -388,5 +412,25 @@ pub mod tests {
             assert_eq!(chunk_seq(name), None, "{name}");
         }
         assert_eq!(chunk_seq("12.aac"), Some(12));
+    }
+
+    #[test]
+    fn measures_the_chunks_it_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("m1");
+        create_private_dir(&dir).unwrap();
+        // 第 1、2 片传上去以后删掉了，按每片 10 秒算；第 3 片（8 秒）还在，照着分片算。
+        // 范围外的分片、没写完的 .part 不算
+        fs::write(chunk_path(&dir, 3), adts(375)).unwrap();
+        fs::write(chunk_path(&dir, 9), adts(75)).unwrap();
+        fs::write(dir.join("2.aac.part"), adts(75)).unwrap();
+        assert_eq!(skipped_seconds(&dir, 1, 4, 10), 28.0);
+        assert_eq!(skipped_seconds(&dir, 3, 4, 10), 8.0);
+        assert_eq!(skipped_seconds(&dir, 4, 4, 10), 0.0);
+        // 序号隔得很远也不一个一个地去找文件
+        assert_eq!(
+            skipped_seconds(&dir, 4, 1_000_000_004, 10),
+            1.6 + 999_999_999.0 * 10.0
+        );
     }
 }

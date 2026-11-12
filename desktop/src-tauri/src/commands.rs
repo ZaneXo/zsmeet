@@ -213,11 +213,11 @@ pub async fn recorder_stop(recorder: RecorderHandle<'_>) -> Result<RecorderState
 
 /// 中断了的录音不接着录了：把录好的传上去，告诉服务器开始处理。
 #[tauri::command]
-pub fn recorder_finish(
-    recorder: RecorderHandle,
+pub async fn recorder_finish(
+    recorder: RecorderHandle<'_>,
     meeting_id: String,
 ) -> Result<RecorderState, String> {
-    recorder.finish(&meeting_id)
+    recorder.finish(&meeting_id).await
 }
 
 /// 删掉这台电脑上一段中断了的、传不上去的录音。

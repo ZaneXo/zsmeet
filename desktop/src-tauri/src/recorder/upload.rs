@@ -184,7 +184,7 @@ pub fn classify(status: u16, detail: Option<String>) -> Outcome {
         409 => Outcome::Conflict(detail.unwrap_or_else(|| ALREADY_FINISHED.into())),
         408 | 429 => Outcome::Retry(format!("服务器很忙（返回 {status}），稍后会自动重试")),
         500..=599 => Outcome::Retry(format!("服务器暂时出错了（返回 {status}），稍后会自动重试")),
-        // 跳到了别的主机（见 server::http_client 的跳转规则）：多半是服务器的设置问题，改好了还能接着传
+        // 跳转（带着令牌的请求不跟着跳，见 server::http_client）：多半是服务器的设置问题，改好了还能接着传
         300..=399 => Outcome::Retry(format!(
             "服务器把请求转到了别的地址（返回 {status}），请让管理员检查服务器的设置"
         )),

@@ -1,11 +1,17 @@
 //! 导出（纪要、转写）：网页版是浏览器下载，桌面版先从服务器取回文件，再弹保存对话框，写到用户选的位置。
 
+use std::io::{self, Write};
+use std::path::Path;
+
 use percent_encoding::percent_decode_str;
 
 use crate::server;
 
 /// 导出文件最大多少（Word 文档带不了录音，几 MB 就很大了）。
 const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+
+const TOO_LARGE: &str = "导出的文件太大了";
+const BROKEN: &str = "下载到一半断了，没能导出。请检查网络后再试";
 
 /// 只允许 `/api/meetings/{id}/export?…`，界面传不了别的路径进来。id 只能是普通的字母数字（见 server::api_segments），
 /// 编码过的「..」、反斜杠这些转发出去以后可能落到别的路径上，把令牌带过去。
@@ -90,9 +96,9 @@ pub async fn fetch(
     }
     if resp
         .content_length()
-        .is_some_and(|n| n as usize > MAX_EXPORT_BYTES)
+        .is_some_and(|n| n > MAX_EXPORT_BYTES as u64)
     {
-        return Err((status, "导出的文件太大了".into()));
+        return Err((status, TOO_LARGE.into()));
     }
     let name = file_name(
         resp.headers()
@@ -100,15 +106,62 @@ pub async fn fetch(
             .and_then(|v| v.to_str().ok()),
         "zsmeet-export",
     );
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|_| (0, "下载到一半断了，没能导出。请检查网络后再试".to_string()))?;
-    Ok((name, body.to_vec()))
+    let body = read_body(resp, MAX_EXPORT_BYTES).await?;
+    Ok((name, body))
+}
+
+/// 一段一段地读响应体，超过 max 个字节就不读了。服务器没说有多大（没有 Content-Length）时也不会无限制地读进内存。
+async fn read_body(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, (u16, String)> {
+    let status = resp.status().as_u16();
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|_| (0, BROKEN.to_string()))? {
+        if body.len() + chunk.len() > max {
+            return Err((status, TOO_LARGE.into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// 存到用户选的位置：先写到同一个目录里的临时文件、落盘，再改名换掉原来的文件。
+/// 直接覆盖的话，写到一半出错（磁盘满了、U 盘拔了）会留下半个文件，原来的也没了。
+pub fn save_replacing(target: &Path, body: &[u8]) -> io::Result<()> {
+    replace_with(target, |file| file.write_all(body))
+}
+
+/// 用 write 写出新文件的内容，写好了才换掉 target。失败时删掉临时文件，target 原来是什么还是什么。
+fn replace_with(
+    target: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "没有文件名"))?;
+    // 以「.」开头，在 Finder 里看不到；带个随机数，同时存两次也不会撞上
+    let tmp = target.with_file_name(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        server::random_token(6)
+    ));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        write(&mut file)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -147,5 +200,89 @@ mod tests {
         );
         assert_eq!(file_name(None, "fallback"), "fallback");
         assert_eq!(file_name(Some("attachment"), "fallback"), "fallback");
+    }
+
+    /// 起一个服务器，GET / 返回 make() 做出来的流（分块传，不带 Content-Length），返回它的响应。
+    async fn streamed<S>(make: fn() -> S) -> reqwest::Response
+    where
+        S: futures_util::Stream<Item = io::Result<bytes::Bytes>> + Send + 'static,
+    {
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move || async move { axum::body::Body::from_stream(make()) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let resp = reqwest::get(url).await.unwrap();
+        assert_eq!(
+            resp.content_length(),
+            None,
+            "要测的是不带 Content-Length 的响应"
+        );
+        resp
+    }
+
+    #[tokio::test]
+    async fn stops_reading_once_too_large() {
+        // 服务器没完没了地发，又不说有多大：读到上限就停，不会一直读下去
+        let endless = || {
+            futures_util::stream::repeat_with(|| {
+                Ok::<_, io::Error>(bytes::Bytes::from(vec![b'x'; 1000]))
+            })
+        };
+        let resp = streamed(endless).await;
+        let read = tokio::time::timeout(Duration::from_secs(5), read_body(resp, 10_000))
+            .await
+            .expect("超过上限就该停下，不该一直读");
+        assert_eq!(read, Err((200, TOO_LARGE.to_string())));
+
+        let small = || {
+            futures_util::stream::iter(
+                ["ab", "cd", "e"].map(|s| Ok::<_, io::Error>(bytes::Bytes::from(s))),
+            )
+        };
+        let resp = streamed(small).await;
+        assert_eq!(read_body(resp, 5).await.unwrap(), b"abcde");
+    }
+
+    /// 目录里除了 keep 以外的文件（临时文件不该留下）。
+    fn leftovers(dir: &Path, keep: &str) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != keep)
+            .collect()
+    }
+
+    #[test]
+    fn replaces_the_file_only_after_writing_it_fully() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("周会纪要.docx");
+        std::fs::write(&target, b"old").unwrap();
+
+        save_replacing(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(leftovers(dir.path(), "周会纪要.docx").is_empty());
+
+        // 写到一半出错（比如磁盘满了）：原来的文件不动，也不留下临时文件
+        let err = replace_with(&target, |file| {
+            file.write_all(b"half")?;
+            Err(io::Error::other("磁盘满了"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "磁盘满了");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(leftovers(dir.path(), "周会纪要.docx").is_empty());
+
+        // 换不掉（选的是一个文件夹）：报错，也不留下临时文件
+        let folder = dir.path().join("文件夹");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("里面的文件"), b"x").unwrap();
+        assert!(save_replacing(&folder, b"new").is_err());
+        assert_eq!(std::fs::read(folder.join("里面的文件")).unwrap(), b"x");
+        let mut left = leftovers(dir.path(), "周会纪要.docx");
+        left.sort();
+        assert_eq!(left, ["文件夹"]);
     }
 }

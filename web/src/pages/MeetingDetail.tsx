@@ -9,6 +9,7 @@ import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings
 import { Button, buttonClass, Card, Chip, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
+import { waitingForRecording } from "../lib/meetingStatus";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
 import { isDesktop, mediaUrl, subscribe } from "../platform";
@@ -23,8 +24,6 @@ import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
 
 const isActive = (m: Meeting | undefined) => m?.status === "queued" || m?.status === "processing";
-// 桌面版里也盯着桌面版录的会议：录音传完、开始处理时页面跟着变
-const isRecording = (m: Meeting | undefined) => (m?.source === "record" || (isDesktop && m?.source === "desktop")) && m.status === "uploading";
 
 /**
  * 订阅服务器推送的处理进度（SSE），收到就更新缓存里的会议。
@@ -57,8 +56,8 @@ export function MeetingDetailPage({
   const meeting = useQuery({
     queryKey: ["meeting", id],
     queryFn: () => unwrap(api.GET("/api/meetings/{id}", { params: { path: { id } } })),
-    // 在处理时每 5 秒、在录音时每 10 秒刷新一次
-    refetchInterval: (query) => (isActive(query.state.data) ? 5000 : isRecording(query.state.data) ? 10_000 : false),
+    // 在处理时每 5 秒、在等录音传完时每 10 秒刷新一次（传完、开始处理时页面跟着变）
+    refetchInterval: (query) => (isActive(query.state.data) ? 5000 : waitingForRecording(query.state.data) ? 10_000 : false),
   });
   const m = meeting.data;
   useMeetingEvents(id, isActive(m));

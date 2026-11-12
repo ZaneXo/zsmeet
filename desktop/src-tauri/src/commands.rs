@@ -59,16 +59,39 @@ pub fn session_expired(core: CoreState) -> AppState {
     core.session_expired()
 }
 
-/// 在系统浏览器里打开站外链接。只接受 http、https 和 mailto。
+/// 在系统浏览器里打开站外链接（纪要里的链接，邮件地址用邮件程序打开）。只接受 http、https 和 mailto。
+/// 打不开时弹一个系统提示框（点的是页面里的链接，旁边没有地方显示错误），同时把原因返回给界面。
 #[tauri::command]
 pub fn open_external(app: AppHandle, url: String) -> Result<(), String> {
-    let parsed = url::Url::parse(&url).map_err(|_| "链接地址不对".to_string())?;
+    let result = open_link(&app, &url);
+    if let Err(message) = &result {
+        show_error(&app, "没能打开链接", message);
+    }
+    result
+}
+
+fn open_link(app: &AppHandle, url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| "链接地址不对".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
         return Err("只能打开网页链接".into());
     }
+    let opener = if parsed.scheme() == "mailto" {
+        "邮件程序"
+    } else {
+        "浏览器"
+    };
     app.opener()
         .open_url(parsed.as_str(), None::<&str>)
-        .map_err(|e| format!("没能打开浏览器（{e}）"))
+        .map_err(|e| format!("没能打开这个链接（{e}），请确认这台电脑上设置了默认的{opener}"))
+}
+
+/// 弹一个系统提示框说明出了什么错。界面上没有地方显示错误的操作（导出、点链接）用它。
+fn show_error(app: &AppHandle, title: &str, message: &str) {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Error)
+        .show(|_| {});
 }
 
 /// 在系统浏览器里打开服务器上的一个页面，比如管理员设置（`/settings`）。
@@ -93,11 +116,7 @@ pub async fn save_export(
 ) -> Result<Option<String>, String> {
     let result = save_export_inner(&app, &core, &path).await;
     if let Err(message) = &result {
-        app.dialog()
-            .message(message)
-            .title("导出没有完成")
-            .kind(MessageDialogKind::Error)
-            .show(|_| {});
+        show_error(&app, "导出没有完成", message);
     }
     result
 }
@@ -141,8 +160,11 @@ async fn save_export_inner(
     let target = chosen
         .into_path()
         .map_err(|_| "选的位置不能保存文件，请换一个位置".to_string())?;
-    tokio::fs::write(&target, body)
+    // 选的是已有的文件时，写好新文件才换掉它：写到一半出错，原来的文件还在
+    let path = target.clone();
+    tauri::async_runtime::spawn_blocking(move || export::save_replacing(&path, &body))
         .await
+        .map_err(|e| e.to_string())?
         .map_err(|e| format!("文件没能保存到 {}（{e}），请换一个位置", target.display()))?;
     Ok(Some(target.display().to_string()))
 }

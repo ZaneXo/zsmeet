@@ -7,6 +7,7 @@ import { Button, buttonClass, Chip, Icon, Input, Notice, Spinner } from "../comp
 import type { Tone } from "../components/ui";
 import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName, STAGE_LABEL } from "../lib/format";
 import { jumpParam } from "../lib/jump";
+import { waitingForRecording } from "../lib/meetingStatus";
 import { useTicker } from "../lib/useTicker";
 import { isDesktop } from "../platform";
 import { TrashList } from "./Trash";
@@ -50,8 +51,6 @@ export function meetingChip(m: Meeting): { tone: Tone; text: string } {
 }
 
 const isActive = (m: Meeting) => m.status === "queued" || m.status === "processing";
-// 桌面版里也盯着桌面版录的会议：这台电脑正在录的那一场要一直显示「电脑录音中」
-const isRecording = (m: Meeting) => (m.source === "record" || (isDesktop && m.source === "desktop")) && m.status === "uploading";
 
 export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
   const [input, setInput] = useState("");
@@ -73,16 +72,17 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
     queryKey: ["meetings", q, mine],
     enabled: !trash,
     queryFn: () => unwrap(api.GET("/api/meetings", { params: { query: { q: q || undefined, mine: mine || undefined } } })),
-    // 有会议在处理时每 3 秒刷新一次，让状态和进度跟上；有人在录音时每 15 秒刷新一次
+    // 有会议在处理时每 3 秒刷新一次，让状态和进度跟上；有人在录音（网页录音、桌面版录音）时每 15 秒刷新一次
     refetchInterval: (query) => {
       const items = query.state.data?.items ?? [];
-      return items.some(isActive) ? 3000 : items.some(isRecording) ? 15_000 : false;
+      return items.some(isActive) ? 3000 : items.some(waitingForRecording) ? 15_000 : false;
     },
     placeholderData: (previous) => previous,
   });
 
-  // 有人在录音时定时重画：录音中断以后，标签要从「录音中」变成「录音未传完」，即使服务器返回的数据没变
-  useTicker(15_000, (meetings.data?.items ?? []).some(isRecording));
+  // 有人在录音时定时重画：录音中断以后，标签要从「录音中」变成「录音未传完」（桌面版录的从「电脑录音中」变成
+  // 「等电脑传完录音」），即使服务器返回的数据没变
+  useTicker(15_000, (meetings.data?.items ?? []).some(waitingForRecording));
 
   const retry = useMutation({
     mutationFn: (id: string) => unwrap(api.POST("/api/meetings/{id}/retry", { params: { path: { id } } })),

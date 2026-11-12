@@ -18,7 +18,6 @@ mod tray;
 mod tests;
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -31,9 +30,6 @@ use crate::recorder::{Recorder, RecorderEvents, RecorderOptions, RecorderState};
 pub const EVENT_STATE: &str = "zsmeet://state";
 pub const EVENT_LOGIN_ERROR: &str = "zsmeet://login-error";
 pub const EVENT_RECORDER: &str = "recorder://state";
-
-/// 退出 App 时最多等录音程序多久（写完最后一片）。
-const QUIT_WAIT: Duration = Duration::from_secs(5);
 
 /// App 界面的来源。macOS 上 Tauri 2 用 `tauri://localhost`。
 const APP_ORIGIN: &str = "tauri://localhost";
@@ -228,11 +224,12 @@ pub fn run() {
         .expect("zsmeet 启动失败");
 
     app.run(|app, event| match event {
-        // 退出（菜单栏的「退出」、⌘Q、关机）：先结束录音，等录音程序写完最后一片。没传完的下次打开接着传
+        // 退出（菜单栏的「退出」、⌘Q、关机）：先结束录音，和点了结束一样等录音程序写完最后一片（它自己最多花
+        // 8 秒，这里最多等 10 秒），还不退出就强制结束，这场录音算中断。没传完的下次打开接着传
         RunEvent::Exit => {
             if let Some(recorder) = app.try_state::<Arc<Recorder>>() {
                 let recorder = recorder.inner().clone();
-                tauri::async_runtime::block_on(recorder.shutdown(QUIT_WAIT));
+                tauri::async_runtime::block_on(recorder.shutdown());
             }
         }
         // 窗口藏起来以后点 Dock 上的图标：重新显示

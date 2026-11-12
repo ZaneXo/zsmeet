@@ -57,6 +57,22 @@ final class SystemAudioCapture: CaptureSource {
     func start() throws {
         controlLock.lock()
         defer { controlLock.unlock() }
+        // 先挂上格式的监听，再读一次现在的格式，最后才开始录：init 里读过以后、监听挂上以前变了的，这次读得到；
+        // 挂上以后（包括开始录的时候）再变，监听会收到。反过来先开始录、再挂监听的话，中间变了就收不到通知，
+        // 一直按旧的采样率转换，录出来的声音变调、时长也不对。
+        // 读和改都在监听的队列上做，先读到的旧值不会盖掉监听后来读到的新值
+        let tap = tapID
+        listener = PropertyListener(object: tap, selector: kAudioTapPropertyFormat, queue: listenerQueue) { [weak self] in
+            self?.updateSampleRate(tap)
+        }
+        listenerQueue.sync { updateSampleRate(tap) }
+        var started = false
+        defer {
+            if !started {
+                listener?.remove()
+                listener = nil
+            }
+        }
         var procID: AudioDeviceIOProcID?
         try check(AudioDeviceCreateIOProcID(aggregateID, zr_capture_ioproc, UnsafeMutableRawPointer(ring), &procID), "打开电脑声音")
         guard let procID else {
@@ -70,13 +86,15 @@ final class SystemAudioCapture: CaptureSource {
             self.procID = nil
             throw error
         }
-        let tap = tapID
-        listener = PropertyListener(object: tap, selector: kAudioTapPropertyFormat, queue: listenerQueue) { [weak self] in
-            guard let self, let newRate = try? Self.tapSampleRate(tap) else { return }
-            self.lock.lock()
-            self.rate = newRate
-            self.lock.unlock()
-        }
+        started = true
+    }
+
+    /// 重新读 tap 的格式（在监听的队列上）。读不出来时还用原来的
+    private func updateSampleRate(_ tap: AudioObjectID) {
+        guard let newRate = try? Self.tapSampleRate(tap) else { return }
+        lock.lock()
+        rate = newRate
+        lock.unlock()
     }
 
     func stop() {

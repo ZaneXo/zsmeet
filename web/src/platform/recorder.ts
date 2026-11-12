@@ -44,7 +44,7 @@ export type RecorderState = {
   seconds: number;
   /** 现在的音量，0 到 1。录音时大约每 100 毫秒更新一次 */
   level: { mic: number; system: number } | null;
-  /** 在录的麦克风的名字，不录麦克风（或者录不到）时为 null */
+  /** 在录的麦克风的名字，不录麦克风（或者开始时就录不到）时为 null；录到一半断开了还是它的名字，warnings 里有提醒 */
   mic: string | null;
   /** 在录电脑里的声音 */
   system: boolean;

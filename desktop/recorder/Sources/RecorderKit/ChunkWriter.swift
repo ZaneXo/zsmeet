@@ -103,8 +103,15 @@ public final class ChunkWriter {
     }
 
     private func openPart() throws {
-        let fd = open(partURL(nextSeq).path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o644)
+        // 分片只有自己能读写（0600）：录的是会议的声音，目录万一别人也进得去，也读不了。
+        // 上次没写完、留下来的 .part 会接着用，open 不改它原来的权限，所以再设一次
+        let fd = open(partURL(nextSeq).path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw writeFailure() }
+        guard fchmod(fd, 0o600) == 0 else {
+            let failure = writeFailure()
+            close(fd)
+            throw failure
+        }
         file = fd
         bytes = 0
         packets = 0

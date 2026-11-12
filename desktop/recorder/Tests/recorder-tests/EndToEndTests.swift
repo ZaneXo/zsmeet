@@ -11,6 +11,7 @@ let endToEndTests: [(String, () throws -> Void)] = [
     ("端到端：从指定的序号接着录，不覆盖已有的分片", testEndToEndStartSeq),
     ("端到端：按实际时长读，暂停、继续，读完自动结束", testEndToEndPauseResume),
     ("端到端：录到一半收到 stop", testEndToEndStop),
+    ("端到端：按实际时长读时文件读到一半出错，以 error 结束，不当成读完了", testEndToEndInputFileReadError),
     ("端到端：参数写错时发 error 事件", testEndToEndBadArguments),
 ]
 
@@ -361,6 +362,23 @@ func testEndToEndStop() throws {
     expectEqual(lastEvent(run)["next_seq"] as? Int, 1)
     let recorded = lastEvent(run)["seconds"] as? Double ?? -1
     expect(recorded > 0.8 && recorded < 2, "录了 \(recorded) 秒")
+}
+
+func testEndToEndInputFileReadError() throws {
+    guard requireBinary() else { return }
+    let directory = try temporaryDirectory("e2e-read-error")
+    let input = directory.appendingPathComponent("in.wav")
+    try FFmpeg.generate(input, "sine=frequency=300:sample_rate=48000:duration=30", channels: 1)
+    let out = directory.appendingPathComponent("out")
+    let run = try RecorderRun(["record", "--out", out.path, "--input-file", input.path, "--realtime"], in: directory)
+    expect(run.waitFor("started", within: 10), "开始了")
+    usleep(500_000)
+    // 读到一半文件被截短了：后面的都读不出来
+    expectEqual(truncate(input.path, 4_096), 0)
+    expectEqual(run.exitStatus(within: 10), 1, "以出错结束")
+    expectEqual(run.names.last, "error")
+    expect(!run.names.contains("stopped"), "不能当成读完了、正常结束")
+    expectEqual(lastEvent(run)["code"] as? String, "input_file")
 }
 
 func testEndToEndBadArguments() throws {

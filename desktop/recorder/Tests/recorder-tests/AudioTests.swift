@@ -226,8 +226,8 @@ func testLevelMeter() {
 func testResamplerPassThrough() throws {
     let resampler = try Resampler(inputRate: 48_000)
     var out = SampleFIFO()
-    [Float](arrayLiteral: 1, 2, 3).withUnsafeBufferPointer { resampler.process($0, into: &out) }
-    resampler.finish(into: &out)
+    try [Float](arrayLiteral: 1, 2, 3).withUnsafeBufferPointer { try resampler.process($0, into: &out) }
+    try resampler.finish(into: &out)
     var samples = [Float](repeating: 0, count: 3)
     samples.withUnsafeMutableBufferPointer { out.take(3, into: $0.baseAddress!) }
     expectEqual(samples, [1, 2, 3])
@@ -242,11 +242,11 @@ func testResamplerConvertsRate() throws {
     var size = 1
     while offset < input.count {
         let n = min(size, input.count - offset)
-        input.withUnsafeBufferPointer { resampler.process(UnsafeBufferPointer(rebasing: $0[offset..<offset + n]), into: &out) }
+        try input.withUnsafeBufferPointer { try resampler.process(UnsafeBufferPointer(rebasing: $0[offset..<offset + n]), into: &out) }
         offset += n
         size = size * 7 % 1_201 + 1
     }
-    resampler.finish(into: &out)
+    try resampler.finish(into: &out)
     expectClose(Double(out.count), 48_000, within: 2, "1 秒的声音转完还是 1 秒")
     var samples = [Float](repeating: 0, count: out.count)
     let count = out.count

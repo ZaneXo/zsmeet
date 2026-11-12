@@ -49,6 +49,24 @@ final class MicCapture: CaptureSource {
     func start() throws {
         controlLock.lock()
         defer { controlLock.unlock() }
+        // 先挂上监听，再读一次采样率，最后才开始录（和 SystemAudioCapture 一样）：init 里读过以后变了的这次读得到，
+        // 之后再变监听会收到；读和改都在监听的队列上做，旧的值不会盖掉新的
+        listeners = [
+            PropertyListener(object: device, selector: kAudioDevicePropertyDeviceIsAlive, queue: listenerQueue) { [weak self] in
+                self?.checkAlive()
+            },
+            PropertyListener(object: device, selector: kAudioDevicePropertyNominalSampleRate, queue: listenerQueue) { [weak self] in
+                self?.updateSampleRate()
+            },
+        ]
+        listenerQueue.sync { updateSampleRate() }
+        var started = false
+        defer {
+            if !started {
+                listeners.forEach { $0.remove() }
+                listeners = []
+            }
+        }
         var procID: AudioDeviceIOProcID?
         try check(AudioDeviceCreateIOProcID(device, zr_capture_ioproc, UnsafeMutableRawPointer(ring), &procID), "打开麦克风")
         guard let procID else {
@@ -62,14 +80,7 @@ final class MicCapture: CaptureSource {
             self.procID = nil
             throw error
         }
-        listeners = [
-            PropertyListener(object: device, selector: kAudioDevicePropertyDeviceIsAlive, queue: listenerQueue) { [weak self] in
-                self?.checkAlive()
-            },
-            PropertyListener(object: device, selector: kAudioDevicePropertyNominalSampleRate, queue: listenerQueue) { [weak self] in
-                self?.updateSampleRate()
-            },
-        ]
+        started = true
     }
 
     func stop() {

@@ -5,11 +5,13 @@ import Foundation
 signal(SIGPIPE, SIG_IGN)
 setvbuf(stdout, nil, _IOLBF, 0)
 
-// 测试用的临时目录都在这下面：开始前清掉上次的；全部通过再删掉，没通过的留着排查
-let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("zsmeet-recorder-tests", isDirectory: true)
-try? FileManager.default.removeItem(at: scratch)
+// 这次运行的临时目录，测试用的文件都在这下面。每次运行单独一个：同时跑好几次（比如几个工作区一起测）
+// 也不会删掉别的运行正在用的。全部通过再删掉，没通过的留着排查
+let scratch = FileManager.default.temporaryDirectory
+    .appendingPathComponent("zsmeet-recorder-tests", isDirectory: true)
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
-let passed = Harness.run(formatTests + audioTests + recordingTests + endToEndTests)
+let passed = Harness.run(harnessTests + formatTests + audioTests + recordingTests + endToEndTests)
 if passed {
     try? FileManager.default.removeItem(at: scratch)
     print("全部通过")

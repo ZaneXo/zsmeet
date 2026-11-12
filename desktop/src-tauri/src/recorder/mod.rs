@@ -41,6 +41,9 @@ pub const CHUNK_SECONDS: u32 = 10;
 const MAX_SECONDS: f64 = 6.0 * 3600.0 - 120.0;
 /// 一场最多标记多少个重点，和服务器一致。
 const MAX_MARKS: usize = 500;
+/// 服务器一场会议最多收多少片（序号 0 到 3999，见 internal/service/meetings.go 的 MaxChunks）。
+/// 录音程序的 --start-seq 也只收这个范围
+const MAX_CHUNKS: u32 = 4000;
 /// 暂停、继续最多等录音程序多久。
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 /// 开始录音前取会议标题最多等多久：服务器慢的话不等了，先录着（标题传完时再补上）。
@@ -65,9 +68,11 @@ const START_TIMEOUT: &str =
     "录音程序一直没有开始录音，请再试一次。如果弹出了系统的权限提示，请先点「好」或「允许」";
 const CRASHED: &str =
     "录音程序意外退出了。已经录好的部分都在，可以接着录，也可以直接结束、把录好的传上去";
+const KILLED: &str = "录音程序一直没能结束，被强制关掉了，最后几秒可能没有保存下来。已经录好的部分都在，可以接着录，也可以直接结束、把录好的传上去";
 const APP_QUIT: &str =
     "录音时 zsmeet 意外退出了。已经录好的部分都在，可以接着录，也可以直接结束、把录好的传上去";
 const NOTHING_RECORDED: &str = "什么也没有录下来。";
+const CHUNKS_FULL: &str = "这场录音的分片数已经到了服务器能收的上限（4000 片），不能再接着录了。可以直接结束、把录好的传上去";
 const MAX_REACHED: &str =
     "已经录了将近 6 个小时，达到单场录音的上限，自动结束了。录好的部分会照常上传";
 const RELOGIN: &str = "登录已失效，重新登录这个账号后会自动接着传";
@@ -84,13 +89,14 @@ pub struct RecorderState {
     pub seconds: f64,
     /// 两路声音现在的音量（0 到 1）。还没开始录时是 null
     pub level: Option<Level>,
-    /// 在录的麦克风的名字。不录麦克风（或者录不了）时是 null
+    /// 在录的麦克风的名字。不录麦克风（或者开始时就录不了）时是 null；录到一半断开了还是它的名字，
+    /// warnings 里有提醒
     pub mic: Option<String>,
     /// 在录电脑的声音
     pub system: bool,
     pub marks: Vec<f64>,
-    /// 有一路声音录不了的提醒（没有权限、设备不在），另一路照常录。没能开始录音时是录音程序给的提醒，
-    /// 说明为什么开始不了，下次开始录音时清掉
+    /// 有一路声音录不了的提醒（没有权限、设备不在），另一路照常录。同一个 code 说的事不一样时都留着。
+    /// 没能开始录音时是录音程序给的提醒，说明为什么开始不了，下次开始录音时清掉
     pub warnings: Vec<Warning>,
     /// 上一场录音不正常结束的原因（中断了、录满时长自动结束了）。下次开始录音时清掉
     pub error: Option<String>,
@@ -168,7 +174,7 @@ pub struct RecorderOptions {
     pub retry_waits: Vec<Duration>,
     /// 开始录音最多等多久（第一次录音时系统会弹出麦克风权限的提示，要等用户点）
     pub start_timeout: Duration,
-    /// 结束录音最多等录音程序多久
+    /// 结束录音（包括退出 App 时）最多等录音程序多久，到时还不退出就强制结束，这场录音算中断
     pub stop_timeout: Duration,
     /// 测试用：让录音程序拿这个音频文件代替麦克风和电脑的声音（--input-file，不要权限、不弹提示，
     /// 读完自动结束）。正式运行时是 None
@@ -185,6 +191,8 @@ impl RecorderOptions {
             chunk_seconds: CHUNK_SECONDS,
             retry_waits: RETRY_WAITS.to_vec(),
             start_timeout: Duration::from_secs(120),
+            // 录音程序自己最多花 8 秒（RecordSession.stopTimeout）写完最后一片，到时还没写完会报错退出：
+            // 多等一会儿，听它说完原因，不要在它写的时候把它强制关掉
             stop_timeout: Duration::from_secs(10),
             input_file: None,
             realtime: false,
@@ -257,8 +265,11 @@ struct Session {
     error: Option<String>,
     /// 录音程序报了 stopped
     stopped: bool,
-    /// 要它结束了（用户点了结束、退出 App、录满了）：没等到 stopped 就退出也算正常结束
+    /// 要它结束了（用户点了结束、退出 App、录满了）。只有报了 stopped 才算正常结束：
+    /// 没报就退出了（出错了、等太久被强制结束了），最后一片可能没写完，算中断
     stop_requested: bool,
+    /// 等太久，强制结束了
+    killed: bool,
     commands: mpsc::UnboundedSender<Command>,
     kill: Option<oneshot::Sender<()>>,
 }
@@ -282,11 +293,11 @@ impl Session {
 
 /// 录音程序是怎么退出的。
 enum Ending {
-    /// 正常结束（报了 stopped，或者是我们要它结束的）
+    /// 正常结束：报了 stopped，最后一片也写完了
     Stopped,
     /// 还没开始录就退出了（没有权限、设备都用不了……）
     NeverStarted(String),
-    /// 录到一半退出了
+    /// 录到一半退出了，或者结束时没写完最后一片就退出了
     Crashed(String),
 }
 
@@ -391,6 +402,11 @@ impl Recorder {
                 return Err(e);
             }
         };
+        if start_seq >= MAX_CHUNKS {
+            // 再录的分片服务器也不收了。录音程序也不接受这样的 --start-seq，它说的是参数的事，用户看不懂
+            self.abandon(id);
+            return Err(CHUNKS_FULL.into());
+        }
         // 等服务器回话的时候就被结束了（比如退出了 App）：不用再启动录音程序
         let cancelled = {
             let inner = self.inner.lock().unwrap();
@@ -493,6 +509,7 @@ impl Recorder {
             error: None,
             stopped: false,
             stop_requested: false,
+            killed: false,
             commands: tx,
             kill: None,
         });
@@ -563,8 +580,13 @@ impl Recorder {
         Ok((dir, 0))
     }
 
-    /// 接着录之前问服务器已经收到了哪几片，接着录的分片不能占用它们的序号（见 local::resume_seq）。
-    /// 连不上服务器时照样接着录：这台电脑上记着的就是全部。
+    /// 接着录、直接结束之前问服务器已经收到了哪几片：接着录的分片不能占用它们的序号，complete 的片数也要算上它们
+    /// （见 Local::catch_up）。
+    ///
+    /// 连不上服务器、服务器出错、回复看不懂时照这台电脑上记着的来，也不会占用服务器上已有的序号：一片传上去以后，
+    /// 要等记着它的 recording.json（next_seq、uploaded 都算上了它）存好了才删本地的文件，所以服务器上的每一片，
+    /// 要么 recording.json 的 next_seq 已经算上了，要么文件还在这台电脑上，resume_seq 都会跳过。
+    /// 问服务器是多一道保险，防的是 recording.json 退回了上一份这类意外。
     async fn received_chunks(
         &self,
         meeting_id: &str,
@@ -572,10 +594,15 @@ impl Recorder {
     ) -> Result<Vec<u32>, String> {
         match upload::received(&self.client, account, meeting_id, TITLE_TIMEOUT).await {
             Ok(received) => Ok(received),
-            Err(Outcome::Retry(_)) => Ok(Vec::new()),
+            Err(Outcome::Retry(reason)) => {
+                log::warn!(
+                    "{meeting_id}：没能问到服务器收到了哪几片（{reason}），照这台电脑上记着的来"
+                );
+                Ok(Vec::new())
+            }
             Err(Outcome::Unauthorized) => {
                 self.core.unauthorized(&account.token);
-                Err("登录已失效，请重新登录后再录音".into())
+                Err("登录已失效，请重新登录后再试".into())
             }
             // 会议被删了、没有权限了：接着录也传不上去
             Err(Outcome::Fatal(reason) | Outcome::Conflict(reason)) => Err(reason),
@@ -603,21 +630,9 @@ impl Recorder {
         let l = recordings.get_mut(meeting_id).ok_or(NOT_HERE)?;
         local::remove_partials(&l.dir);
         local::recover(&l.dir, &mut l.rec);
-        // 接着录的声音从已经存下的部分后面算起：中断前最后一片之后点的标记会指到新录的声音上，不要了，
-        // 服务器上存的那份也换掉
-        if l.drop_lost_marks() {
-            l.marks_dirty = true;
-        }
-        let start_seq = local::resume_seq(&l.dir, &l.rec, received);
-        if start_seq > l.rec.next_seq {
-            // 这台电脑上记的比实际录下的少（recording.json 没存上）：跳过这几个序号，绝不覆盖已有的分片。
-            // 跳过的分片服务器上有的，上传时会认出来；都没有的话这段录音缺了一块，上传时会说明
-            log::warn!(
-                "{meeting_id}：recording.json 记的下一片序号是 {}，这台电脑或服务器上已经有更靠后的分片，从序号 {start_seq} 接着录",
-                l.rec.next_seq
-            );
-            l.rec.next_seq = start_seq;
-        }
+        l.catch_up(received, self.opts.chunk_seconds);
+        // 接着录的声音从已经存下的部分后面算起：中断前最后一片之后点的标记会指到新录的声音上，不要了
+        l.drop_lost_marks();
         l.rec.status = Status::Recording;
         l.fatal = false;
         l.save();
@@ -786,7 +801,13 @@ impl Recorder {
                     }
                 }
                 Event::Warning { code, message } => {
-                    if !s.warnings.iter().any(|w| w.code == code) {
+                    // 同一个 code 可能先后有几条说的不是一回事（开始时改用了别的麦克风，后来它又断开了），
+                    // 都要给用户看；一模一样的只留一条
+                    if !s
+                        .warnings
+                        .iter()
+                        .any(|w| w.code == code && w.message == message)
+                    {
                         s.warnings.push(Warning { code, message });
                     }
                 }
@@ -809,12 +830,15 @@ impl Recorder {
             let Some(s) = inner.session.take_if(|s| s.id == id) else {
                 return;
             };
-            let ending = if s.stopped || s.stop_requested {
+            let ending = if s.stopped {
                 Ending::Stopped
             } else if s.phase == Phase::Starting {
                 Ending::NeverStarted(s.error.clone().unwrap_or_else(|| start_failed(status)))
             } else {
-                Ending::Crashed(s.error.clone().unwrap_or_else(|| CRASHED.into()))
+                // 没报 stopped 就退出了：哪怕是要它结束的（录音程序自己说结束卡住了、等太久被强制结束了），
+                // 最后一片也可能没写完。不能当成正常结束直接交给服务器处理，算中断，让用户决定接着录还是直接结束
+                let fallback = if s.killed { KILLED } else { CRASHED };
+                Ending::Crashed(s.error.clone().unwrap_or_else(|| fallback.into()))
             };
             let Inner {
                 recordings,
@@ -895,6 +919,7 @@ impl Recorder {
         let mut inner = self.inner.lock().unwrap();
         if let Some(s) = inner.session.as_mut().filter(|s| s.id == id) {
             if let Some(kill) = s.kill.take() {
+                s.killed = true;
                 let _ = kill.send(());
             }
         }
@@ -980,9 +1005,10 @@ impl Recorder {
         Ok(self.state())
     }
 
-    /// 退出 App 前：结束正在录的，最多等 timeout，录音程序还不退出就强制结束。没传完的下次打开 App 接着传。
-    pub async fn shutdown(&self, timeout: Duration) {
-        self.end(timeout).await;
+    /// 退出 App 前：结束正在录的，和点了结束一样等录音程序写完最后一片（最多 stop_timeout），还不退出就强制结束
+    /// （这场录音算中断）。没传完的下次打开 App 接着传。
+    pub async fn shutdown(&self) {
+        self.end(self.opts.stop_timeout).await;
     }
 
     async fn end(&self, timeout: Duration) {
@@ -1008,35 +1034,34 @@ impl Recorder {
     }
 
     /// 中断了的录音不接着录了：把录好的传完，告诉服务器开始处理。传不上去的录音也可以用它再试一次。
-    pub fn finish(&self, meeting_id: &str) -> Result<RecorderState, String> {
+    /// 和接着录一样，先问服务器收到了哪几片：recording.json 记少了的话，complete 的片数要算上服务器上、
+    /// 这台电脑上已有的（不然服务器会说收到的分片比声明的多），时长也要算上，丢掉的标记才对。
+    pub async fn finish(&self, meeting_id: &str) -> Result<RecorderState, String> {
         let account = self.core.account().ok_or("请先登录")?;
+        if finishable(&mut self.inner.lock().unwrap(), meeting_id, &account)?.is_none() {
+            return Ok(self.state());
+        }
+        let received = self.received_chunks(meeting_id, &account).await?;
         {
             let mut inner = self.inner.lock().unwrap();
-            if inner
-                .session
-                .as_ref()
-                .is_some_and(|s| s.meeting_id == meeting_id)
-            {
-                return Err("这场会议正在录音，请点「结束录音」".into());
-            }
-            let l = inner
-                .recordings
-                .get_mut(meeting_id)
-                .filter(|l| l.rec.belongs_to(&account.server, &account.user_id))
-                .ok_or(NOT_HERE)?;
-            match l.rec.status {
-                Status::Interrupted | Status::Failed => {
+            // 等服务器回话的时候可能变了（接着录了、删掉了、已经结束了）：再看一遍
+            let finished = match finishable(&mut inner, meeting_id, &account)? {
+                Some(l) => {
+                    l.catch_up(&received, self.opts.chunk_seconds);
+                    // 中断前最后一片之后点的标记不要了；服务器上存过的话也换掉，complete 带的标记是空的时
+                    // 服务器会留着原来的
                     l.drop_lost_marks();
                     l.rec.status = Status::Stopped;
                     l.rec.error = None;
                     l.fatal = false;
                     l.ready();
                     l.save();
-                    inner.error = None;
+                    true
                 }
-                // 已经在传、已经传完了
-                Status::Stopped | Status::Completed => {}
-                Status::Recording => return Err("这场会议正在录音，请点「结束录音」".into()),
+                None => false,
+            };
+            if finished {
+                inner.error = None;
             }
         }
         self.wake.notify_one();
@@ -1091,12 +1116,33 @@ impl Local {
         }
     }
 
-    /// 中断前最后一片之后点的标记：对应的那段录音没存下来，不要了。去掉了返回 true。
-    fn drop_lost_marks(&mut self) -> bool {
+    /// 中断前最后一片之后点的标记：对应的那段录音没存下来，不要了。服务器上存的那份也要换掉。
+    fn drop_lost_marks(&mut self) {
         let seconds = self.rec.seconds;
         let before = self.rec.marks.len();
         self.rec.marks.retain(|t| *t <= seconds);
-        self.rec.marks.len() != before
+        if self.rec.marks.len() != before {
+            self.marks_dirty = true;
+        }
+    }
+
+    /// 接着录、直接结束之前：这台电脑上、服务器上（received）有 recording.json 没记上的分片时（比如 recording.json
+    /// 退回了上一份），下一片的序号挪到它们后面（见 local::resume_seq），绝不覆盖已有的分片，complete 的片数也对；
+    /// 跳过的分片的时长也算上，新标记的时间、丢掉哪些标记、录满 6 小时自动结束都和服务器上接起来的录音对得上。
+    /// 跳过的分片服务器上有的，上传时会认出来；都没有的话这段录音缺了一块，上传时会说明。
+    fn catch_up(&mut self, received: &[u32], chunk_seconds: u32) {
+        let next = local::resume_seq(&self.dir, &self.rec, received);
+        if next <= self.rec.next_seq {
+            return;
+        }
+        let skipped = local::skipped_seconds(&self.dir, self.rec.next_seq, next, chunk_seconds);
+        log::warn!(
+            "{}：recording.json 记的下一片序号是 {}，这台电脑或服务器上已经有更靠后的分片，从序号 {next} 接着算（跳过的分片约 {skipped:.1} 秒）",
+            self.rec.meeting_id,
+            self.rec.next_seq
+        );
+        self.rec.next_seq = next;
+        self.rec.seconds += skipped;
     }
 
     /// 存 recording.json。没存上（比如磁盘满了）返回 false。
@@ -1213,6 +1259,33 @@ fn snapshot(inner: &Inner, account: Option<&Account>) -> RecorderState {
         state.uploads = mine.into_iter().map(Local::upload).collect();
     }
     state
+}
+
+/// 这个账号能不能直接结束（finish）这台电脑上的这场录音。返回要结束的那一场（中断了、传不上去了）；
+/// 已经在传、已经传完了的不用再做什么，返回 None。
+fn finishable<'a>(
+    inner: &'a mut Inner,
+    meeting_id: &str,
+    account: &Account,
+) -> Result<Option<&'a mut Local>, String> {
+    if inner
+        .session
+        .as_ref()
+        .is_some_and(|s| s.meeting_id == meeting_id)
+    {
+        return Err("这场会议正在录音，请点「结束录音」".into());
+    }
+    let l = inner
+        .recordings
+        .get_mut(meeting_id)
+        .filter(|l| l.rec.belongs_to(&account.server, &account.user_id))
+        .ok_or(NOT_HERE)?;
+    match l.rec.status {
+        Status::Interrupted | Status::Failed => Ok(Some(l)),
+        // 已经在传、已经传完了
+        Status::Stopped | Status::Completed => Ok(None),
+        Status::Recording => Err("这场会议正在录音，请点「结束录音」".into()),
+    }
 }
 
 /// 读出录音目录里的每一场录音。上次 App 退出时还在录的算中断；已经完成的、一片都没录下来的删掉。

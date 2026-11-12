@@ -7,6 +7,7 @@
 # 需要 ffmpeg 和 ffprobe（brew install ffmpeg）。
 #
 # 用法：desktop/recorder/test.sh
+#       只跑名字里有某几个字的测试：ZSMEET_RECORDER_TEST_FILTER=暂停 desktop/recorder/test.sh
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

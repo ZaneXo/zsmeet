@@ -4,7 +4,7 @@ import { useSearchParams } from "react-router";
 import { errorMessage } from "../api/client";
 import type { User } from "../api/client";
 import { Button, Card, Notice } from "../components/ui";
-import { logout, openServerPage, switchServer, useDesktopState } from "./desktop";
+import { logout, openServerPage, switchServer, useDesktopState, useSigningOut } from "./desktop";
 import { useRecorder } from "./recorder";
 import { signOutNote } from "./recorderView";
 
@@ -29,6 +29,9 @@ export function DesktopAccountSection({ user }: { user: User }) {
   const signOut = useMutation({ mutationFn: logout });
   const change = useMutation({ mutationFn: switchServer });
   const open = useMutation({ mutationFn: (path: string) => openServerPage(path) });
+  // 退出登录、切换服务器一次只能做一个（见 desktop.ts）：有一个在做时，不管是这里还是导航栏上点的，
+  // 这两件事的按钮都变灰（这里点了、还没轮到 desktop.ts 的也算）
+  const busy = useSigningOut() || signOut.isPending || change.isPending;
   const failure = signOut.error ?? change.error ?? open.error;
   const leaveNote = signOutNote(recorder, "退出登录");
   const switchNote = signOutNote(recorder, "切换服务器");
@@ -55,7 +58,7 @@ export function DesktopAccountSection({ user }: { user: User }) {
                 if (leaveNote) setLeaving(true);
                 else signOut.mutate();
               }}
-              disabled={signOut.isPending}
+              disabled={busy}
             >
               {signOut.isPending ? "正在退出…" : "退出登录"}
             </Button>
@@ -66,6 +69,7 @@ export function DesktopAccountSection({ user }: { user: User }) {
                 setLeaving(false);
                 setSwitching(true);
               }}
+              disabled={busy}
             >
               切换服务器
             </Button>
@@ -75,7 +79,7 @@ export function DesktopAccountSection({ user }: { user: User }) {
           <div className="mt-3 flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-sm">
             <span className="text-ink-2">{leaveNote || "确定退出登录吗？"}</span>
             <span className="flex gap-2">
-              <Button size="sm" variant="primary" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
+              <Button size="sm" variant="primary" disabled={busy} onClick={() => signOut.mutate()}>
                 {signOut.isPending ? "正在退出…" : "退出登录"}
               </Button>
               <Button size="sm" onClick={() => setLeaving(false)}>
@@ -90,8 +94,8 @@ export function DesktopAccountSection({ user }: { user: User }) {
               切换服务器会先退出这台服务器上的登录，这台电脑上保存的离线内容也会删掉。{switchNote}
             </span>
             <span className="flex gap-2">
-              <Button size="sm" variant="primary" disabled={change.isPending} onClick={() => change.mutate()}>
-                退出并切换
+              <Button size="sm" variant="primary" disabled={busy} onClick={() => change.mutate()}>
+                {change.isPending ? "正在切换…" : "退出并切换"}
               </Button>
               <Button size="sm" onClick={() => setSwitching(false)}>
                 取消

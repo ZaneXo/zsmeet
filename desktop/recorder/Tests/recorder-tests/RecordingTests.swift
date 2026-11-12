@@ -7,11 +7,15 @@ let recordingTests: [(String, () throws -> Void)] = [
     ("分片：按包切，写的时候是 .part，写满落盘改名", testChunkWriter),
     ("分片：从文件名认出序号", testChunkSeqFromFileName),
     ("录音目录：建好，不覆盖已经录好的分片", testOutputDirectory),
+    ("录音目录：列不出里面有什么时不录（看不到已经录好的分片，会覆盖掉）", testOutputDirectoryUnreadable),
+    ("分片和录音小程序新建的目录只有自己能读写", testPrivatePermissions),
     ("暂停：丢掉暂停期间的声音，正在写的分片先落盘", testPipelinePause),
     ("现场录音：按时钟出声音，两路时钟快慢不一也对得上", testLiveEngineFollowsClock),
     ("现场录音：处理线程卡住 2 秒，补上时一点声音都不丢", testLiveEngineCatchesUpAfterStall),
     ("现场录音：点暂停前采到的都编进去，暂停期间采到的一点都不编", testLiveEnginePause),
     ("现场录音：麦克风一直全是 0 时提醒一次", testLiveEngineSilenceWarning),
+    ("现场录音：一路的采样率处理不了时只去掉这一路并提醒，另一路照常录", testLiveEngineDropsUnsupportedSource),
+    ("现场录音：转换采样率出错时提醒一次，录音不停", testLiveEngineConversionError),
 ]
 
 /// 数一数 ADTS 帧，不是完整的 ADTS 流时返回 nil
@@ -101,6 +105,45 @@ func testOutputDirectory() throws {
     defer { FileManager.default.changeCurrentDirectoryPath(previous) }
     let relative = try OutputDirectory.prepare("rel", startSeq: 0)
     expect(relative.path.hasPrefix("/") && relative.path.hasSuffix("/rel"), relative.path)
+}
+
+func testOutputDirectoryUnreadable() throws {
+    let url = try temporaryDirectory("unreadable")
+    FileManager.default.createFile(atPath: url.appendingPathComponent("3.aac").path, contents: Data([1]))
+    // 只能写、不能读（-wx------）：列不出里面有什么，看不到 3.aac，从第 0 片录到第 3 片时会覆盖它
+    expectEqual(chmod(url.path, 0o300), 0)
+    defer { chmod(url.path, 0o700) }
+    let path = url.standardizedFileURL.path
+    expectThrows(RecorderFailure("out_dir", "录音目录 \(path) 读不了，看不到里面已经录好的分片，接着录可能会覆盖掉它们。请检查权限。")) {
+        _ = try OutputDirectory.prepare(url.path, startSeq: 0)
+    }
+}
+
+/// 文件或目录的权限，八进制，比如 "600"
+private func permissions(_ url: URL) -> String {
+    guard let mode = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int else { return "读不到" }
+    return String(mode & 0o777, radix: 8)
+}
+
+func testPrivatePermissions() throws {
+    let base = try temporaryDirectory("private")
+    // 录音小程序自己建的目录，包括中间的：0700，和 App 建的一样
+    let url = try OutputDirectory.prepare(base.appendingPathComponent("a/b").path, startSeq: 0)
+    expectEqual(permissions(url), "700", "新建的录音目录")
+    expectEqual(permissions(url.deletingLastPathComponent()), "700", "新建的中间目录")
+
+    // 分片写的时候（.part）和改名以后都是 0600；上次没写完留下来的 .part（0644）接着用时也改成 0600
+    let leftover = url.appendingPathComponent("0.aac.part")
+    FileManager.default.createFile(atPath: leftover.path, contents: Data([1]), attributes: [.posixPermissions: 0o644])
+    let writer = ChunkWriter(directory: url, startSeq: 0, chunkSeconds: 10)
+    let packet = [UInt8](repeating: 0xAB, count: 100)
+    _ = try packet.withUnsafeBytes { try writer.append(packet: $0) }
+    expectEqual(permissions(leftover), "600", "接着用的 .part")
+    let chunk = try writer.finishChunk()
+    expectEqual(permissions(URL(fileURLWithPath: chunk?.path ?? "")), "600", "写好的分片")
+    _ = try packet.withUnsafeBytes { try writer.append(packet: $0) }
+    expectEqual(permissions(url.appendingPathComponent("1.aac.part")), "600", "新建的 .part")
+    writer.abandon()
 }
 
 private func sine(seconds: Double, frequency: Double = 300) -> [Float] {
@@ -320,4 +363,50 @@ func testLiveEngineSilenceWarning() throws {
     normal.run(ticks: 400) { noisy.push(960, value: 0.0001) }
     expectEqual(normal.events.names.filter { $0 == "warning" }, [])
     _ = normal.stop()
+}
+
+func testLiveEngineDropsUnsupportedSource() throws {
+    // 电脑的输出设备设成了 768 kHz：转换器只支持 8 kHz 到 384 kHz
+    let mic = FakeSource(kind: .mic)
+    let system = FakeSource(kind: .system, sampleRate: 768_000)
+    let fixture = try LiveFixture([mic, system])
+    expect(fixture.engine.sources.count == 1 && fixture.engine.sources.first === mic, "只录麦克风")
+    expect(system.stopped, "处理不了的那一路停掉")
+    expect(!mic.stopped, "另一路照常录")
+    expectEqual(fixture.events.all, [#"{"event":"warning","code":"system_unavailable","message":"电脑声音的采样率是 768000 Hz，处理不了，录不到会议软件里其他人的声音。到「音频 MIDI 设置」里把正在用的扬声器或耳机改成 48000 Hz，再重新开始录音。"}"#])
+    fixture.run(ticks: 50) { mic.push(960) }
+    expectEqual(fixture.pipeline.recordedSamples, 48_000, "照常录")
+    guard case .success? = fixture.stop() else {
+        Harness.fail("没有正常结束")
+        return
+    }
+
+    // 一路都不剩：录不了（no_source），处理不了的那一路也提醒了
+    let events = RecordedEvents()
+    let low = FakeSource(kind: .mic, sampleRate: 4_000)
+    let pipeline = RecordingPipeline(encoder: try AACEncoder(),
+                                     chunks: ChunkWriter(directory: try temporaryDirectory("unsupported"), startSeq: 0, chunkSeconds: 10),
+                                     events: events)
+    expectThrows(RecorderFailure.noSource) {
+        _ = try LiveEngine(sources: [low], pipeline: pipeline, events: events)
+    }
+    expect(low.stopped, "处理不了的那一路停掉")
+    expectEqual(events.all, [#"{"event":"warning","code":"mic_unavailable","message":"麦克风「测试麦克风」的采样率是 4000 Hz，处理不了，录不到你这边的声音。到「音频 MIDI 设置」里把它改成 48000 Hz，或者换一个麦克风，再重新开始录音。"}"#])
+}
+
+func testLiveEngineConversionError() throws {
+    let mic = FakeSource(kind: .mic, sampleRate: 44_100)
+    let fixture = try LiveFixture([mic])
+    fixture.run(ticks: 50) { mic.push(882) }
+    // 接下来两次转换出错（真的转换器几乎不出错，只能假装），出错的那两段声音丢了
+    fixture.engine.queue.sync { fixture.engine.resamplers[0].simulatedFailures = 2 }
+    fixture.run(ticks: 50) { mic.push(882) }
+    let warnings = fixture.events.all.filter { $0.contains(#""event":"warning""#) }
+    expectEqual(warnings, [#"{"event":"warning","code":"mic_unavailable","message":"处理麦克风「测试麦克风」的声音时出错，中间有一小段没录上，录音还在继续。经常这样的话，结束录音，换一个麦克风再录。"}"#],
+                "要提醒，而且只提醒一次")
+    expectEqual(fixture.pipeline.recordedSamples, 96_000, "录音没停，还是跟着时钟走")
+    guard case .success? = fixture.stop() else {
+        Harness.fail("没有正常结束")
+        return
+    }
 }

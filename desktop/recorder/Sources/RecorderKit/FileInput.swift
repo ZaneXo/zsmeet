@@ -55,7 +55,7 @@ public final class AudioFileReader {
 }
 
 /// 测试用的「麦克风」：按文件的实际时长一点一点写进环形缓冲，和真的设备一样走现场录音那一套
-/// （按时间混音、暂停时丢掉采到的声音）。读完了调用 onEnded。
+/// （按时间混音、暂停时丢掉采到的声音）。读完了调用 onEnded，读到一半出错调用 onFailed。
 public final class RealtimeFileSource: CaptureSource {
     public let kind = SourceKind.mic
     public let name: String
@@ -64,6 +64,8 @@ public final class RealtimeFileSource: CaptureSource {
     public let silenceWarning: String? = nil
     /// 文件读完了（在它自己的线程上调用）
     public var onEnded: (() -> Void)?
+    /// 读文件出错了，后面的都读不到（在它自己的线程上调用）。录音要以出错结束，不能当成读完了
+    public var onFailed: ((RecorderFailure) -> Void)?
 
     private let reader: AudioFileReader
     private let queue = DispatchQueue(label: "io.github.zanexo.zsmeet.recorder.realtime-file")
@@ -120,10 +122,9 @@ public final class RealtimeFileSource: CaptureSource {
             samples.withUnsafeBufferPointer { _ = zr_ring_write(ring, $0.baseAddress!, $0.count) }
             written += Int64(samples.count)
         } catch {
-            log("读测试文件出错：\(error)")
             timer?.cancel()
             timer = nil
-            onEnded?()
+            onFailed?(error as? RecorderFailure ?? RecorderFailure("input_file", "读音频文件出错：\(error)"))
         }
     }
 }

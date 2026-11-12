@@ -374,7 +374,9 @@ func (s *Service) PutChunk(ctx context.Context, user sqlc.User, id uuid.UUID, se
 		return err
 	}
 	if m.Status != "uploading" {
-		return conflict("这场会议已经上传完成，不能再传分片")
+		// 录音传完了，或者有人在会议页面上用已经收到的部分生成了纪要（录音的电脑这时才又连上）。
+		// 录音的网页、桌面版把这句话显示成这段录音传不上去的原因
+		return conflict("这场会议已经结束录音、开始处理了，剩下的录音传不上去了")
 	}
 	size, err := s.store.PutChunk(id, seq, body)
 	if err != nil {
@@ -430,8 +432,9 @@ func (s *Service) CompleteUpload(ctx context.Context, user sqlc.User, id uuid.UU
 		}
 		bytes += rows[i].Size
 	}
+	// 比说的多：多半是在会议页面上用已经收到的部分生成纪要时，录音的电脑又传上来了几片（页面上的片数是之前看到的）
 	if len(rows) > total {
-		return Meeting{}, conflict("收到的分片比声明的多，请重新上传")
+		return Meeting{}, conflict("服务器又收到了一些录音，请刷新页面再试")
 	}
 	if bytes > maxUploadBytes {
 		return Meeting{}, invalid("文件超过 %d GB，请压缩或拆分后再上传", maxUploadBytes>>30)

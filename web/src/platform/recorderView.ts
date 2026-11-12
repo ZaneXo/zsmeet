@@ -1,5 +1,7 @@
 // 桌面版录音的界面逻辑：把 Rust 推过来的录音状态（recorder.ts 的 RecorderState）换成界面上的话和按钮。
 // 不依赖 React 和 Tauri，方便单独测试（recorderView.test.ts）。
+// 引用别的文件里的值要带 .ts 后缀：测试用 Node 直接跑，它不会自己补后缀
+import { DESKTOP_CHUNK_MS } from "../lib/unfinishedRecording.ts";
 import type { Microphone, RecorderState, RecorderStatus, RecorderUpload, RecorderWarning } from "./recorder";
 
 /**
@@ -55,12 +57,9 @@ export function sentence(text: string): string {
   return /[。！？!?]$/u.test(t) ? t : `${clause(t)}。`;
 }
 
-/** 每片大约多少秒（录音程序默认的 --chunk-seconds）。 */
-const CHUNK_SECONDS = 10;
-
-/** 录下了多少片，说成大概多长时间。 */
+/** 录下了多少片，说成大概多长时间（每片约 10 秒，和会议页面上估算服务器收到了多长一样）。 */
 export function recordedLength(chunks: number): string {
-  const minutes = Math.round((chunks * CHUNK_SECONDS) / 60);
+  const minutes = Math.round((chunks * DESKTOP_CHUNK_MS) / 60_000);
   if (minutes < 1) return "不到 1 分钟";
   if (minutes < 60) return `大约 ${minutes} 分钟`;
   const rest = minutes % 60;

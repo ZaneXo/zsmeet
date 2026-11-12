@@ -66,6 +66,8 @@ function Consent({ req, appName, user }: { req: AppAuthorizeRequest; appName: st
     mutationFn: () => unwrap(api.POST("/api/logout")),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["status"] }),
   });
+  // 允许和退出不能同时进行：两个请求赛跑时，退出以后旧账号的授权码还是会发给 App
+  const busy = allow.isPending || logout.isPending;
 
   if (sent) {
     return (
@@ -115,16 +117,16 @@ function Consent({ req, appName, user }: { req: AppAuthorizeRequest; appName: st
         {allow.isError && <Notice tone="bad">{errorMessage(allow.error)}</Notice>}
         {logout.isError && <Notice tone="bad">{errorMessage(logout.error)}</Notice>}
         <div className="flex gap-2">
-          <Button variant="primary" className="flex-1" disabled={allow.isPending} onClick={() => allow.mutate()}>
+          <Button variant="primary" className="flex-1" disabled={busy} onClick={() => allow.mutate()}>
             {allow.isPending ? "正在允许…" : "允许"}
           </Button>
-          <Button className="flex-1" disabled={allow.isPending} onClick={() => send(appCallbackURL({ error: "denied" }, req.state), false)}>
+          <Button className="flex-1" disabled={busy} onClick={() => send(appCallbackURL({ error: "denied" }, req.state), false)}>
             取消
           </Button>
         </div>
         <p className="text-center text-xs text-muted">
           不是你的账号？
-          <button type="button" className="cursor-pointer text-brand hover:underline disabled:opacity-45" disabled={logout.isPending} onClick={() => logout.mutate()}>
+          <button type="button" className="cursor-pointer text-brand hover:underline disabled:opacity-45" disabled={busy} onClick={() => logout.mutate()}>
             退出后换一个账号登录
           </button>
         </p>

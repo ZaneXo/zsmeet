@@ -50,6 +50,8 @@ var (
 	errAppCode = invalid("登录没有完成：授权码无效或者已经过期。请回到 zsmeet 桌面版，重新点「在浏览器里登录」")
 	// 令牌不对、被吊销了、账号停用了
 	errAppToken = &Error{Unauthorized, "这台设备的登录已失效，请在 App 里重新登录"}
+	// 点「允许」的同时改了密码、被重置了密码或者停用了：这次网页登录已经作废，不能再给 App 发授权码
+	errSessionChanged = &Error{Unauthorized, "登录已失效（密码改过了，或者账号被停用了）。请重新登录后，回到 zsmeet 桌面版重新点「在浏览器里登录」"}
 )
 
 // AppToken 是一台登录着的 App。
@@ -71,6 +73,19 @@ func (s *Service) AuthorizeApp(ctx context.Context, user sqlc.User, client, devi
 	// 32 字节随机数，猜不出来，不用另外限制换令牌的次数
 	code, hash := newToken()
 	err = s.tx(ctx, func(_ pgx.Tx, q *sqlc.Queries) error {
+		// 和改密码、重置密码、停用账号排队（它们锁住这个人以后作废全部授权码，见 revokeAppAccess）：
+		// 它们先做完的话，这次请求带的登录已经作废了（session_epoch 变了），不发授权码；
+		// 这里先做完的话，它们会把这里发的授权码一起作废
+		locked, err := q.LockUser(ctx, user.ID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errSessionChanged
+		}
+		if err != nil {
+			return err
+		}
+		if locked.Disabled || locked.SessionEpoch != user.SessionEpoch {
+			return errSessionChanged
+		}
 		// 顺手清掉早就过期的授权码，免得表越来越大
 		if err := q.DeleteStaleAppAuthCodes(ctx); err != nil {
 			return err
@@ -93,7 +108,7 @@ func cleanDeviceName(name string) (string, error) {
 		return "", invalid("设备名不能为空，最长 %d 个字", maxDeviceName)
 	}
 	if !utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
-		return "", invalid("设备名里有不能显示的字符")
+		return "", invalid("设备名里有不能显示的字符。请在电脑的「系统设置 → 通用 → 关于本机」里把名称改成普通的文字，再回到 zsmeet 桌面版重新点「在浏览器里登录」")
 	}
 	return name, nil
 }

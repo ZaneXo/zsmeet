@@ -36,6 +36,8 @@ ALTER TABLE meetings ADD CONSTRAINT meetings_source_check CHECK (source IN ('rec
 
 -- +goose Down
 ALTER TABLE meetings DROP CONSTRAINT meetings_source_check;
+-- 回滚以后没有 desktop 这种来源了：桌面版录的会议算成录音，不然加不回旧的约束
+UPDATE meetings SET source = 'record' WHERE source = 'desktop';
 ALTER TABLE meetings ADD CONSTRAINT meetings_source_check CHECK (source IN ('record', 'upload', 'feishu'));
 DROP TABLE app_auth_codes;
 DROP TABLE app_tokens;

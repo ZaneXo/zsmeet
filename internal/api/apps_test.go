@@ -4,11 +4,16 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
@@ -365,5 +370,60 @@ func TestAppTokenLastUsedThrottled(t *testing.T) {
 	}
 	if r := c.want(c.do("GET", "/api/me/devices", nil), 200); r.Body["items"].([]any)[0].(obj)["last_used_at"] == nil {
 		t.Errorf("设备列表里要有上次使用的时间：%s", r.Raw)
+	}
+}
+
+// 点「允许」的请求读到登录的人以后、发授权码之前，他改了密码或者被停用了：这次登录已经作废，不能再发授权码。
+// 不然授权码在作废之后才写进去，改密码就没能让这台 App 退出
+func TestAuthorizeAppAfterSessionChanged(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	member := c.addMember("lihang@example.com", "李航")
+	id := uuid.MustParse(c.memberID("lihang@example.com"))
+	q := sqlc.New(c.pool)
+	_, challenge := pkce()
+	codes := func() int {
+		var n int
+		if err := c.pool.QueryRow(t.Context(), "SELECT count(*) FROM app_auth_codes WHERE user_id = $1", id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	refused := func(stale sqlc.User, what string) {
+		t.Helper()
+		before := codes()
+		_, err := c.svc.AuthorizeApp(t.Context(), stale, "desktop", "MacBook", challenge)
+		if se, ok := errors.AsType[*service.Error](err); !ok || se.Kind != service.Unauthorized || !strings.Contains(se.Msg, "重新登录") {
+			t.Errorf("%s以后还用原来的登录发授权码：%v", what, err)
+		}
+		if codes() != before {
+			t.Errorf("%s以后不该再发授权码", what)
+		}
+	}
+
+	// 请求开始时读到的人；接着他在别处改了密码
+	stale, err := q.GetUser(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member.want(member.do("POST", "/api/me/password", obj{"current_password": "member-pass-123", "new_password": "second-pass-456"}), 204)
+	refused(stale, "改密码")
+
+	// 被管理员停用
+	stale, err = q.GetUser(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.want(c.do("PATCH", "/api/members/"+id.String(), obj{"disabled": true}), 200)
+	refused(stale, "停用")
+
+	// 重新启用、用新登录：照常发
+	c.want(c.do("PATCH", "/api/members/"+id.String(), obj{"disabled": false}), 200)
+	fresh, err := q.GetUser(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.svc.AuthorizeApp(t.Context(), fresh, "desktop", "MacBook", challenge); err != nil {
+		t.Fatalf("登录有效时应该能发授权码：%v", err)
 	}
 }

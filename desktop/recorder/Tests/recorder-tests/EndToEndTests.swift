@@ -337,8 +337,8 @@ func testEndToEndPauseResume() throws {
     }
     checkChunks(run, out: out, firstSeq: 0)
     let recorded = lastEvent(run)["seconds"] as? Double ?? -1
-    // 6 秒的文件暂停了约 1.5 秒；开头先攒 0.15 秒的缓冲（静音），结束时再补进来
-    expectClose(recorded, 4.65, within: 0.4, "录到的秒数不算暂停")
+    // 6 秒的文件暂停了约 1.5 秒；开头先攒 0.15 秒的缓冲（静音），暂停时、结束时把攒着的各混出来 0.15 秒
+    expectClose(recorded, 4.8, within: 0.4, "录到的秒数不算暂停")
     let all = directory.appendingPathComponent("all.aac")
     try concatenate(chunkEvents(run), into: all)
     expectEqual(try FFmpeg.decodeErrors(all), "")

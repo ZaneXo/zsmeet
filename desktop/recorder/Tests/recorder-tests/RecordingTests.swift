@@ -9,7 +9,8 @@ let recordingTests: [(String, () throws -> Void)] = [
     ("录音目录：建好，不覆盖已经录好的分片", testOutputDirectory),
     ("暂停：丢掉暂停期间的声音，正在写的分片先落盘", testPipelinePause),
     ("现场录音：按时钟出声音，两路时钟快慢不一也对得上", testLiveEngineFollowsClock),
-    ("现场录音：暂停期间的时间不算", testLiveEnginePause),
+    ("现场录音：处理线程卡住 2 秒，补上时一点声音都不丢", testLiveEngineCatchesUpAfterStall),
+    ("现场录音：点暂停前采到的都编进去，暂停期间采到的一点都不编", testLiveEnginePause),
     ("现场录音：麦克风一直全是 0 时提醒一次", testLiveEngineSilenceWarning),
 ]
 
@@ -250,21 +251,59 @@ func testLiveEngineFollowsClock() throws {
     expectEqual(recording.nextSeq, 3)
 }
 
+func testLiveEngineCatchesUpAfterStall() throws {
+    let mic = FakeSource(kind: .mic)
+    let fixture = try LiveFixture([mic])
+    fixture.run(ticks: 50) { mic.push(960) }
+    let lane = fixture.engine.mixer.lanes[0]
+    let padded = lane.paddedSamples
+    // 处理线程卡了 2 秒（比如分片落盘时硬盘很忙）：麦克风照常往环形缓冲里写了 2 秒，下一次一起补上
+    fixture.clock.advance(milliseconds: 2_000)
+    mic.push(96_000)
+    fixture.engine.queue.sync { fixture.engine.tick() }
+    fixture.run(ticks: 50) { mic.push(960) }
+    expectEqual(lane.droppedSamples, 0, "卡住期间录下的声音不能当成积压丢掉")
+    expectEqual(lane.paddedSamples, padded, "也不用补静音")
+    expectEqual(zr_ring_total_dropped(mic.ring), 0)
+    expectEqual(fixture.pipeline.recordedSamples, 192_000, "出来的长度还是跟着时钟走")
+    _ = fixture.stop()
+}
+
+/// 某个事件之后的音量事件里，麦克风的音量
+private func micLevels(_ events: RecordedEvents, after name: String) -> [Double] {
+    let objects = events.all.compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+    guard let start = objects.firstIndex(where: { $0["event"] as? String == name }) else { return [] }
+    return objects[(start + 1)...].filter { $0["event"] as? String == "level" }.compactMap { $0["mic"] as? Double }
+}
+
 func testLiveEnginePause() throws {
     let mic = FakeSource(kind: .mic)
     let fixture = try LiveFixture([mic])
-    fixture.run(ticks: 100) { mic.push(960) }
+    // 暂停前、继续以后的声音很轻（音量 0.33），暂停期间的很响（音量 1）：编进去一点就看得出来
+    fixture.run(ticks: 100) { mic.push(960, value: 0.01) }
     fixture.engine.pause()
-    fixture.run(ticks: 50) { mic.push(960) }
+    fixture.engine.queue.sync {}
+    let lane = fixture.engine.mixer.lanes[0]
+    // 点暂停之前采到的 2 秒都编进去了（加上开头攒缓冲时补的静音），没有哪一点留在队列里
+    expectEqual(fixture.pipeline.recordedSamples, 96_000 + Int64(lane.paddedSamples), "点暂停前采到的声音要都编进去")
+    let beforePause = fixture.pipeline.recordedSamples
+
+    fixture.run(ticks: 50) { mic.push(960, value: 1) }
+    expectEqual(fixture.pipeline.recordedSamples, beforePause, "暂停期间什么都不编")
     fixture.engine.resume()
-    fixture.run(ticks: 100) { mic.push(960) }
-    expectEqual(fixture.pipeline.recordedSamples, 192_000, "5 秒里暂停了 1 秒")
+    fixture.engine.queue.sync {}
+    fixture.run(ticks: 100) { mic.push(960, value: 0.01) }
+    expectEqual(fixture.pipeline.recordedSamples - beforePause, 96_000, "继续以后的 2 秒")
     expectEqual(fixture.events.names.filter { $0 == "paused" || $0 == "resumed" }, ["paused", "resumed"])
+    let levels = micLevels(fixture.events, after: "resumed")
+    expectEqual(levels.count, 20, "继续以后每 0.1 秒一个音量")
+    expectEqual(levels.filter { $0 > 0.5 }, [], "暂停期间采到的声音编进去了")
+
     guard case .success(let recording)? = fixture.stop() else {
         Harness.fail("没有正常结束")
         return
     }
-    expectClose(recording.seconds, 4.15, within: 0.05, "4 秒，加上结束时队列里剩下的 0.15 秒")
+    expectClose(recording.seconds, 4.28, within: 0.01, "4 秒，加上暂停时、结束时各混出来的、队列里攒着的 0.14 秒")
 }
 
 func testLiveEngineSilenceWarning() throws {

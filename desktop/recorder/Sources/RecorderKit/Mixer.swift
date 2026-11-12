@@ -11,7 +11,7 @@ public enum SourceKind: Equatable {
 /// 每一路从自己的队列里取：
 /// - 刚开始（或者断过一次）先攒够 cushion 再开始取，抵消设备交数据的快慢；
 /// - 取的时候不够就补静音（设备卡了、断了），下次重新攒；
-/// - 积压超过 maxBacklog 就丢掉最早的，只留 cushion。
+/// - 积压（这一次该出的之外还攒着的）超过 maxBacklog 就丢掉最早的，只留 cushion。
 /// 这样两路一直对得上，录一个小时也不会越录越偏。
 public final class TimeMixer {
     public final class Lane {
@@ -41,16 +41,27 @@ public final class TimeMixer {
         self.maxBacklog = maxBacklog
     }
 
-    /// 混出 count 个采样写到 out（先清零），energy[i] 是第 i 路这一段的平方和（算音量用）
-    public func mix(count: Int, into out: UnsafeMutablePointer<Float>, energy: inout [Double]) {
+    /// 混出 count 个采样写到 out（先清零），energy[i] 是第 i 路这一段的平方和（算音量用）。
+    /// due：这一次一共该出多少。处理线程卡住以后分几次补上时，它是还没混的全部（包括这 count 个），
+    /// 积压按它算：卡住期间录下、等着补上的声音不是积压，不能丢。不给时就是 count
+    public func mix(count: Int, due: Int? = nil, into out: UnsafeMutablePointer<Float>, energy: inout [Double]) {
         out.initialize(repeating: 0, count: count)
+        let due = max(count, due ?? count)
         for (index, lane) in lanes.enumerated() {
-            energy[index] = take(count, from: lane, into: out)
+            energy[index] = take(count, due: due, from: lane, into: out)
         }
         clip(out, count: count)
     }
 
-    /// 录音结束：各路剩下的都混出来，长度按最长的那一路（短的后面补静音）。返回混出的个数。
+    /// 各路攒着的都不要了，从头重新攒（继续录音时：暂停期间采到的声音不能编进去）
+    public func reset() {
+        for lane in lanes {
+            lane.queue.removeAll()
+            lane.primed = false
+        }
+    }
+
+    /// 暂停、结束录音时：各路剩下的都混出来，长度按最长的那一路（短的后面补静音）。返回混出的个数。
     public func drain(into out: inout [Float], energy: inout [Double]) -> Int {
         let count = lanes.map(\.queue.count).max() ?? 0
         out = [Float](repeating: 0, count: count)
@@ -64,7 +75,7 @@ public final class TimeMixer {
         return count
     }
 
-    private func take(_ count: Int, from lane: Lane, into out: UnsafeMutablePointer<Float>) -> Double {
+    private func take(_ count: Int, due: Int, from lane: Lane, into out: UnsafeMutablePointer<Float>) -> Double {
         if !lane.primed {
             guard lane.queue.count >= cushion else {
                 lane.paddedSamples += count
@@ -72,7 +83,7 @@ public final class TimeMixer {
             }
             lane.primed = true
         }
-        let backlog = lane.queue.count - count
+        let backlog = lane.queue.count - due
         if backlog > maxBacklog {
             let excess = backlog - cushion
             lane.queue.drop(excess)

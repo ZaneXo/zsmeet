@@ -8,6 +8,7 @@ import {
   DEFAULT_SOURCES,
   discardConfirm,
   effectiveMic,
+  endedGone,
   endedUpload,
   IDLE_STATE,
   isBusy,
@@ -198,33 +199,52 @@ test("会议页面上：这场会议正在这台电脑上录", () => {
 // ---- 结束以后 ----
 
 test("录音页记下刚结束的那一场；又开始录就不再显示；开始失败不算", () => {
-  const live = state({ status: "recording", meetingId: "m1", title: "周会", seconds: 125.4, marks: [3, 60] });
-  const idle = state();
-  const ended = { meetingId: "m1", title: "周会", seconds: 125.4, marks: 2 };
+  const live = state({ status: "recording", meetingId: "m1", title: "周会", seconds: 125.4, marks: [3, 60], uploads: [upload({ status: "recording" })] });
+  const idle = state({ uploads: [upload()] });
+  const ended = { meetingId: "m1", title: "周会", seconds: 125.4, marks: 2, empty: false };
   assert.deepEqual(nextEnded(live, idle, null), ended);
   assert.deepEqual(nextEnded({ ...live, status: "paused" }, idle, null), ended);
   assert.deepEqual(nextEnded({ ...live, status: "stopping" }, idle, null), ended);
   // 结束中、空闲时的其他变化（上传进度）不影响
   assert.equal(nextEnded(live, { ...live, status: "stopping" }, null), null);
-  assert.deepEqual(nextEnded(idle, state({ uploads: [upload()] }), ended), ended);
+  assert.deepEqual(nextEnded(idle, state({ uploads: [upload({ uploaded: 5 })] }), ended), ended);
   // 又开始了
   assert.equal(nextEnded(idle, state({ status: "starting", meetingId: "m2" }), ended), null);
   assert.equal(nextEnded(idle, state({ status: "recording", meetingId: "m2" }), ended), null);
   // 没能开始：starting 直接回到 idle
-  assert.equal(nextEnded(state({ status: "starting", meetingId: "m2" }), idle, null), null);
+  assert.equal(nextEnded(state({ status: "starting", meetingId: "m2" }), state(), null), null);
 });
 
-test("刚结束的那一场不在上传列表里了，就是已经传完了", () => {
-  const ended = { meetingId: "m1", title: "周会", seconds: 60, marks: 0 };
+test("别的账号的录音结束了，不记成自己刚结束的那一场", () => {
+  // 上一个人的登录失效以后录音照常，换了人登录：它不在这个人的上传列表里
+  const theirs = state({ status: "stopping", meetingId: "m1", title: "别人的会", seconds: 600, marks: [5] });
+  assert.equal(nextEnded(theirs, state(), null), null);
+  // 结束之前就不给看是哪场会议了
+  assert.equal(nextEnded(state({ status: "stopping" }), state(), null), null);
+});
+
+test("结束时 App 把它删了、说了原因：一片都没录下来", () => {
+  const live = state({ status: "recording", meetingId: "m1", title: "周会", seconds: 3, uploads: [upload({ status: "recording", recorded: 0 })] });
+  const nothing = state({ error: "什么也没有录下来。" });
+  assert.deepEqual(nextEnded(live, nothing, null), { meetingId: "m1", title: "周会", seconds: 3, marks: 0, empty: true });
+  // 不在列表里了，但 App 没说为什么（同时换了账号）：不当成空的，不删服务器上的会议
+  assert.equal(nextEnded(live, state(), null)?.empty, false);
+});
+
+test("刚结束的那一场：传完了也还在列表里；不在了就说清楚为什么，不能说成已经传完", () => {
+  const ended = { meetingId: "m1", title: "周会", seconds: 60, marks: 0, empty: false };
   assert.deepEqual(endedUpload(state({ uploads: [upload()] }), ended), upload());
-  assert.deepEqual(endedUpload(state({ uploads: [upload({ meetingId: "m2" })] }), ended), {
-    meetingId: "m1",
-    title: "周会",
-    recorded: 0,
-    uploaded: 0,
-    status: "completed",
-    error: null,
-  });
+  assert.deepEqual(endedUpload(state({ uploads: [upload({ status: "completed", uploaded: 10 })] }), ended), upload({ status: "completed", uploaded: 10 }));
+  assert.equal(endedUpload(state({ uploads: [upload({ meetingId: "m2" })] }), ended), null);
+  // 被删掉了（中断了、传不上去的删了）
+  const deleted = endedGone(ended);
+  assert.equal(deleted.title, "录音已删除");
+  assert.match(deleted.text, /已经删掉了，不会再上传，这场会议也不会生成纪要/);
+  // 什么也没录下来
+  const empty = endedGone({ ...ended, empty: true });
+  assert.equal(empty.title, "什么也没有录下来");
+  assert.match(empty.text, /什么也没有录下来，不会生成纪要。可以再录一场。$/);
+  for (const gone of [deleted, empty]) assert.doesNotMatch(gone.text, /传上去|转写/);
 });
 
 test("传完了、被删掉了的录音要重新取会议", () => {

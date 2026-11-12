@@ -205,33 +205,42 @@ export function liveMeetingText(status: Exclude<RecorderStatus, "idle">, elapsed
 
 // ---- 结束以后：上传 ----
 
-/** 刚结束的那一场。marks 是标记了几个重点。 */
-export type Ended = { meetingId: string; title: string; seconds: number; marks: number };
+/**
+ * 刚结束的那一场。marks 是标记了几个重点。empty：一片都没录下来，App 已经把它删了，
+ * 服务器上为它建的会议是空的（见 recorder.ts 的 apply）。
+ */
+export type Ended = { meetingId: string; title: string; seconds: number; marks: number; empty: boolean };
 
 /**
  * 录音页上「录音已结束」显示哪一场：从录音中（含暂停、正在结束）回到 idle 时记下刚才那一场；
  * 又开始录了就不再显示。开始失败（starting 直接回到 idle）不算录过。
+ * 只记当前账号的录音（在它的上传列表里的）：别的账号的录音不给看。
+ * 结束时它从上传列表里没了、App 说了原因（error），就是一片都没录下来，App 把它删了。
  */
 export function nextEnded(prev: RecorderState, next: RecorderState, ended: Ended | null): Ended | null {
   if (next.status === "starting" || isLive(next.status)) return null;
-  if (next.status === "idle" && prev.meetingId && (isLive(prev.status) || prev.status === "stopping")) {
-    return { meetingId: prev.meetingId, title: prev.title ?? "", seconds: prev.seconds, marks: prev.marks.length };
+  const id = prev.meetingId;
+  const listed = (s: RecorderState) => s.uploads.some((u) => u.meetingId === id);
+  if (next.status === "idle" && id && (isLive(prev.status) || prev.status === "stopping") && listed(prev)) {
+    const empty = !listed(next) && next.error !== null;
+    return { meetingId: id, title: prev.title ?? "", seconds: prev.seconds, marks: prev.marks.length, empty };
   }
   return ended;
 }
 
-/** 刚结束的那一场的上传情况。上传列表里已经没有它了，说明已经传完了。 */
-export function endedUpload(state: RecorderState, ended: Ended): RecorderUpload {
-  return (
-    state.uploads.find((u) => u.meetingId === ended.meetingId) ?? {
-      meetingId: ended.meetingId,
-      title: ended.title,
-      recorded: 0,
-      uploaded: 0,
-      status: "completed",
-      error: null,
-    }
-  );
+/**
+ * 刚结束的那一场的上传情况（传完了的也在，App 重启以前一直留着）。这台电脑上已经没有它了
+ * （什么也没录下来，或者被删掉了）时是 null。
+ */
+export function endedUpload(state: RecorderState, ended: Ended): RecorderUpload | null {
+  return state.uploads.find((u) => u.meetingId === ended.meetingId) ?? null;
+}
+
+/** 刚结束的那一场在这台电脑上已经没有了：标题和说明。 */
+export function endedGone(ended: Ended): { title: string; text: string } {
+  return ended.empty
+    ? { title: "什么也没有录下来", text: "录音刚开始就结束了，什么也没有录下来，不会生成纪要。可以再录一场。" }
+    : { title: "录音已删除", text: "这台电脑上的这段录音已经删掉了，不会再上传，这场会议也不会生成纪要。不需要这场会议的话，可以在会议页面上删掉它。" };
 }
 
 /** 传完了、或者被删掉了的录音：服务器上这场会议的状态变了，要重新取。 */

@@ -1,7 +1,7 @@
 //! 录音的测试：假的录音程序（现写的一个 sh 脚本，按约定说话、写分片文件，开始后马上录好几片）
 //! 和假的服务器（记下收到的分片、标记、complete）。不碰麦克风，不弹系统的权限提示，不碰钥匙串。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -849,6 +849,42 @@ async fn continues_an_interrupted_recording_after_restart() {
 }
 
 #[tokio::test]
+async fn continuing_drops_marks_from_the_lost_tail() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 录到 25 秒时点了标记，接着录音程序崩溃了：存下来的两片一共 20 秒，25 秒那段声音没存下来
+    let mut rec = recording(&r.server, "u1", "m1", Status::Interrupted);
+    (rec.next_seq, rec.seconds, rec.marks) = (2, 20.0, vec![5.0, 25.0]);
+    plant(
+        &r.root,
+        &rec,
+        &[(0, b"audio-0".to_vec()), (1, b"audio-1".to_vec())],
+    );
+    r.restart();
+
+    // 接着录：接着录的声音从 20 秒算起，25 秒的标记会指到新录的声音上，不要了
+    let state = r.recorder.start("m1", None, true).await.unwrap();
+    assert_eq!(state.marks, vec![5.0]);
+    // 刚接上就点标记：记在 20 秒（不能因为比 25 秒早就当成连着点的）；连着点的只算一次
+    assert_eq!(r.recorder.mark().unwrap().marks, vec![5.0, 20.0]);
+    assert_eq!(r.recorder.mark().unwrap().marks, vec![5.0, 20.0]);
+    until("服务器上的标记换成新的", || {
+        r.mock.marks.lock().unwrap().last().map(|(_, body)| body)
+            == Some(&json!({ "marks": [5.0, 20.0] }))
+    })
+    .await;
+    r.recorder.stop().await.unwrap();
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m1", UploadStatus::Completed)
+    })
+    .await;
+    assert_eq!(
+        r.mock.completes_of("m1"),
+        [json!({ "chunks": 3, "marks": [5.0, 20.0] })]
+    );
+}
+
+#[tokio::test]
 async fn continuing_never_reuses_a_chunk_number() {
     let mut r = rig(Script {
         chunks: 1,
@@ -913,6 +949,32 @@ async fn never_sends_an_empty_chunk() {
         r.mock.attempts.lock().unwrap().is_empty(),
         "空的分片不发给服务器"
     );
+}
+
+#[tokio::test]
+async fn a_broken_recording_json_falls_back_to_the_previous_copy() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 录音时断电了：最后一次存的 recording.json 没写下去，变成全是 0；上一份还在
+    let mut rec = recording(&r.server, "u1", "m1", Status::Recording);
+    plant(&r.root, &rec, &[(0, b"audio-0".to_vec())]);
+    rec.marks = vec![3.0];
+    local::save(&r.root.join("m1"), &rec).unwrap();
+    std::fs::write(r.root.join("m1").join(local::RECORDING_FILE), [0u8; 256]).unwrap();
+    r.restart();
+
+    // 这场录音照样在，算中断，录好的照样能传上去
+    let state = r.recorder.state();
+    assert!(
+        upload_is(&state, "m1", UploadStatus::Interrupted),
+        "{state:#?}"
+    );
+    r.recorder.finish("m1").unwrap();
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m1", UploadStatus::Completed)
+    })
+    .await;
+    assert_eq!(r.mock.seqs("m1"), [0]);
 }
 
 #[tokio::test]
@@ -1037,13 +1099,22 @@ async fn another_account_signing_in_stops_the_recording() {
         upload(s, "m1").is_some_and(|u| u.uploaded == 1)
     })
     .await;
+    r.recorder.mark().unwrap();
 
-    // u1 的登录失效了，录音照常；接着 u2 在这台电脑上登录：u1 的录音结束，留着等 u1 回来
+    // u1 的登录失效了，录音照常（菜单栏上照样显示）；接着 u2 在这台电脑上登录：u1 的录音结束，留着等 u1 回来
     r.f.core.session_expired();
-    assert_eq!(r.recorder.state().status, Phase::Recording);
+    let state = r.recorder.state();
+    assert_eq!(state.status, Phase::Recording);
+    assert_eq!(state.meeting_id.as_deref(), Some("m1"));
     *r.mock.login_user.lock().unwrap() =
         json!({"id": "u2", "name": "李雷", "email": "li@example.com", "role": "member"});
     sign_in(&r.f, "u2").await;
+    // 结束之前 u2 也看不到 u1 在录哪场会议、录了多久、标了什么
+    let state = r.recorder.state();
+    assert_eq!(
+        (state.meeting_id, state.title, state.seconds, state.marks),
+        (None, None, 0.0, vec![])
+    );
     let state = wait_for(&r.recorder, "录音结束", |s| s.status == Phase::Idle).await;
     assert!(state.uploads.is_empty(), "u2 看不到 u1 的录音");
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1052,6 +1123,73 @@ async fn another_account_signing_in_stops_the_recording() {
     let rec = local::load(&r.root.join("m1")).unwrap();
     assert_eq!(rec.status, Status::Stopped);
     assert_eq!((rec.next_seq, rec.uploaded), (2, 1));
+}
+
+/// 账号 user 正在录 meeting 的会话（不用真的启动录音程序）。
+fn live_session(server: &str, user: &str, meeting: &str) -> Session {
+    Session {
+        id: 1,
+        meeting_id: meeting.into(),
+        server: server.into(),
+        user_id: user.into(),
+        phase: Phase::Recording,
+        fresh: true,
+        base_seconds: 0.0,
+        seconds: 12.0,
+        level: Some(Level {
+            mic: 0.5,
+            system: 0.25,
+        }),
+        mic: Some("MacBook Pro 麦克风".into()),
+        system: true,
+        warnings: vec![Warning {
+            code: "system_denied".into(),
+            message: "没有录电脑声音的权限".into(),
+        }],
+        error: None,
+        stopped: false,
+        stop_requested: false,
+        commands: tokio::sync::mpsc::unbounded_channel().0,
+        kill: None,
+    }
+}
+
+#[test]
+fn only_the_recording_account_sees_what_is_being_recorded() {
+    let server = "https://meet.example.com";
+    let account = |user: &str| Account {
+        server: server.into(),
+        user_id: user.into(),
+        token: format!("zsm_{user}"),
+    };
+    let mut rec = recording(server, "u1", "m1", Status::Recording);
+    rec.marks = vec![3.0];
+    let inner = Inner {
+        recordings: BTreeMap::from([("m1".to_string(), Local::new(rec, PathBuf::new()))]),
+        session: Some(live_session(server, "u1", "m1")),
+        next_session: 2,
+        error: None,
+        start_warnings: Vec::new(),
+        ended: None,
+    };
+
+    // 录音的人自己，和没人登录的时候（登录失效了，录音照常，菜单栏上要显示）：都能看
+    for who in [Some(account("u1")), None] {
+        let state = snapshot(&inner, who.as_ref());
+        assert_eq!(state.meeting_id.as_deref(), Some("m1"));
+        assert_eq!(state.title.as_deref(), Some("会议 m1"));
+        assert_eq!((state.seconds, state.marks.clone()), (12.0, vec![3.0]));
+        assert_eq!(state.warnings.len(), 1);
+    }
+    // 换了别人登录，上一个人的录音还没结束：只知道这台电脑在录音
+    let state = snapshot(&inner, Some(&account("u2")));
+    assert_eq!(state.status, Phase::Recording);
+    assert_eq!(
+        (state.meeting_id, state.title, state.seconds, state.level),
+        (None, None, 0.0, None)
+    );
+    assert_eq!((state.mic, state.system), (None, false));
+    assert!(state.marks.is_empty() && state.warnings.is_empty() && state.uploads.is_empty());
 }
 
 #[tokio::test]
@@ -1080,6 +1218,21 @@ async fn helper_crash_interrupts_and_recording_can_go_on() {
     let state = r.recorder.start("m1", None, true).await.unwrap();
     assert_eq!(state.error, None);
     assert!(helper_runs(r.f.dir.path())[1].contains("--start-seq 1"));
+}
+
+#[tokio::test]
+async fn helper_crash_before_the_first_chunk_says_nothing_was_recorded() {
+    let r = rig(Script {
+        crash: true,
+        ..Script::default()
+    })
+    .await;
+    r.recorder.start("m1", None, true).await.unwrap();
+    let state = wait_for(&r.recorder, "录音结束", |s| s.status == Phase::Idle).await;
+    // 一片都没录下来：不能说「录好的部分都在，可以接着录」，这场录音也不留
+    assert_eq!(state.error.as_deref(), Some(NOTHING_RECORDED));
+    assert!(upload(&state, "m1").is_none());
+    assert!(!r.root.join("m1").exists());
 }
 
 #[tokio::test]

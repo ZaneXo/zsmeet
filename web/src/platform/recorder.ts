@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
-import { errorMessage, queryClient } from "../api/client";
+import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import { onIdentityChange } from "./desktop";
 import { IDLE_STATE, nextEnded, normalizeState, parseSources, sentence, settledMeetings } from "./recorderView";
 import type { Ended, Sources } from "./recorderView";
@@ -85,7 +85,24 @@ function apply(raw: RecorderState) {
   const settled = settledMeetings(prev, next);
   for (const id of settled) void queryClient.invalidateQueries({ queryKey: ["meeting", id] });
   if (settled.length > 0) void queryClient.invalidateQueries({ queryKey: ["meetings"] });
-  update({ state: next, ended: nextEnded(prev, next, snap.ended) });
+  const ended = nextEnded(prev, next, snap.ended);
+  // 刚结束的这一场什么也没录下来：服务器上为它建的会议是空的，删掉
+  if (ended && ended !== snap.ended && ended.empty) void deleteEmptyMeeting(ended.meetingId);
+  update({ state: next, ended });
+}
+
+/**
+ * 删掉服务器上为录音刚建的一场空会议（连回收站里的一起）：没能开始录音，或者什么也没录下来，
+ * 免得留下一场一直等着上传的空会议。
+ */
+export async function deleteEmptyMeeting(meetingId: string) {
+  try {
+    await unwrap(api.DELETE("/api/meetings/{id}", { params: { path: { id: meetingId } } }));
+    await unwrap(api.DELETE("/api/trash/{id}", { params: { path: { id: meetingId } } }));
+  } catch {
+    // 删不掉也不要紧：会议列表里会多一场空会议，可以自己删
+  }
+  void queryClient.invalidateQueries({ queryKey: ["meetings"] });
 }
 
 let started = false;

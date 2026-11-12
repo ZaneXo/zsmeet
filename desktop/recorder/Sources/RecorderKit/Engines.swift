@@ -89,10 +89,12 @@ public final class LiveEngine: RecordingEngine {
 
     public func pause() {
         queue.async {
-            guard !self.finished else { return }
-            // 先把到现在为止的声音编进去，再暂停
+            guard !self.finished, !self.pipeline.isPaused else { return }
+            // 点暂停之前采到的声音都编进去：先按时间混到现在，再把各路攒着的（约 0.15 秒）也混出来
             self.tick()
+            guard !self.finished else { return }
             do {
+                try self.feedQueued()
                 try self.pipeline.pause()
             } catch {
                 self.fail(error)
@@ -102,9 +104,11 @@ public final class LiveEngine: RecordingEngine {
 
     public func resume() {
         queue.async {
-            guard !self.finished else { return }
-            // 暂停期间采到的声音在这里丢掉
+            guard !self.finished, self.pipeline.isPaused else { return }
+            // 暂停期间采到的声音都丢掉：按时间混到现在（还暂停着，混出来的不编码），再清掉各路攒着的。
+            // 继续以后重新攒，编进去的只有点了继续以后采到的声音
             self.tick()
+            self.mixer.reset()
             self.pipeline.resume()
         }
     }
@@ -123,9 +127,7 @@ public final class LiveEngine: RecordingEngine {
                 for index in self.sources.indices {
                     self.pull(index, final: true)
                 }
-                var rest: [Float] = []
-                let count = self.mixer.drain(into: &rest, energy: &self.energy)
-                try self.feed(rest, count: count)
+                try self.feedQueued()
                 let result = try self.pipeline.finish()
                 self.logStats()
                 self.finish(.success(result))
@@ -154,7 +156,8 @@ public final class LiveEngine: RecordingEngine {
             while due > 0 {
                 let count = Int(min(due, Int64(Self.maxMixSamples)))
                 mixed.withUnsafeMutableBufferPointer { buffer in
-                    mixer.mix(count: count, into: buffer.baseAddress!, energy: &energy)
+                    // 积压按这一次还要出的全部算：卡住期间录下的声音要分几次补上，不能当成积压丢掉
+                    mixer.mix(count: count, due: Int(due), into: buffer.baseAddress!, energy: &energy)
                 }
                 try feed(mixed, count: count)
                 produced += Int64(count)
@@ -163,6 +166,13 @@ public final class LiveEngine: RecordingEngine {
         } catch {
             fail(error)
         }
+    }
+
+    /// 各路攒着、还没混的声音都混出来交给 pipeline（暂停、结束时）。已经暂停着的话 pipeline 会丢掉它们
+    private func feedQueued() throws {
+        var rest: [Float] = []
+        let count = mixer.drain(into: &rest, energy: &energy)
+        try feed(rest, count: count)
     }
 
     private func feed(_ samples: [Float], count: Int) throws {

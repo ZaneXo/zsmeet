@@ -12,7 +12,7 @@ use tokio::time::Instant;
 
 use super::local::{self, Status};
 use super::upload::{self, Outcome};
-use super::{Inner, Local, Recorder, RELOGIN};
+use super::{Local, Recorder, RELOGIN};
 use crate::core::Account;
 
 /// 上传任务下一步做什么。
@@ -49,27 +49,24 @@ impl Recorder {
         let mut accounts = self.core.watch_account();
         while accounts.changed().await.is_ok() {
             let account = accounts.borrow_and_update().clone();
+            // 先让上一个账号的录音结束，再告诉界面：新登录的人只看到「正在结束录音」
             let someone_else = {
                 let mut inner = self.inner.lock().unwrap();
-                let Inner {
-                    session,
-                    recordings,
-                    ..
-                } = &mut *inner;
-                for l in recordings.values_mut() {
+                for l in inner.recordings.values_mut() {
                     l.ready();
                 }
-                match (&account, session.as_ref()) {
-                    (Some(a), Some(s)) => recordings
-                        .get(&s.meeting_id)
-                        .is_some_and(|l| !l.rec.belongs_to(&a.server, &a.user_id)),
-                    _ => false,
+                match (&account, inner.session.as_mut()) {
+                    (Some(a), Some(s)) if !s.belongs_to(a) => Some(s.request_stop()),
+                    _ => None,
                 }
             };
             self.wake.notify_one();
+            if someone_else.is_some() {
+                self.session_changed();
+            }
             self.changed();
-            if someone_else {
-                self.end(self.opts.stop_timeout).await;
+            if let Some(id) = someone_else {
+                self.wait_ended(id, self.opts.stop_timeout).await;
             }
         }
     }

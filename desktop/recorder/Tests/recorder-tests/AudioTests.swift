@@ -11,6 +11,7 @@ let audioTests: [(String, () throws -> Void)] = [
     ("混音：先攒够缓冲再取", testMixerWaitsForCushion),
     ("混音：来源跟不上时补静音，再重新攒", testMixerPadsWhenSourceFallsBehind),
     ("混音：积压超过上限时丢掉最早的", testMixerDropsBacklog),
+    ("混音：卡住以后分几次补上，等着补上的声音不算积压", testMixerCatchesUpInSeveralPasses),
     ("混音：两路相加，超过满幅的削掉", testMixerSumsAndClips),
     ("混音：结束时剩下的都混出来", testMixerDrain),
     ("音量：按分贝换算到 0…1", testLevelMeter),
@@ -121,10 +122,10 @@ func testRingDownmix() {
     expectEqual(writeBufferList(ring, []), 0)
 }
 
-private func mix(_ mixer: TimeMixer, _ count: Int) -> (samples: [Float], energy: [Double]) {
+private func mix(_ mixer: TimeMixer, _ count: Int, due: Int? = nil) -> (samples: [Float], energy: [Double]) {
     var out = [Float](repeating: 9, count: count)
     var energy = [Double](repeating: -1, count: mixer.lanes.count)
-    out.withUnsafeMutableBufferPointer { mixer.mix(count: count, into: $0.baseAddress!, energy: &energy) }
+    out.withUnsafeMutableBufferPointer { mixer.mix(count: count, due: due, into: $0.baseAddress!, energy: &energy) }
     return (out, energy)
 }
 
@@ -169,6 +170,21 @@ func testMixerDropsBacklog() {
     expectEqual(lane.droppedSamples, 850)
     expectEqual(lane.queue.count, 100)
     expectEqual(mix(mixer, 1).samples, [0.9])
+}
+
+func testMixerCatchesUpInSeveralPasses() {
+    let mixer = TimeMixer(kinds: [.mic], cushion: 100, maxBacklog: 400)
+    let lane = mixer.lanes[0]
+    // 处理线程卡了一阵：这一次该出 2000 个，分两次混；队列里攒着 2100 个，多出来的正好是 cushion
+    lane.queue.append((0..<2_100).map { Float($0) / 10_000 })
+    let first = mix(mixer, 1_000, due: 2_000)
+    let second = mix(mixer, 1_000, due: 1_000)
+    expectEqual(lane.droppedSamples, 0, "卡住期间录下的声音不能当成积压丢掉")
+    expectEqual(lane.paddedSamples, 0, "也不用补静音")
+    expectEqual(first.samples.first, 0)
+    expectEqual(second.samples.first, 0.1)
+    expectEqual(second.samples.last, 0.1999)
+    expectEqual(lane.queue.count, 100)
 }
 
 func testMixerSumsAndClips() {

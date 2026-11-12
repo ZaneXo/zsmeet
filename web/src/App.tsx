@@ -3,9 +3,8 @@ import { Navigate, Route, Routes, useLocation } from "react-router";
 import { api, errorMessage, unwrap } from "./api/client";
 import { Shell } from "./components/Shell";
 import { isDesktop } from "./platform";
-import { switchServer } from "./platform/desktop";
 import { DesktopRecordPage } from "./platform/DesktopRecord";
-import { DesktopNotInitialized, DesktopSessionExpired } from "./platform/DesktopScreens";
+import { DesktopNotInitialized, DesktopSessionExpired, SwitchServerButton } from "./platform/DesktopScreens";
 import { Button, Notice, Spinner } from "./components/ui";
 import { APP_AUTHORIZE_PATH, pendingAuthorize } from "./lib/appAuthorize";
 import { AccountLinkPage } from "./pages/AccountLink";
@@ -44,11 +43,7 @@ export function App() {
       <div className="mx-auto mt-24 flex max-w-md flex-col gap-4 px-4">
         <Notice tone="bad">{errorMessage(status.error)}</Notice>
         <Button onClick={() => status.refetch()}>重试</Button>
-        {isDesktop && (
-          <Button variant="ghost" onClick={() => void switchServer()}>
-            换一个服务器
-          </Button>
-        )}
+        {isDesktop && <SwitchServerButton variant="ghost" />}
       </div>
     );
   }

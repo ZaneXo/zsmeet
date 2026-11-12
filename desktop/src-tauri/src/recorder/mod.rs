@@ -77,7 +77,7 @@ const RELOGIN: &str = "登录已失效，重新登录这个账号后会自动接
 #[serde(rename_all = "camelCase")]
 pub struct RecorderState {
     pub status: Phase,
-    /// 正在录的会议。没在录时是 null
+    /// 正在录的会议。没在录时是 null；别的账号在录时也是 null，和它有关的字段（标题、时长、音量、标记、提醒）都是空的
     pub meeting_id: Option<String>,
     pub title: Option<String>,
     /// 录了多少秒，不算暂停的时间（接着录的从上次录到的地方算起）
@@ -240,6 +240,9 @@ struct Local {
 struct Session {
     id: u64,
     meeting_id: String,
+    /// 谁在录：开始录音时登录的账号（服务器、用户）
+    server: String,
+    user_id: String,
     phase: Phase,
     /// 新录的（不是接着录）：没录到东西就退出时整个删掉
     fresh: bool,
@@ -258,6 +261,23 @@ struct Session {
     stop_requested: bool,
     commands: mpsc::UnboundedSender<Command>,
     kill: Option<oneshot::Sender<()>>,
+}
+
+impl Session {
+    /// 是不是这个账号在录。
+    fn belongs_to(&self, account: &Account) -> bool {
+        self.server == account.server && self.user_id == account.user_id
+    }
+
+    /// 让录音程序结束（已经在结束了就不再说一遍）。返回会话编号，好等它退出。
+    fn request_stop(&mut self) -> u64 {
+        if self.phase != Phase::Stopping {
+            self.phase = Phase::Stopping;
+            self.stop_requested = true;
+            let _ = self.commands.send(Command::Stop);
+        }
+        self.id
+    }
 }
 
 /// 录音程序是怎么退出的。
@@ -460,6 +480,8 @@ impl Recorder {
         inner.session = Some(Session {
             id,
             meeting_id: meeting_id.to_string(),
+            server: account.server.clone(),
+            user_id: account.user_id.clone(),
             phase: Phase::Starting,
             fresh,
             base_seconds: 0.0,
@@ -581,6 +603,11 @@ impl Recorder {
         let l = recordings.get_mut(meeting_id).ok_or(NOT_HERE)?;
         local::remove_partials(&l.dir);
         local::recover(&l.dir, &mut l.rec);
+        // 接着录的声音从已经存下的部分后面算起：中断前最后一片之后点的标记会指到新录的声音上，不要了，
+        // 服务器上存的那份也换掉
+        if l.drop_lost_marks() {
+            l.marks_dirty = true;
+        }
         let start_seq = local::resume_seq(&l.dir, &l.rec, received);
         if start_seq > l.rec.next_seq {
             // 这台电脑上记的比实际录下的少（recording.json 没存上）：跳过这几个序号，绝不覆盖已有的分片。
@@ -802,22 +829,24 @@ impl Recorder {
                 local::remove_partials(&l.dir);
                 local::recover(&l.dir, &mut l.rec);
                 nothing = l.rec.next_seq == 0;
-                match &ending {
-                    Ending::Stopped if nothing => *error = Some(NOTHING_RECORDED.into()),
-                    Ending::Stopped if l.fatal => l.rec.status = Status::Failed,
-                    Ending::Stopped => l.rec.status = Status::Stopped,
-                    Ending::NeverStarted(_) => l.rec.status = Status::Interrupted,
-                    Ending::Crashed(reason) => {
-                        *error = Some(reason.clone());
-                        if l.fatal {
-                            l.rec.status = Status::Failed;
-                        } else {
-                            l.rec.status = Status::Interrupted;
-                            l.rec.error = Some(reason.clone());
+                if nothing {
+                    // 不管是怎么结束的，都只能这么说：「录好的部分都在、可以接着录」不对，这场录音下面就删掉了
+                    *error = Some(NOTHING_RECORDED.into());
+                } else {
+                    match &ending {
+                        Ending::Stopped if l.fatal => l.rec.status = Status::Failed,
+                        Ending::Stopped => l.rec.status = Status::Stopped,
+                        Ending::NeverStarted(_) => l.rec.status = Status::Interrupted,
+                        Ending::Crashed(reason) => {
+                            *error = Some(reason.clone());
+                            if l.fatal {
+                                l.rec.status = Status::Failed;
+                            } else {
+                                l.rec.status = Status::Interrupted;
+                                l.rec.error = Some(reason.clone());
+                            }
                         }
                     }
-                }
-                if !nothing {
                     l.save();
                 }
             }
@@ -916,7 +945,7 @@ impl Recorder {
         Ok(self.state())
     }
 
-    /// 标记重点：记下现在录到第几秒（暂停时也可以标）。连着点的只算一次。
+    /// 标记重点：记下现在录到第几秒（暂停时也可以标）。连着点的只算一次：离已有的哪个标记不到 1 秒都不再记。
     pub fn mark(&self) -> Result<RecorderState, String> {
         {
             let mut inner = self.inner.lock().unwrap();
@@ -934,7 +963,7 @@ impl Recorder {
             if l.rec.marks.len() >= MAX_MARKS {
                 return Err(format!("标记的重点太多了，最多 {MAX_MARKS} 个"));
             }
-            if l.rec.marks.last().is_none_or(|last| at - last >= 1.0) {
+            if l.rec.marks.iter().all(|m| (at - m).abs() >= 1.0) {
                 l.rec.marks.push(at);
                 l.marks_dirty = true;
                 l.save();
@@ -962,15 +991,15 @@ impl Recorder {
             let Some(s) = inner.session.as_mut() else {
                 return;
             };
-            if s.phase != Phase::Stopping {
-                s.phase = Phase::Stopping;
-                s.stop_requested = true;
-                let _ = s.commands.send(Command::Stop);
-            }
-            s.id
+            s.request_stop()
         };
         self.session_changed();
         self.changed();
+        self.wait_ended(id, timeout).await;
+    }
+
+    /// 等录音程序（会话 id）退出，最多等 timeout，还不退出就强制结束。
+    async fn wait_ended(&self, id: u64, timeout: Duration) {
         if !self.wait_session(id, timeout, |s| s.is_none()).await {
             log::warn!("录音程序 {timeout:?} 内没有结束，强制结束");
             self.kill(id);
@@ -997,9 +1026,7 @@ impl Recorder {
                 .ok_or(NOT_HERE)?;
             match l.rec.status {
                 Status::Interrupted | Status::Failed => {
-                    // 中断前最后一片之后点的标记，对应的那段录音没存下来，不要了
-                    let seconds = l.rec.seconds;
-                    l.rec.marks.retain(|t| *t <= seconds);
+                    l.drop_lost_marks();
                     l.rec.status = Status::Stopped;
                     l.rec.error = None;
                     l.fatal = false;
@@ -1062,6 +1089,14 @@ impl Local {
             trouble: None,
             fatal: false,
         }
+    }
+
+    /// 中断前最后一片之后点的标记：对应的那段录音没存下来，不要了。去掉了返回 true。
+    fn drop_lost_marks(&mut self) -> bool {
+        let seconds = self.rec.seconds;
+        let before = self.rec.marks.len();
+        self.rec.marks.retain(|t| *t <= seconds);
+        self.rec.marks.len() != before
     }
 
     /// 存 recording.json。没存上（比如磁盘满了）返回 false。
@@ -1152,15 +1187,19 @@ fn snapshot(inner: &Inner, account: Option<&Account>) -> RecorderState {
     };
     if let Some(s) = &inner.session {
         state.status = s.phase;
-        state.meeting_id = Some(s.meeting_id.clone());
-        state.seconds = s.base_seconds + s.seconds;
-        state.level = s.level;
-        state.mic = s.mic.clone();
-        state.system = s.system;
-        state.warnings = s.warnings.clone();
-        if let Some(l) = inner.recordings.get(&s.meeting_id) {
-            state.title = Some(l.rec.title.clone());
-            state.marks = l.rec.marks.clone();
+        // 别的账号在录的（它的登录失效以后换了人登录，还没结束）：只说这台电脑在录音，不给看是哪场会议、
+        // 录了多久、标了什么。没人登录时照常给（菜单栏上要显示录了多久，登录页要提醒正在录音）
+        if account.is_none_or(|a| s.belongs_to(a)) {
+            state.meeting_id = Some(s.meeting_id.clone());
+            state.seconds = s.base_seconds + s.seconds;
+            state.level = s.level;
+            state.mic = s.mic.clone();
+            state.system = s.system;
+            state.warnings = s.warnings.clone();
+            if let Some(l) = inner.recordings.get(&s.meeting_id) {
+                state.title = Some(l.rec.title.clone());
+                state.marks = l.rec.marks.clone();
+            }
         }
     }
     // 只给看当前账号的录音：同一台电脑上别人的会议标题也不显示
@@ -1191,7 +1230,13 @@ fn load_all(root: &Path) -> BTreeMap<String, Local> {
         let mut rec = match local::load(&dir) {
             Ok(rec) if rec.meeting_id == name => rec,
             _ => {
-                log::warn!("{} 不是一段能用的录音，跳过", dir.display());
+                // 不知道是谁录的、该传到哪台服务器，传不了；录好的分片也不删，留着排查
+                let kept = if local::highest_chunk(&dir).is_some() {
+                    "，录好的分片还留在里面"
+                } else {
+                    ""
+                };
+                log::warn!("{} 不是一段能用的录音，跳过{kept}", dir.display());
                 continue;
             }
         };

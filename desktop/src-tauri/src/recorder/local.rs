@@ -1,17 +1,20 @@
 //! 一场录音在这台电脑上的样子：`<录音目录>/<会议 id>/` 下面一个 recording.json，加上录好的分片 `<序号>.aac`。
 //!
 //! 录音程序先写 `<序号>.aac.part`，写完、落盘以后改名成 `<序号>.aac` 再报告，所以 `.aac` 都是完整的。
+//! recording.json 也是先落盘再改名，上一份留在 recording.json.bak：断电后新的那份读不出来时用上一份。
 //! 分片传上去以后就删掉；全部传完、服务器开始处理以后整个目录删掉。
 //! 录音目录只有自己能进（0700）：同一台 Mac 上的其他用户看不到别人的会议录音。
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 pub const RECORDING_FILE: &str = "recording.json";
+/// 上一份 recording.json
+const BACKUP_FILE: &str = "recording.json.bak";
 
 /// 一场录音走到哪一步了。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,15 +100,51 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// 写 recording.json：先写临时文件再改名，读的时候不会读到写了一半的。
+/// 写 recording.json：先写临时文件、落盘，原来的那份改名成 recording.json.bak，临时文件再改名成
+/// recording.json，最后把目录也落盘。读的时候不会读到写了一半的；断电、死机以后也不会只剩一个空的、
+/// 全是 0 的 recording.json（不落盘就改名的话会这样），万一新的那份坏了，还有上一份。
 pub fn save(dir: &Path, rec: &Recording) -> io::Result<()> {
+    let path = dir.join(RECORDING_FILE);
     let tmp = dir.join(format!("{RECORDING_FILE}.tmp"));
-    fs::write(&tmp, serde_json::to_vec_pretty(rec)?)?;
-    fs::rename(tmp, dir.join(RECORDING_FILE))
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(&serde_json::to_vec_pretty(rec)?)?;
+    // macOS 上 sync_all 是 F_FULLFSYNC：连硬盘自己的缓存也写下去
+    file.sync_all()?;
+    drop(file);
+    match fs::rename(&path, dir.join(BACKUP_FILE)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    fs::rename(&tmp, &path)?;
+    sync_dir(dir);
+    Ok(())
 }
 
+/// 把目录落盘，改过的文件名断电也不丢。落不了盘（比如文件系统不支持）也不算出错
+fn sync_dir(dir: &Path) {
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+}
+
+/// 读 recording.json。读不出来（断电时没写完，或者被删了）就用上一份，并删掉坏的那份：
+/// 下次保存时不能拿它顶替上一份。
 pub fn load(dir: &Path) -> io::Result<Recording> {
-    let data = fs::read(dir.join(RECORDING_FILE))?;
+    let path = dir.join(RECORDING_FILE);
+    let error = match read_recording(&path) {
+        Ok(rec) => return Ok(rec),
+        Err(e) => e,
+    };
+    let Ok(rec) = read_recording(&dir.join(BACKUP_FILE)) else {
+        return Err(error);
+    };
+    log::warn!("{} 读不出来（{error}），用上一份", path.display());
+    let _ = fs::remove_file(&path);
+    Ok(rec)
+}
+
+fn read_recording(path: &Path) -> io::Result<Recording> {
+    let data = fs::read(path)?;
     serde_json::from_slice(&data).map_err(io::Error::other)
 }
 
@@ -292,6 +331,34 @@ pub mod tests {
         assert_eq!(rec.next_seq, 3);
         assert!((rec.seconds - 19.6).abs() < 1e-9, "{}", rec.seconds);
         assert!(!recover(&dir, &mut rec));
+    }
+
+    #[test]
+    fn falls_back_to_the_previous_copy_when_recording_json_is_broken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("m1");
+        create_private_dir(&dir).unwrap();
+        let mut rec = sample(Status::Recording);
+        save(&dir, &rec).unwrap();
+        let previous = rec.clone();
+        rec.next_seq = 2;
+        save(&dir, &rec).unwrap();
+        assert_eq!(load(&dir).unwrap(), rec);
+        assert!(!dir.join(format!("{RECORDING_FILE}.tmp")).exists());
+
+        // 断电：最后写的那份没写下去，变成全是 0。用上一份（接着录、上传时再照着分片补上）
+        fs::write(dir.join(RECORDING_FILE), [0u8; 300]).unwrap();
+        assert_eq!(load(&dir).unwrap(), previous);
+        // 坏的那份删掉了：再保存时上一份还是好的那份
+        rec.next_seq = 3;
+        save(&dir, &rec).unwrap();
+        assert_eq!(load(&dir).unwrap(), rec);
+        fs::write(dir.join(RECORDING_FILE), b"").unwrap();
+        assert_eq!(load(&dir).unwrap(), previous);
+
+        // 两份都读不出来：报错
+        fs::write(dir.join(BACKUP_FILE), b"{").unwrap();
+        assert!(load(&dir).is_err());
     }
 
     #[test]

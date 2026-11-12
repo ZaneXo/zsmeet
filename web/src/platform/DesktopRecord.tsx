@@ -12,6 +12,7 @@ import { UploadRow } from "./DesktopRecordings";
 import { useOffline } from "./offline";
 import {
   clearEnded,
+  deleteEmptyMeeting,
   dismissUpload,
   loadSources,
   recorderDevices,
@@ -27,6 +28,7 @@ import {
 import type { RecorderState, RecorderUpload, RecorderWarning } from "./recorder";
 import {
   effectiveMic,
+  endedGone,
   endedUpload,
   isLive,
   liveUpload,
@@ -90,21 +92,14 @@ function useMicrophones() {
 class RecorderStartError extends Error {}
 
 /**
- * 交给 App 开始录音。没能开始的话，刚在服务器上建的会议什么也没有，删掉它（连回收站里的一起），
- * 免得留下一场空会议；App 已经记下了这场录音的话（比如开始以后才出错）不删。
+ * 交给 App 开始录音。没能开始的话，刚在服务器上建的会议什么也没有，删掉它，免得留下一场空会议；
+ * App 已经记下了这场录音的话（比如开始以后才出错）不删。
  */
 async function startRecorder(meetingId: string, sources: Sources, fresh: boolean) {
   try {
     await recorderStart({ meetingId, mic: micArg(sources.mic), system: sources.system });
   } catch (e) {
-    if (fresh && !localMeeting(recorderState(), meetingId)) {
-      try {
-        await unwrap(api.DELETE("/api/meetings/{id}", { params: { path: { id: meetingId } } }));
-        await unwrap(api.DELETE("/api/trash/{id}", { params: { path: { id: meetingId } } }));
-      } catch {
-        // 删不掉也不要紧：会议列表里会多一场空会议，可以自己删
-      }
-    }
+    if (fresh && !localMeeting(recorderState(), meetingId)) await deleteEmptyMeeting(meetingId);
     throw new RecorderStartError(errorMessage(e));
   }
   saveSources(sources);
@@ -406,6 +401,7 @@ function Meter({ label, read, paused }: { label: string; read: () => number; pau
 /** 刚结束的那一场：上传进度，传完以后去会议页面看处理进度。 */
 function EndedCard({ ended, state }: { ended: Ended; state: RecorderState }) {
   const upload = endedUpload(state, ended);
+  if (!upload) return <EndedGoneCard ended={ended} />;
   const done = upload.status === "completed";
   const settled = done || upload.status === "interrupted" || upload.status === "failed";
   // 在这里看到已经传完了：页面顶部不用再提示一遍
@@ -437,6 +433,30 @@ function EndedCard({ ended, state }: { ended: Ended; state: RecorderState }) {
             clearEnded();
           }}
         >
+          再录一场
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+/** 刚结束的那一场在这台电脑上已经没有了：什么也没录下来（空会议已经删了），或者录音被删掉了。 */
+function EndedGoneCard({ ended }: { ended: Ended }) {
+  const gone = endedGone(ended);
+  return (
+    <Card className="flex flex-col gap-4 p-6">
+      <div className="flex flex-col gap-1">
+        <b className="text-lg font-bold">{gone.title}</b>
+        <span className="text-sm text-muted">{ended.title}</span>
+      </div>
+      <p className="text-sm leading-relaxed text-ink-2">{gone.text}</p>
+      <div className="flex flex-wrap gap-2.5">
+        {!ended.empty && (
+          <AppLink to={`/meetings/${ended.meetingId}`} className={buttonClass("default")}>
+            打开会议页面
+          </AppLink>
+        )}
+        <Button variant={ended.empty ? "primary" : "default"} onClick={clearEnded}>
           再录一场
         </Button>
       </div>

@@ -16,6 +16,8 @@ import {
   useLoginError,
 } from "./desktop";
 import type { DesktopState } from "./desktop";
+import { useRecorder } from "./recorder";
+import { signOutNote } from "./recorderView";
 
 /**
  * 桌面版的入口：还没填服务器地址时填地址，没登录时「在浏览器里登录」，登录了才显示主界面。
@@ -84,8 +86,7 @@ function BrowserLogin({ state }: { state: DesktopState }) {
   const loginError = useLoginError();
   const start = useMutation({ mutationFn: loginStart });
   const cancel = useMutation({ mutationFn: loginCancel });
-  const change = useMutation({ mutationFn: switchServer });
-  const failure = start.error ?? cancel.error ?? change.error;
+  const failure = start.error ?? cancel.error;
 
   if (state.login_pending) {
     return (
@@ -124,12 +125,47 @@ function BrowserLogin({ state }: { state: DesktopState }) {
           会在浏览器里打开 zsmeet 的登录页，用密码或者飞书登录，再点「允许」，就会回到这里。
         </p>
         <div className="border-t border-line pt-3 text-center">
-          <Button variant="ghost" size="sm" onClick={() => change.mutate()} disabled={change.isPending}>
-            换一个服务器
-          </Button>
+          <SwitchServerButton variant="ghost" size="sm" />
         </div>
       </div>
     </AuthLayout>
+  );
+}
+
+/**
+ * 「换一个服务器」。切换服务器会先结束正在录的那一场，没传完的录音要等这个账号再登录这台服务器时才接着传：
+ * 正在录音、有录音没传完时先说清楚，确认了再换。登录失效以后录音照常进行，所以登录页上也要问。
+ */
+export function SwitchServerButton({ variant = "default", size = "md" }: { variant?: "default" | "ghost"; size?: "md" | "sm" }) {
+  const { state } = useRecorder();
+  const note = signOutNote(state, "切换服务器");
+  const [confirming, setConfirming] = useState(false);
+  const change = useMutation({ mutationFn: switchServer });
+  const failure = change.isError && <Notice tone="bad">{errorMessage(change.error)}</Notice>;
+
+  if (confirming && note) {
+    return (
+      <div className="flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-left text-sm">
+        <span className="text-ink-2">{note}</span>
+        <span className="flex gap-2">
+          <Button size="sm" variant="primary" disabled={change.isPending} onClick={() => change.mutate()}>
+            仍然切换
+          </Button>
+          <Button size="sm" onClick={() => setConfirming(false)}>
+            取消
+          </Button>
+        </span>
+        {failure}
+      </div>
+    );
+  }
+  return (
+    <>
+      <Button variant={variant} size={size} disabled={change.isPending} onClick={() => (note ? setConfirming(true) : change.mutate())}>
+        换一个服务器
+      </Button>
+      {failure}
+    </>
   );
 }
 
@@ -143,14 +179,10 @@ export function DesktopSessionExpired() {
 
 /** 服务器还没初始化（比如被重新部署过）：在浏览器里初始化，或者换一个服务器。 */
 export function DesktopNotInitialized() {
-  const change = useMutation({ mutationFn: switchServer });
   return (
     <div className="mx-auto mt-24 flex max-w-md flex-col gap-4 px-4">
       <Notice tone="warn">这台服务器还没完成初始化：请先在浏览器里打开它，创建管理员账号，再回来登录。</Notice>
-      {change.isError && <Notice tone="bad">{errorMessage(change.error)}</Notice>}
-      <Button onClick={() => change.mutate()} disabled={change.isPending}>
-        换一个服务器
-      </Button>
+      <SwitchServerButton />
     </div>
   );
 }

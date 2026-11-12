@@ -641,6 +641,75 @@ func TestRecordingChunkTimeAndMarks(t *testing.T) {
 	}
 }
 
+// 多久没收到录音分片（upload_idle_sec）由服务器按数据库的时钟算好。分片的时间是数据库记的，网页拿浏览器的时钟去减，
+// 会差出两边时钟的误差（服务器没有自动对时，差几分钟也常见）：桌面版明明每 10 秒传一片，网页却当成录音断了，
+// 给出「用已经收到的部分生成纪要」，一点就把还在录的会议截断了。
+// 这里直接把数据库里记的时间往前改，相当于过了这么久。
+func TestUploadIdleByDatabaseClock(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	created := c.want(c.do("POST", "/api/meetings", obj{"title": "客户电话", "source": "desktop"}), 201)
+	if created.Body["upload_idle_sec"] != float64(0) {
+		t.Errorf("刚建好的会议：upload_idle_sec 是 0：%s", created.Raw)
+	}
+	id := created.Body["id"].(string)
+	base := "/api/meetings/" + id
+	before := func(column string, sec int) {
+		t.Helper()
+		if _, err := c.pool.Exec(t.Context(), "UPDATE meetings SET "+column+" = now() - make_interval(secs => $2::int) WHERE id = $1", id, sec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 会议详情和会议列表里都有，单位秒，从 from 起算（留出跑测试的时间）
+	check := func(what string, from int) {
+		t.Helper()
+		got := c.want(c.do("GET", base, nil), 200)
+		list := c.want(c.do("GET", "/api/meetings", nil), 200)
+		for _, m := range []any{got.Body, list.Body["items"].([]any)[0]} {
+			if sec, ok := m.(map[string]any)["upload_idle_sec"].(float64); !ok || sec < float64(from) || sec >= float64(from+30) {
+				t.Errorf("%s：upload_idle_sec 应该是 %d 左右：%v", what, from, m)
+			}
+		}
+	}
+
+	// 还没收到分片：从建会议算起
+	before("created_at", 300)
+	check("建好 5 分钟还没收到分片", 300)
+	// 收到分片以后从最后一片算起
+	c.want(c.do("PUT", base+"/chunks/0", typed{"audio/aac", []byte("第 0 片")}), 204)
+	check("刚收到一片", 0)
+	before("last_chunk_at", 120)
+	check("2 分钟没收到新的分片", 120)
+
+	// 交给后台以后不再等录音，没有这一项
+	done := c.want(c.do("POST", base+"/complete", obj{"chunks": 1}), 200)
+	got := c.want(c.do("GET", base, nil), 200)
+	for _, r := range []result{done, got} {
+		if _, ok := r.Body["upload_idle_sec"]; ok || r.Body["status"] != "queued" {
+			t.Errorf("开始处理以后没有 upload_idle_sec：%s", r.Raw)
+		}
+	}
+}
+
+// 处理进度的推送（events）只在会议真的变了时推一条：等录音传完时 upload_idle_sec 每秒都在变，只为它不推。
+func TestEventsIgnoreUploadIdle(t *testing.T) {
+	last := Meeting{ID: "m1", Status: "uploading", UploadIdleSec: new(5)}
+	cur := last
+	cur.UploadIdleSec = new(6)
+	if meetingChanged(cur, last) {
+		t.Error("只是 upload_idle_sec 变了，不该推送")
+	}
+	cur.LastChunkAt = new(time.Now())
+	if !meetingChanged(cur, last) {
+		t.Error("收到了新的分片，要推送")
+	}
+	cur = last
+	cur.Status, cur.UploadIdleSec = "queued", nil
+	if !meetingChanged(cur, last) {
+		t.Error("开始处理了，要推送")
+	}
+}
+
 // 列出接口上的模型：用网页上填的地址；Key 留空时用已保存的。
 func TestListLLMModels(t *testing.T) {
 	c := newServer(t)

@@ -1796,6 +1796,11 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
             /**
+             * Format: int64
+             * @description 等录音传完时（status 为 uploading）多久没收到新的录音分片了，单位秒：从最后一次收到分片算起，还没收到过的从创建会议算起。服务器按自己的时钟算好，客户端不要拿自己的时钟去减 last_chunk_at（两边的时钟可能差好几分钟）。是取会议的那一刻的值，要现在的就再取一次；进度推送（events）不会只因为它变了就推一条。不在等录音时没有这一项
+             */
+            upload_idle_sec?: number;
+            /**
              * @description 谁能看：团队所有人、指定的人、只有创建者（管理员总能看）
              * @enum {string}
              */
@@ -1876,6 +1881,11 @@ export interface components {
             title: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * Format: int64
+             * @description 等录音传完时（status 为 uploading）多久没收到新的录音分片了，单位秒：从最后一次收到分片算起，还没收到过的从创建会议算起。服务器按自己的时钟算好，客户端不要拿自己的时钟去减 last_chunk_at（两边的时钟可能差好几分钟）。是取会议的那一刻的值，要现在的就再取一次；进度推送（events）不会只因为它变了就推一条。不在等录音时没有这一项
+             */
+            upload_idle_sec?: number;
             /**
              * @description 谁能看：团队所有人、指定的人、只有创建者（管理员总能看）
              * @enum {string}
@@ -2212,6 +2222,11 @@ export interface components {
             title: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * Format: int64
+             * @description 等录音传完时（status 为 uploading）多久没收到新的录音分片了，单位秒：从最后一次收到分片算起，还没收到过的从创建会议算起。服务器按自己的时钟算好，客户端不要拿自己的时钟去减 last_chunk_at（两边的时钟可能差好几分钟）。是取会议的那一刻的值，要现在的就再取一次；进度推送（events）不会只因为它变了就推一条。不在等录音时没有这一项
+             */
+            upload_idle_sec?: number;
             /**
              * @description 谁能看：团队所有人、指定的人、只有创建者（管理员总能看）
              * @enum {string}

@@ -48,6 +48,7 @@ type Meeting struct {
 	Speakers       map[string]string `json:"speakers" nullable:"false" doc:"给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」"`
 	AutoSpeakers   []int             `json:"auto_speakers" nullable:"false" doc:"哪几位说话人（编号）的名字是按声音认出、自动起的（声纹）。有人改过名、或者照原样保存过以后就不在里面了"`
 	LastChunkAt    *time.Time        `json:"last_chunk_at,omitempty" doc:"最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次"`
+	UploadIdleSec  *int              `json:"upload_idle_sec,omitempty" doc:"等录音传完时（status 为 uploading）多久没收到新的录音分片了，单位秒：从最后一次收到分片算起，还没收到过的从创建会议算起。服务器按自己的时钟算好，客户端不要拿自己的时钟去减 last_chunk_at（两边的时钟可能差好几分钟）。是取会议的那一刻的值，要现在的就再取一次；进度推送（events）不会只因为它变了就推一条。不在等录音时没有这一项"`
 
 	OwnerID   string    `json:"owner_id" format:"uuid"`
 	OwnerName string    `json:"owner_name"`
@@ -72,6 +73,10 @@ func toMeeting(m service.Meeting) Meeting {
 	for i, t := range m.Marks {
 		marks[i] = float64(t)
 	}
+	var idleSec *int
+	if idle, ok := m.UploadIdle(); ok {
+		idleSec = new(int(idle / time.Second))
+	}
 	return Meeting{
 		ID:             m.ID.String(),
 		Title:          m.Title,
@@ -93,6 +98,7 @@ func toMeeting(m service.Meeting) Meeting {
 		Speakers:       speakers,
 		AutoSpeakers:   auto,
 		LastChunkAt:    m.LastChunkAt,
+		UploadIdleSec:  idleSec,
 		OwnerID:        m.OwnerID.String(),
 		OwnerName:      m.OwnerName,
 		CreatedAt:      m.CreatedAt,

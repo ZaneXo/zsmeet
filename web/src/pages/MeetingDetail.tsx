@@ -11,6 +11,8 @@ import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STA
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { waitingForRecording } from "../lib/meetingStatus";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
+import { chunksFlowing, contiguous, lastReceived, receivedSeconds } from "../lib/unfinishedRecording";
+import type { RecordingSource } from "../lib/unfinishedRecording";
 import { useTicker } from "../lib/useTicker";
 import { isDesktop, mediaUrl, subscribe } from "../platform";
 import { ThisComputerRecording } from "../platform/DesktopRecordings";
@@ -19,7 +21,7 @@ import { AccessDialog, VISIBILITY_LABEL } from "./AccessDialog";
 import { AskPanel } from "./Ask";
 import { FeishuShareDialog, LatestFeishuShare } from "./FeishuShare";
 import { LatestWebhookSends, useMeetingWebhooks, WebhookShareDialog } from "./WebhookShare";
-import { meetingChip, recordingLive } from "./Meetings";
+import { meetingChip } from "./Meetings";
 import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
 
@@ -387,14 +389,10 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
   if (m.status === "uploading" && m.source === "record") return <UnfinishedRecording meeting={m} user={user} />;
 
   if (m.status === "uploading" && m.source === "desktop") {
-    const elsewhere = (
-      <Notice tone="info">
-        {m.can_manage
-          ? "这场会议是用 zsmeet 桌面版在电脑上录的。录音会从那台电脑自动传上来（断网时等联网以后接着传），传完以后开始处理。"
-          : `${m.owner_name} 正在用 zsmeet 桌面版录这场会议，录音传完以后才会开始处理。`}
-      </Notice>
-    );
-    // 桌面版：这场会议就是在这台电脑上录的话，显示录音、上传的情况
+    // 录音在别的电脑上（网页版里总是这样）：服务器收到了多少，录音的电脑找不回来时可以先用收到的部分生成纪要
+    const elsewhere = <ReceivedSoFar meeting={m} />;
+    // 桌面版：这场会议正在这台电脑上录、录音正从这台电脑传的话，照旧显示这台电脑上录音、上传的情况
+    // （那里能接着录、把录下的传上去），不在这里收尾
     return isDesktop ? <ThisComputerRecording meetingId={m.id} elsewhere={elsewhere} /> : elsewhere;
   }
 
@@ -496,23 +494,6 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
   );
 }
 
-/** 多久以前，给「最后一次收到录音」用。 */
-function ago(iso: string): string {
-  const sec = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
-  if (sec < 60) return "刚刚";
-  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
-  return dateTime(iso);
-}
-
-/** 服务器收到的分片里，从第 0 片开始连续的有几片。 */
-function contiguous(received: number[]): number {
-  const have = new Set(received);
-  let n = 0;
-  while (have.has(n)) n++;
-  return n;
-}
-
 /**
  * 网页录音还没传完的会议：可能正在录，也可能录音的网页关掉了、断网了、暂停着。
  * 这台电脑上有没传完的录音时接着传；找不回来的话，可以先用服务器已经收到的部分生成纪要。
@@ -520,10 +501,69 @@ function contiguous(received: number[]): number {
 function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: User }) {
   const rec = useRecording();
   const local = useLocalItems(user).find((item) => item.rec.meetingId === m.id);
-  // 定时重画：录音中断以后，即使服务器返回的数据没变，「录音中」也要变成「还没有传完」
+
+  // 就是这个网页在录（或者在传最后几片）
+  if (rec.meetingId === m.id && session.busy) {
+    return (
+      <Notice tone="info">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <span>这场会议正在这个网页里录音，录完会自动开始处理。</span>
+          <AppLink to="/record" className={buttonClass("default", "sm")}>
+            回到录音
+          </AppLink>
+        </div>
+      </Notice>
+    );
+  }
+  if (local) return <LocalRecordingCard item={local} />;
+  return <ReceivedSoFar meeting={m} />;
+}
+
+/** 录音还没传完时，网页录音和桌面版录音不一样的说法。 */
+type UnfinishedText = {
+  /** 别人看到的，接在创建者的名字后面：还在录，或者录的还没传完 */
+  others: (live: boolean) => string;
+  /** 创建者、管理员看到的：录音还在传。last 是「最后一次收到录音：…」 */
+  live: (last: string) => string;
+  /** 录音不传了：可能是怎么了，恢复以后会怎样 */
+  stalled: string;
+  /** 用已经收到的部分生成纪要之前的提醒 */
+  confirm: string;
+};
+
+const UNFINISHED_TEXT: Record<RecordingSource, UnfinishedText> = {
+  record: {
+    others: (live) => (live ? "正在录这场会议" : "录的这场会议还没有传完"),
+    live: (last) => `这场会议正在录音（${last}）。录音的网页点「结束录音」以后会自动开始处理。`,
+    stalled: "录音的网页可能关掉了、断网了，或者正暂停着；它恢复以后会自动接着传。",
+    confirm: "确定吗？如果录音的网页其实还开着（比如暂停着、断网了），开始处理以后它后面录的部分就传不上来了。",
+  },
+  // 桌面版录的：录音存在录音的那台电脑上，zsmeet 桌面版开着、连上网就自动接着传（docs/desktop.md 的「上传」）。
+  // 在这里开始处理以后，那台电脑再传分片会得到 409，桌面版把这段录音显示成传不上去，等用户删掉
+  desktop: {
+    others: (live) => (live ? "正在用 zsmeet 桌面版录这场会议" : "用 zsmeet 桌面版录的这场会议还没有传完"),
+    live: (last) => `这场会议正在用 zsmeet 桌面版录音（${last}）。在录音的电脑上点「结束录音」，录音传完以后会自动开始处理。`,
+    stalled:
+      "录音的电脑可能断网了、关机了、退出了 zsmeet，或者录音正暂停着。那台电脑上的 zsmeet 桌面版再打开、连上网以后，会自动把剩下的录音传上来。",
+    confirm:
+      "确定吗？开始处理以后，那台电脑上还没传上来的录音就用不上了，zsmeet 桌面版会显示这段录音传不上去，可以在那里删掉。如果那台电脑其实还在录（比如暂停着、断网了），后面录的也传不上来。",
+  },
+};
+
+/**
+ * 网页录音、桌面版录音还没传完，录音又不在这个网页（这台电脑）上：服务器已经收到了多少。
+ * 录音还在传时只说正在录；不传了的话，创建者和管理员可以先用服务器从第 0 片起连续收到的部分生成纪要
+ * （录音的电脑找不回来时用）。
+ */
+function ReceivedSoFar({ meeting: m }: { meeting: Meeting }) {
+  const source: RecordingSource = m.source === "desktop" ? "desktop" : "record";
+  const text = UNFINISHED_TEXT[source];
+  // 录音还在不在传、多久以前收到的，按服务器算好的 upload_idle_sec（会议每 10 秒重新取一次）。
+  // 定时重画是给还没有这一项的旧版本服务器的：那时按这台电脑的时钟算，录音中断以后，
+  // 即使服务器返回的数据没变，「录音中」也要变成「还没有传完」
   useTicker(10_000);
-  const live = recordingLive(m);
-  const last = m.last_chunk_at ? `最后一次收到录音：${ago(m.last_chunk_at)}` : "服务器还没有收到录音";
+  const live = chunksFlowing(m, Date.now());
+  const last = lastReceived(m, Date.now());
 
   const chunks = useQuery({
     queryKey: ["chunks", m.id],
@@ -540,40 +580,24 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
     },
   });
 
-  // 就是这个网页在录（或者在传最后几片）
-  if (rec.meetingId === m.id && session.busy) {
-    return (
-      <Notice tone="info">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <span>这场会议正在这个网页里录音，录完会自动开始处理。</span>
-          <AppLink to="/record" className={buttonClass("default", "sm")}>
-            回到录音
-          </AppLink>
-        </div>
-      </Notice>
-    );
-  }
-  if (local) return <LocalRecordingCard item={local} />;
   if (!m.can_manage) {
     return (
       <Notice tone="info">
         {m.owner_name}
-        {live ? "正在录这场会议" : "录的这场会议还没有传完"}（{last}）。录完、传完以后才会开始处理。
+        {text.others(live)}（{last}）。录完、传完以后才会开始处理。
       </Notice>
     );
   }
-  if (live) {
-    return <Notice tone="info">这场会议正在录音（{last}）。录音的网页点「结束录音」以后会自动开始处理。</Notice>;
-  }
+  if (live) return <Notice tone="info">{text.live(last)}</Notice>;
 
   return (
     <Card className="flex flex-col gap-3 p-5">
       <div className="flex flex-col gap-1">
         <b className="text-[15px] font-semibold">录音还没有传完</b>
         <span className="text-sm leading-relaxed text-ink-2">
-          {last}。录音的网页可能关掉了、断网了，或者正暂停着；它恢复以后会自动接着传。
+          {last}。{text.stalled}
           {received > 0
-            ? `服务器已经收到 ${received} 片（大约 ${duration((received * SLICE_MS) / 1000)}）。如果录音的那台电脑找不回来了，可以先用这一部分生成纪要。`
+            ? `服务器已经收到 ${received} 片（大约 ${duration(receivedSeconds(source, received, SLICE_MS))}）。如果录音的那台电脑找不回来了，可以先用这一部分生成纪要。`
             : ""}
         </span>
       </div>
@@ -582,7 +606,7 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
       {received > 0 &&
         (confirming ? (
           <div className="flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-sm">
-            <span className="text-ink-2">确定吗？如果录音的网页其实还开着（比如暂停着、断网了），开始处理以后它后面录的部分就传不上来了。</span>
+            <span className="text-ink-2">{text.confirm}</span>
             <span className="flex gap-2">
               <Button size="sm" variant="primary" disabled={finish.isPending} onClick={() => finish.mutate()}>
                 确定，开始处理

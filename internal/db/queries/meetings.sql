@@ -4,7 +4,9 @@ VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: GetMeeting :one
-SELECT sqlc.embed(m), u.name AS owner_name
+-- read_at 是读的时候数据库的时间：和 created_at、last_chunk_at 是同一个时钟，算多久没收到录音分片时用它去减
+-- （见 service.Meeting.UploadIdle）
+SELECT sqlc.embed(m), u.name AS owner_name, now()::timestamptz AS read_at
 FROM meetings m JOIN users u ON u.id = m.owner_id
 WHERE m.id = $1;
 
@@ -20,8 +22,10 @@ SELECT * FROM meetings WHERE id = $1 FOR SHARE;
 -- query 是 Go 里拼好的 tsquery（见 search.TSQuery），为空表示不筛选。
 -- owner 不为空时只列这个人创建的。
 -- before_at、before_id 用来翻页：只列排在这场会议后面的（搜索时一页一页取候选）。
+-- read_at 和 GetMeeting 的一样。
 SELECT sqlc.embed(m), u.name AS owner_name,
-       (mm.user_id IS NOT NULL)::bool AS is_member, coalesce(mm.can_edit, false)::bool AS member_can_edit
+       (mm.user_id IS NOT NULL)::bool AS is_member, coalesce(mm.can_edit, false)::bool AS member_can_edit,
+       now()::timestamptz AS read_at
 FROM meetings m
 JOIN users u ON u.id = m.owner_id
 LEFT JOIN meeting_search s ON s.meeting_id = m.id

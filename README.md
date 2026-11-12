@@ -214,6 +214,7 @@ macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自�
 - 开始录音时要连得上服务器（先在服务器上建好这场会议）；开始以后断网照样录。录音每 10 秒左右存一片在这台电脑上，边录边传，断网时先存着，连上以后自动补传。
 - 退出 zsmeet（菜单栏的「退出」或 ⌘Q）会先结束录音；没传完的部分下次打开 zsmeet 时接着传。
 - 录到一半 zsmeet 意外退出、电脑断电：已经录好的部分都在。再打开 zsmeet 时会提示这场录音中断了，可以「接着录」（接在后面，标记的重点也都在），也可以「传上去生成纪要」，或者删掉。
+- 录音的电脑找不回来了（丢了、坏了、一直连不上网）：已经传到服务器的部分还在。会议的创建者或管理员在网页上（或者另一台电脑的 zsmeet 里）打开这场会议，可以先用已经收到的部分生成纪要。那台电脑上还没传上来的部分就用不上了，它之后再打开 zsmeet 会显示这段录音传不上去，删掉就行。
 - 退出登录、切换服务器会先结束正在录的那一场（点的时候会先提醒你）。录好的留在这台电脑上，以后用这个账号登录这台服务器时接着传，换别的账号登录看不到、也不会传。
 - 录音存在 `~/Library/Application Support/io.github.zanexo.zsmeet/recordings/` 下，只有你自己的 macOS 账户能打开；每一片传上去就删掉，整场传完后整个删掉。
 
@@ -298,8 +299,9 @@ make api NAME=DeleteMeeting METHOD=DELETE ROUTE=/api/meetings/{id}
 
 - 接口框架 huma 只出现在 `internal/api` 里，业务逻辑写在 `internal/service`。有测试守着这条规则（`internal/arch`），以后要换框架只需要重写接口层。
 - 给用户看的文字（报错、提示）都写成能照着处理的中文，不把内部报错直接抛给用户。
+- 参数校验没通过、请求内容不是 JSON 这类进不到处理函数、被 huma 直接挡下的请求，报错也换成了中文（`internal/api/problem.go`）：`detail` 是一句说清楚哪一项不对、怎么改的话（「标题太长了，最多 200 个字」），网页和桌面版直接显示它。加接口时，用户在网页上自己填的字段，要把它在界面上的叫法加进 `fieldNames`，没加的报错里写字段名。升级 huma 以后跑一遍测试：它新加的校验提示还没有中文时，测试会失败。
 - 生成的文件（sqlc 的代码、`openapi.json`、`schema.d.ts`）都提交进仓库，`make test` 和 `make check` 会检查它们是不是最新的。
-- 前端不依赖 React 的小函数可以在旁边写 `*.test.ts`，用 Node 自带的测试运行（`pnpm -C web test`，`make test` 会跑）；测试里 import 要带 `.ts` 后缀。
+- 前端不依赖 React 的小函数可以在旁边写 `*.test.ts`，用 Node 自带的测试运行（`pnpm -C web test`，`make test` 会跑）；测试里 import 要带 `.ts` 后缀，被测的文件引用别的文件里的值（不只是类型）时也要带。
 - 网页里的站内链接用 `AppLink`（`web/src/components/AppLink.tsx`），不直接用 react-router 的 `Link`：用户按住 Option 点 `Link` 时，浏览器会下载一个没用的网页空壳。`make check` 会检查。
 
 ### 发布

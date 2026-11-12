@@ -41,6 +41,24 @@ type Meeting struct {
 	Hits []search.Hit
 	// 取出这场会议的人能对它做什么（见 Access）
 	Access Access
+	// 取出这场会议时数据库的时间，算 UploadIdle 用。回收站列表里的会议没有
+	ReadAt time.Time
+}
+
+// UploadIdle 是等录音传完的会议（uploading）多久没收到新的分片了：从最后一次收到分片算起，还没收到过的从建会议算起。
+// 网页据此判断边录边传的录音是不是还在传。分片的时间、建会议的时间都是数据库记的，所以用取出会议时数据库的时间
+// （ReadAt）去减，不拿浏览器或者这台服务器的时钟去比：没有自动对时的机器，时钟差上几分钟也不奇怪。
+// 不在等录音、或者不知道是什么时候取出的，ok 为 false。
+func (m Meeting) UploadIdle() (idle time.Duration, ok bool) {
+	if m.Status != "uploading" || m.ReadAt.IsZero() {
+		return 0, false
+	}
+	since := m.CreatedAt
+	if m.LastChunkAt != nil {
+		since = *m.LastChunkAt
+	}
+	// 在事务里读时 now() 是事务开始的时间，可能比之后才记下的分片时间还早
+	return max(m.ReadAt.Sub(since), 0), true
 }
 
 type NewMeeting struct {
@@ -94,7 +112,8 @@ func (s *Service) CreateMeeting(ctx context.Context, user sqlc.User, in NewMeeti
 		}
 		return search.Reindex(ctx, q, m.ID)
 	})
-	return Meeting{Meeting: m, OwnerName: user.Name, Access: fullAccess}, err
+	// 刚建好：数据库记下的建会议的时间就是现在
+	return Meeting{Meeting: m, OwnerName: user.Name, Access: fullAccess, ReadAt: m.CreatedAt}, err
 }
 
 func cleanTitle(title string) (string, error) {
@@ -173,7 +192,7 @@ func (s *Service) searchMeetings(ctx context.Context, viewer sqlc.User, query st
 
 // listed 把列表里的一行变成 Meeting，带上 viewer 的权限。
 func listed(viewer sqlc.User, r sqlc.ListMeetingsRow) Meeting {
-	return Meeting{Meeting: r.Meeting, OwnerName: r.OwnerName, Access: accessFor(viewer, r.Meeting, r.IsMember, r.MemberCanEdit)}
+	return Meeting{Meeting: r.Meeting, OwnerName: r.OwnerName, Access: accessFor(viewer, r.Meeting, r.IsMember, r.MemberCanEdit), ReadAt: r.ReadAt}
 }
 
 // searchScan 是一次搜索的进度：按时间从新到旧一页一页取索引粗筛出的候选会议，逐句找命中，留下的放进 list。
@@ -335,7 +354,7 @@ func (s *Service) getMeeting(ctx context.Context, id uuid.UUID) (Meeting, error)
 		// 放进回收站的会议当作不存在，回收站另有自己的接口
 		return Meeting{}, errNoMeeting
 	}
-	return Meeting{Meeting: row.Meeting, OwnerName: row.OwnerName}, err
+	return Meeting{Meeting: row.Meeting, OwnerName: row.OwnerName, ReadAt: row.ReadAt}, err
 }
 
 func (s *Service) RenameMeeting(ctx context.Context, user sqlc.User, id uuid.UUID, title string) (Meeting, error) {
@@ -374,7 +393,9 @@ func (s *Service) PutChunk(ctx context.Context, user sqlc.User, id uuid.UUID, se
 		return err
 	}
 	if m.Status != "uploading" {
-		return conflict("这场会议已经上传完成，不能再传分片")
+		// 录音传完了，或者有人在会议页面上用已经收到的部分生成了纪要（录音的电脑这时才又连上）。
+		// 录音的网页、桌面版把这句话显示成这段录音传不上去的原因
+		return conflict("这场会议已经结束录音、开始处理了，剩下的录音传不上去了")
 	}
 	size, err := s.store.PutChunk(id, seq, body)
 	if err != nil {
@@ -430,8 +451,9 @@ func (s *Service) CompleteUpload(ctx context.Context, user sqlc.User, id uuid.UU
 		}
 		bytes += rows[i].Size
 	}
+	// 比说的多：多半是在会议页面上用已经收到的部分生成纪要时，录音的电脑又传上来了几片（页面上的片数是之前看到的）
 	if len(rows) > total {
-		return Meeting{}, conflict("收到的分片比声明的多，请重新上传")
+		return Meeting{}, conflict("服务器又收到了一些录音，请刷新页面再试")
 	}
 	if bytes > maxUploadBytes {
 		return Meeting{}, invalid("文件超过 %d GB，请压缩或拆分后再上传", maxUploadBytes>>30)

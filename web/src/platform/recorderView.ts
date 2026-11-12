@@ -1,5 +1,7 @@
 // 桌面版录音的界面逻辑：把 Rust 推过来的录音状态（recorder.ts 的 RecorderState）换成界面上的话和按钮。
 // 不依赖 React 和 Tauri，方便单独测试（recorderView.test.ts）。
+// 引用别的文件里的值要带 .ts 后缀：测试用 Node 直接跑，它不会自己补后缀
+import { DESKTOP_CHUNK_MS } from "../lib/unfinishedRecording.ts";
 import type { Microphone, RecorderState, RecorderStatus, RecorderUpload, RecorderWarning } from "./recorder";
 
 /**
@@ -55,12 +57,9 @@ export function sentence(text: string): string {
   return /[。！？!?]$/u.test(t) ? t : `${clause(t)}。`;
 }
 
-/** 每片大约多少秒（录音程序默认的 --chunk-seconds）。 */
-const CHUNK_SECONDS = 10;
-
-/** 录下了多少片，说成大概多长时间。 */
+/** 录下了多少片，说成大概多长时间（每片约 10 秒，和会议页面上估算服务器收到了多长一样）。 */
 export function recordedLength(chunks: number): string {
-  const minutes = Math.round((chunks * CHUNK_SECONDS) / 60);
+  const minutes = Math.round((chunks * DESKTOP_CHUNK_MS) / 60_000);
   if (minutes < 1) return "不到 1 分钟";
   if (minutes < 60) return `大约 ${minutes} 分钟`;
   const rest = minutes % 60;
@@ -374,7 +373,8 @@ export function localMeeting(state: RecorderState, meetingId: string): LocalMeet
 
 /**
  * 这台电脑上的这场录音传不上去了（比如断网时接着录的分片和服务器上已有的序号重了）：会议还在等上传的话，
- * 会议页面上在它下面给出「用服务器已经收到的部分生成纪要」，不然这场会议一直结束不了。
+ * 会议页面上在它下面给出「用已经收到的部分生成纪要」（MeetingDetail.tsx 的 ReceivedSoFar，服务器 90 秒没再收到分片
+ * 以后才有），不然这场会议一直结束不了。
  * 在录、在传、等网络、中断了等着选接着录还是直接结束的不给：这台电脑自己会传完，先用服务器上的部分生成纪要的话，
  * 它后面的就传不上去了。
  */

@@ -86,6 +86,7 @@ type Handlers struct {
 
 // newHandlers 在 mux 上注册所有接口。svc 和 sess 传 nil 时只能用来导出接口文档。
 func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionManager, proxies []netip.Prefix, version string) *Handlers {
+	localizeValidation()
 	cfg := huma.DefaultConfig("zsmeet", version)
 	cfg.Info.Description = "zsmeet 会议纪要系统的接口。除了 /api/status、/api/setup、/api/login、用飞书登录的 /api/auth/feishu/… 和 App 换令牌的 /api/apps/token 以外都需要先登录。" +
 		"网页用登录后的 Cookie；App（桌面版）用 Authorization: Bearer 带上 App 令牌，和网页的登录一样有效。"
@@ -94,6 +95,9 @@ func newHandlers(mux *http.ServeMux, svc *service.Service, sess *scs.SessionMana
 	cfg.SchemasPath = "/api/schemas"
 	// 默认会在每个响应里加一个 $schema 字段，前端用不上
 	cfg.CreateHooks = nil
+	// huma 自己产生的错误（参数校验没通过、请求内容不是 JSON……）换成中文，见 problem.go
+	cfg.Formats = map[string]huma.Format{"application/json": jsonFormat, "json": jsonFormat}
+	cfg.Transformers = []huma.Transformer{localizeProblem}
 	cfg.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
 		"session": {Type: "apiKey", In: "cookie", Name: CookieName},
 		"bearer":  {Type: "http", Scheme: "bearer", Description: "App 令牌（zsm_ 开头），用授权码换来，见 POST /api/apps/token"},

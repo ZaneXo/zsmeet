@@ -8,6 +8,7 @@ import type { Tone } from "../components/ui";
 import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName, STAGE_LABEL } from "../lib/format";
 import { jumpParam } from "../lib/jump";
 import { waitingForRecording } from "../lib/meetingStatus";
+import { chunksFlowing } from "../lib/unfinishedRecording";
 import { useTicker } from "../lib/useTicker";
 import { isDesktop } from "../platform";
 import { TrashList } from "./Trash";
@@ -15,27 +16,14 @@ import { UploadDialog } from "./UploadDialog";
 import { VISIBILITY_LABEL } from "./AccessDialog";
 import { AskPanel } from "./Ask";
 
-/** 网页录音的会议多久没收到新的分片，就不再显示「录音中」（录音的网页可能关掉了、断网了，或者暂停着）。 */
-const RECORDING_STALE_MS = 90_000;
-
-/** 最近一直有新的录音分片传上来。 */
-export function chunksFlowing(m: Meeting): boolean {
-  const last = Date.parse(m.last_chunk_at ?? m.created_at);
-  return Date.now() - last < RECORDING_STALE_MS;
-}
-
-/** 网页录音还在进行：最近一直有新的分片传上来。 */
-export function recordingLive(m: Meeting): boolean {
-  return m.source === "record" && m.status === "uploading" && chunksFlowing(m);
-}
-
 /** 会议在列表里显示的状态标签。 */
 export function meetingChip(m: Meeting): { tone: Tone; text: string } {
   switch (m.status) {
     case "uploading":
-      if (m.source === "record") return recordingLive(m) ? { tone: "info", text: "录音中" } : { tone: "mute", text: "录音未传完" };
+      // 边录边传的会议：最近还有分片传上来就算在录，录音的网页关掉了、电脑断网了、暂停着就不算（和会议页面上一样）
+      if (m.source === "record") return chunksFlowing(m, Date.now()) ? { tone: "info", text: "录音中" } : { tone: "mute", text: "录音未传完" };
       // 桌面版录的：录音从那台电脑传上来，断网时联网后接着传
-      if (m.source === "desktop") return chunksFlowing(m) ? { tone: "info", text: "电脑录音中" } : { tone: "mute", text: "等电脑传完录音" };
+      if (m.source === "desktop") return chunksFlowing(m, Date.now()) ? { tone: "info", text: "电脑录音中" } : { tone: "mute", text: "等电脑传完录音" };
       return { tone: "mute", text: "上传未完成" };
     case "queued":
       return { tone: "mute", text: "排队中" };
@@ -80,8 +68,9 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
     placeholderData: (previous) => previous,
   });
 
-  // 有人在录音时定时重画：录音中断以后，标签要从「录音中」变成「录音未传完」（桌面版录的从「电脑录音中」变成
-  // 「等电脑传完录音」），即使服务器返回的数据没变
+  // 有人在录音时定时重画，给还没有 upload_idle_sec 的旧版本服务器用（见 unfinishedRecording.ts 的 idleMs）：
+  // 那时按这台电脑的时钟算，录音中断以后，即使服务器返回的数据没变，标签也要从「录音中」变成「录音未传完」
+  // （桌面版录的从「电脑录音中」变成「等电脑传完录音」）
   useTicker(15_000, (meetings.data?.items ?? []).some(waitingForRecording));
 
   const retry = useMutation({

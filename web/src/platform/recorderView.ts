@@ -2,7 +2,7 @@
 // 不依赖 React 和 Tauri，方便单独测试（recorderView.test.ts）。
 // 引用别的文件里的值要带 .ts 后缀：测试用 Node 直接跑，它不会自己补后缀
 import { DESKTOP_CHUNK_MS } from "../lib/unfinishedRecording.ts";
-import type { Microphone, RecorderState, RecorderStatus, RecorderUpload, RecorderWarning } from "./recorder";
+import type { EchoMode, Microphone, RecorderEcho, RecorderState, RecorderStatus, RecorderUpload, RecorderWarning } from "./recorder";
 
 /**
  * 整理 Rust 推过来的状态：缺了的字段用默认值补上。Rust 那边和界面的版本对不上时（比如省掉了空的列表），
@@ -22,11 +22,27 @@ export function normalizeState(raw: Partial<RecorderState> | null | undefined): 
     warnings: s.warnings ?? [],
     error: s.error ?? null,
     uploads: s.uploads ?? [],
+    echo: normalizeEcho(s.echo),
   };
 }
 
-/** 没在录、也没有要传的录音。 */
-export const IDLE_STATE: RecorderState = normalizeState(null);
+const ECHO_MODES: readonly string[] = ["off", "auto", "on", "unavailable"] satisfies EchoMode[];
+
+/**
+ * 回声消除的情况：没有模式、模式不认识的当成没报（null，界面上不显示，免得说错），
+ * 缺了的字段当成「没开、不知道为什么」。
+ */
+function normalizeEcho(raw: Partial<RecorderEcho> | null | undefined): RecorderEcho | null {
+  if (!raw || typeof raw !== "object" || typeof raw.mode !== "string" || !ECHO_MODES.includes(raw.mode)) return null;
+  return { mode: raw.mode, active: raw.active === true, reason: typeof raw.reason === "string" && raw.reason ? raw.reason : null };
+}
+
+/**
+ * 没在录、也没有要传的录音。
+ * 标成没有副作用（@__PURE__）：网页版用不到它，打包时连 normalizeState 一起去掉。不标的话，模块顶层的这次调用
+ * 会被当成可能有副作用留下来，桌面版的代码就跟着进了网页版。
+ */
+export const IDLE_STATE: RecorderState = /* @__PURE__ */ normalizeState(null);
 
 /** 正在录（含暂停）。 */
 export function isLive(status: RecorderStatus): boolean {
@@ -118,6 +134,65 @@ export function sourcesProblem(sources: Sources): string {
   return sources.mic === NO_MIC && !sources.system ? "麦克风和电脑里的声音至少要录一种。" : "";
 }
 
+// ---- 外放时去掉回声（实验功能，docs/desktop.md 的「回声消除」） ----
+
+/**
+ * 「外放时去掉回声（实验）」的默认值：关。真机上（外放、戴耳机、几种会议软件）试过、效果确认以后，
+ * 才考虑默认打开，那时只改这里：没点过开关的人跟着新的默认值走，点过的照他点的。
+ */
+export const ECHO_CANCEL_DEFAULT = false;
+
+/** 这台电脑上记下的开关（localStorage 里存的值）。 */
+export const ECHO_CANCEL_ON = "on";
+export const ECHO_CANCEL_OFF = "off";
+
+/** 读出这台电脑上记下的开关：点过的照点的来，没点过、读不懂的用默认的。 */
+export function parseEchoCancel(raw: string | null): boolean {
+  if (raw === ECHO_CANCEL_ON) return true;
+  if (raw === ECHO_CANCEL_OFF) return false;
+  return ECHO_CANCEL_DEFAULT;
+}
+
+/** 这个开关用不用得上：要拿录到的电脑声音从麦克风里去掉回声，两样都得录。 */
+export function echoCancelUsable(sources: Sources): boolean {
+  return sources.mic !== NO_MIC && sources.system;
+}
+
+/** 交给 recorder_start 的 echoCancel：打开了，而且用得上。 */
+export function echoCancelArg(sources: Sources, on: boolean): boolean {
+  return on && echoCancelUsable(sources);
+}
+
+export type EchoLabel = { text: string; tone: "ok" | "mute" | "warn" };
+
+/**
+ * 录音中显示的「回声消除：…」，照录音程序报的情况（RecorderState.echo）说：开着；没开和为什么（戴着耳机、
+ * 用 AirPlay 外放、没收到电脑里的声音）；没能打开。
+ * 没打开这个选项（off）、不录麦克风（没有要去掉回声的声音）、录音程序没报（旧版本）时不显示，是 null。
+ * 录音程序还没说现在开没开（reason 是 null，App 这时报的 active 是 false）时，说选的是什么，不说「没开」。
+ */
+export function echoLabel(state: RecorderState): EchoLabel | null {
+  const echo = state.echo;
+  if (!echo || echo.mode === "off" || state.mic === null) return null;
+  if (echo.mode === "unavailable") {
+    return { text: "回声消除：不可用（没能打开，外放的会议声音可能会录两遍，戴耳机可以避免）", tone: "warn" };
+  }
+  if (echo.active) return { text: "回声消除：开", tone: "ok" };
+  switch (echo.reason) {
+    case null:
+      return echo.mode === "auto" ? { text: "回声消除：外放时自动处理", tone: "mute" } : { text: "回声消除：开", tone: "ok" };
+    case "headphones":
+      return { text: "回声消除：没开（戴着耳机，没有回声）", tone: "mute" };
+    case "airplay":
+      return { text: "回声消除：没开（用 AirPlay 外放时处理不了）", tone: "mute" };
+    case "no_reference":
+      // 电脑里的声音开始时就录不到（没有权限）：上面「电脑里的声音」那一项会指向提示；录着录着断了：等它恢复
+      return { text: state.system ? "回声消除：暂时没开（没收到电脑里的声音）" : "回声消除：没开（录不到电脑里的声音）", tone: "mute" };
+    default:
+      return { text: "回声消除：没开", tone: "mute" };
+  }
+}
+
 // ---- 录音中 ----
 
 /** 录音时的提示（没有权限、找不到设备）：录音程序没给说明时用的话，和怎么解决。 */
@@ -137,6 +212,14 @@ const WARNINGS: Record<string, { message: string; help: string }> = {
   system_unavailable: {
     message: "录不到电脑里的声音。",
     help: "退出 zsmeet 再打开试试，还不行的话重启一下电脑。",
+  },
+  mic_silent: {
+    message: "麦克风很长时间都没有声音，你说的话可能没录进去。",
+    help: "看看麦克风有没有被静音、选的是不是正在用的那个。开着的会议软件有时会占着麦克风，让 zsmeet 录不到声音，这时可以结束这次录音，换一个麦克风（比如耳机上的）再录。",
+  },
+  echo_unavailable: {
+    message: "回声消除没能打开，这次录音里外放的会议声音可能会录两遍。",
+    help: "戴耳机可以避免。",
   },
 };
 

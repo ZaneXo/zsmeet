@@ -14,6 +14,8 @@ let endToEndTests: [(String, () throws -> Void)] = [
     ("端到端：录到一半收到 stop", testEndToEndStop),
     ("端到端：按实际时长读时文件读到一半出错，以 error 结束，不当成读完了", testEndToEndInputFileReadError),
     ("端到端：参数写错时发 error 事件", testEndToEndBadArguments),
+    ("端到端：回声消除（--reference-file）：录出来的声音里外放的回声消掉了，--echo-cancel off 时原样", testEndToEndEchoCancel),
+    ("端到端：回声消除 auto 但只录麦克风：started 报 auto，接着报 no_reference；off 时不报", testEndToEndEchoWithoutReference),
 ]
 
 enum EndToEnd {
@@ -413,4 +415,108 @@ func testEndToEndBadArguments() throws {
     expectEqual(run.names, ["error"])
     expectEqual(lastEvent(run)["code"] as? String, "bad_args")
     expectEqual(lastEvent(run)["message"] as? String, "--chunk-seconds 要在 0.5 到 600 秒之间，现在是 0")
+}
+
+/// 读 WAV（mono，48 kHz 的 float），回声消除的 --aec-dump 写的就是这种
+private func readWAV(_ url: URL) throws -> [Float] {
+    let reader = try AudioFileReader(path: url.path)
+    var samples: [Float] = []
+    while true {
+        let chunk = try reader.read(maxFrames: 48_000)
+        if chunk.isEmpty { return samples }
+        samples += chunk
+    }
+}
+
+/// 只有对方在说话的那些 10 毫秒（near 静音、mic 够响），a 和 b 的能量比（dB）
+private func energyRatio(_ a: [Float], _ b: [Float], near: [Float], from: Double, to: Double) -> Double {
+    var ea = 0.0
+    var eb = 0.0
+    for frame in Int(from * 100)..<Int(to * 100) where (frame + 1) * 480 <= min(a.count, b.count, near.count) {
+        let range = (frame * 480)..<((frame + 1) * 480)
+        guard energy(near[range]) < 1e-9, energy(a[range]) > 480 * 1e-5 else { continue }
+        ea += energy(a[range])
+        eb += energy(b[range])
+    }
+    return 10 * log10(ea / max(eb, 1e-20))
+}
+
+func testEndToEndEchoCancel() throws {
+    guard requireBinary() else { return }
+    let directory = try temporaryDirectory("e2e-echo")
+    // 12 秒：对方一直在说（电脑声音），这边 7 到 9 秒说了一句；外放时麦克风录到对方的声音（晚 80 毫秒，经过房间）
+    let s = scene(seconds: 12, far: [0..<12], near: [7..<9], delay: 0.08, seed: 21)
+    let micFile = directory.appendingPathComponent("mic.wav")
+    let farFile = directory.appendingPathComponent("far.wav")
+    try writeWAV(micFile, s.mic)
+    try writeWAV(farFile, s.far)
+    let dump = directory.appendingPathComponent("dump")
+    func run(_ mode: String) throws -> RecorderRun {
+        try RecorderRun(["record", "--out", directory.appendingPathComponent(mode).path, "--echo-cancel", mode]
+                            + (mode == "on" ? ["--aec-dump", dump.path] : [])
+                            + ["--input-file", micFile.path, "--realtime", "--reference-file", farFile.path], in: directory)
+    }
+    // 两次一起跑，省一半时间
+    let on = try run("on")
+    let off = try run("off")
+    expectEqual(on.exitStatus(within: 60), 0)
+    expectEqual(off.exitStatus(within: 60), 0)
+    expectEqual(on.events.first?["echo_cancellation"] as? String, "on")
+    expectEqual(on.events.first?["system"] as? Bool, true, "参考文件当电脑声音录")
+    expect(on.events.contains { $0["event"] as? String == "echo" && $0["active"] as? Bool == true && $0["reason"] as? String == "forced" },
+           "报了在做回声消除：\(on.names)")
+    expectEqual(off.events.first?["echo_cancellation"] as? String, "off")
+    expect(!off.names.contains("echo"), "off 时不报 echo")
+    expectEqual(on.names.last, "stopped")
+
+    // 回声消除这一步本身（--aec-dump 写的处理前、处理后的麦克风）：只有对方在说话的时候消掉了多少
+    let micIn = try readWAV(dump.appendingPathComponent("mic-in.wav"))
+    let micOut = try readWAV(dump.appendingPathComponent("mic-out.wav"))
+    let stage = energyRatio(micIn, micOut, near: s.near, from: 4, to: 7)
+    expect(micIn.count >= 11 * 48_000 && micOut.count == micIn.count, "调试录音有 \(micIn.count)、\(micOut.count) 个采样")
+
+    // 录出来的分片：两次都能完整解码，时长和输入一样
+    for (run, name) in [(on, "on"), (off, "off")] {
+        let all = directory.appendingPathComponent("\(name).aac")
+        try concatenate(chunkEvents(run), into: all)
+        expectEqual(try FFmpeg.decodeErrors(all), "", "\(name) 解码没有错")
+        expectClose(try FFmpeg.decodedSeconds(all), 12, within: 0.6, "\(name) 的时长")
+    }
+    // 混音前麦克风那一路的音量（level 事件，两路分开算的）：只有对方在说话的那段时间（这边 7 秒才开始说；
+    // 麦克风那一路在录出来的时间里晚 0.3 秒左右），off 时是回声的音量，on 时是消剩下的。
+    // 不拿解码出来的声音减掉电脑声音那一路来比：AAC 编码保留的是听起来一样，不是波形一样，减不干净
+    func micLevel(_ run: RecorderRun) -> Double {
+        let levels = run.events.filter {
+            $0["event"] as? String == "level" && ($0["seconds"] as? Double).map { (4.0...6.5).contains($0) } == true
+        }.compactMap { $0["mic"] as? Double }
+        return levels.isEmpty ? -1 : levels.reduce(0, +) / Double(levels.count)
+    }
+    let echoLevel = micLevel(off)
+    let cancelledLevel = micLevel(on)
+    print("    测得：回声消除这一步消掉 \(String(format: "%.1f", stage)) dB；麦克风那一路的音量（0 到 1，1/60 是 1 dB）：off \(String(format: "%.2f", echoLevel))、on \(String(format: "%.2f", cancelledLevel))")
+    expect(stage >= 20, "回声消除这一步只消掉了 \(stage) dB")
+    expect(echoLevel > 0.3, "off 时麦克风那一路应该有回声：\(echoLevel)")
+    // 音量 0.25 是 15 dB
+    expect(cancelledLevel >= 0 && cancelledLevel < echoLevel - 0.25, "on 时麦克风那一路的回声没小多少：\(cancelledLevel)，off 时 \(echoLevel)")
+}
+
+func testEndToEndEchoWithoutReference() throws {
+    guard requireBinary() else { return }
+    let directory = try temporaryDirectory("e2e-echo-mic")
+    let input = directory.appendingPathComponent("in.wav")
+    try FFmpeg.generate(input, "sine=frequency=300:sample_rate=48000:duration=1.5", channels: 1)
+    let auto = try RecorderRun(["record", "--out", directory.appendingPathComponent("auto").path, "--echo-cancel", "auto",
+                                "--input-file", input.path, "--realtime"], in: directory)
+    expectEqual(auto.exitStatus(within: 20), 0)
+    expectEqual(auto.events.first?["echo_cancellation"] as? String, "auto")
+    let echo = auto.events.filter { $0["event"] as? String == "echo" }
+    expectEqual(echo.count, 1)
+    expectEqual(echo.first?["active"] as? Bool, false)
+    expectEqual(echo.first?["reason"] as? String, "no_reference", "没在录电脑声音")
+    // 尽快读完的测试模式（只有一路）：报要的模式，不做、也不报 echo
+    let file = try RecorderRun(["record", "--out", directory.appendingPathComponent("file").path, "--echo-cancel", "on",
+                                "--input-file", input.path], in: directory)
+    expectEqual(file.exitStatus(within: 20), 0)
+    expectEqual(file.events.first?["echo_cancellation"] as? String, "on")
+    expect(!file.names.contains("echo"))
 }

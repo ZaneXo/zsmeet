@@ -2,7 +2,7 @@ import CRecorder
 import Foundation
 
 /// 一路声音的来源：麦克风、电脑里的声音，或者测试用的文件。
-/// 采集那边往 ring 里写单声道、sampleRate 的采样，处理线程读。
+/// 采集那边往 ring 里写单声道、sampleRate 的采样（尽量带上时间戳，见 zr_stamp），处理线程读。
 public protocol CaptureSource: AnyObject {
     var kind: SourceKind { get }
     /// 给用户看的名字（麦克风的名字）
@@ -11,7 +11,8 @@ public protocol CaptureSource: AnyObject {
     var ring: OpaquePointer { get }
     /// 现在的采样率。设备换了格式时会变，处理线程每次取数据前看一眼
     var sampleRate: Double { get }
-    /// 一直收到全是 0 的声音时提醒用户的话；nil 表示不检查（电脑没在放声音时本来就全是 0）
+    /// 麦克风这类要看有没有声音的来源（见 SilenceWatch）：刚开始录就一直全是 0 时提醒用户的话。
+    /// nil 表示不检查（电脑没在放声音时本来就全是 0；读文件测试时也不检查）
     var silenceWarning: String? { get }
     func start() throws
     /// 停下来。返回以后不会再往 ring 里写
@@ -28,25 +29,68 @@ public protocol RecordingEngine: AnyObject {
     func stop()
 }
 
+/// 现场录音时回声消除怎么做（RecordSession 按命令行参数准备；--echo-cancel off 时不传）
+public struct EchoSetup {
+    /// auto 或 on
+    public var mode: EchoCancelMode
+    /// 参考比麦克风提前多少毫秒（见 EchoStage）
+    public var leadMilliseconds = 170
+    /// 建回声消除器。麦克风和电脑声音都在录时才调用（在开始录音前，不在音频线程上）；建不起来返回 nil
+    public var makeCanceller: () -> EchoCanceller?
+    /// auto 模式看的输出路线；nil 当成外放
+    public var route: OutputRouteSource?
+    /// --aec-dump 的目录
+    public var dumpDirectory: String?
+
+    public init(mode: EchoCancelMode, leadMilliseconds: Int = 170, makeCanceller: @escaping () -> EchoCanceller?,
+                route: OutputRouteSource? = nil, dumpDirectory: String? = nil) {
+        self.mode = mode
+        self.leadMilliseconds = leadMilliseconds
+        self.makeCanceller = makeCanceller
+        self.route = route
+        self.dumpDirectory = dumpDirectory
+    }
+}
+
+/// 换麦克风（LiveEngine.switchMic）的结果
+public enum MicSwitchResult: Equatable {
+    /// 换好了，发了 mic_changed
+    case switched
+    /// 新的麦克风的采样率处理不了：没换，接着录原来的
+    case unsupportedRate(Double)
+    /// 没在录麦克风，或者录音已经结束了（正在结束）：没换
+    case notRecording
+}
+
 /// 现场录音：每 20 毫秒从各路的环形缓冲里取出新的采样，转成 48 kHz，按经过的时间混成一路
 /// （见 TimeMixer），交给 RecordingPipeline 编码、切分片。
+/// 打开了回声消除、麦克风和电脑声音都在录时，麦克风转好的声音先经过 EchoStage 再进它那一路。
+/// 录系统默认的麦克风时，默认的麦克风换了可以换一个麦克风接着录（switchMic，见 MicFollower）。
 public final class LiveEngine: RecordingEngine {
     static let tickInterval = DispatchTimeInterval.milliseconds(20)
     /// 一次最多混 1 秒；处理线程卡住很久以后分几次补上
     static let maxMixSamples = 48_000
-    /// 麦克风连续这么多秒全是 0 就提醒一次
-    static let silenceWarningSeconds = 5.0
+    /// 换麦克风时两个麦克风重叠的那一段最多这么长，再长就是时间戳不对，不去掉（见 trimOverlap）
+    static let maxOverlap = 2.0
 
     public var onFinished: ((Result<RecordingResult, RecorderFailure>) -> Void)?
     let queue = DispatchQueue(label: "io.github.zanexo.zsmeet.recorder.engine", qos: .userInitiated)
 
-    /// 在录的各路。采样率处理不了的那一路，开始时就去掉了（见 init）
-    let sources: [CaptureSource]
+    /// 在录的各路。采样率处理不了的那一路，开始时就去掉了（见 init）。换麦克风时麦克风那一路的来源换成新的
+    /// （在 queue 上换；开始录以后别的线程不要读它）
+    private(set) var sources: [CaptureSource]
     private(set) var resamplers: [Resampler]
     let mixer: TimeMixer
+    /// 回声消除：started 事件里报的模式（要的模式没能打开是 unavailable）
+    public private(set) var echoStatus = EchoCancelStatus.off
+    /// 在做回声消除时（auto、on，两路都在录，建得起来）才有
+    private(set) var echoStage: EchoStage?
+    /// auto、on 模式，录着麦克风却没录电脑声音：开始时报一次 no_reference
+    private var echoWithoutReference = false
+    private let micIndex: Int?
     private let pipeline: RecordingPipeline
     private let events: EventSink
-    /// 纳秒，不算电脑睡眠的时间（睡醒以后不会一下子补出一大段静音）
+    /// 纳秒，不算电脑睡眠的时间（睡醒以后不会一下子补出一大段静音）。和 IOProc 时间戳是同一个时钟
     private let clock: () -> UInt64
     private var timer: DispatchSourceTimer?
     private var startTime: UInt64 = 0
@@ -59,18 +103,28 @@ public final class LiveEngine: RecordingEngine {
     private var rejectedRates: [Double?]
     /// 每一路是不是已经提醒过「转换出错，少了一小段」（只提醒一次）
     private var conversionWarned: [Bool]
+    /// 回声消除用的时间戳：每一路读出过多少个原始采样、转出过多少个 48 kHz 的采样，
+    /// 现在的转换器从哪个原始采样、哪个 48 kHz 的采样开始（时间戳的序号按它换算成 48 kHz 的序号）
+    private var rawRead: [Int64]
+    private var converted48: [Int64]
+    private var stampOrigins: [(raw: Int64, out: Int64, ratio: Double)]
+    private var stampBuffer = [zr_stamp](repeating: zr_stamp(), count: 64)
+    /// 每一路最近的一个时间戳：第几个原始采样是什么时候（秒）采到的。换麦克风时算旧的最后一个采样之后的时间
+    private var lastStamps: [(raw: Int64, time: Double)?]
+    /// 刚换了麦克风：新的麦克风在这个时间（秒，旧的最后一个采样之后）以前采到的，旧的已经录了，不要（见 trimOverlap）
+    private var overlapUntil: [Double?]
+    /// 换了几次麦克风（日志用）
+    private var micSwitchCount = 0
+    /// 有回声消除时，转好的采样先放这里，再分给 EchoStage 和各自那一路
+    private var converted = SampleFIFO()
     /// 在结束了（stopNow 里），tick 不用再看最后一片写不写得下
     private var stopping = false
     private var finished = false
 
-    private struct SilenceWatch {
-        var samples = 0
-        var heardSomething = false
-    }
-
-    /// 每一路配一个转换器。采样率处理不了的那一路停掉、发 warning，只录别的；一路都不剩时抛出 no_source
+    /// 每一路配一个转换器。采样率处理不了的那一路停掉、发 warning，只录别的；一路都不剩时抛出 no_source。
+    /// echo 是回声消除的设置（nil：不做）
     public init(sources: [CaptureSource], pipeline: RecordingPipeline, events: EventSink,
-                clock: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) throws {
+                clock: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, echo: EchoSetup? = nil) throws {
         var usable: [CaptureSource] = []
         var resamplers: [Resampler] = []
         for source in sources {
@@ -88,6 +142,7 @@ public final class LiveEngine: RecordingEngine {
         self.sources = usable
         self.resamplers = resamplers
         mixer = TimeMixer(kinds: usable.map(\.kind))
+        micIndex = usable.firstIndex { $0.kind == .mic }
         self.pipeline = pipeline
         self.events = events
         self.clock = clock
@@ -95,6 +150,37 @@ public final class LiveEngine: RecordingEngine {
         silence = [SilenceWatch](repeating: SilenceWatch(), count: usable.count)
         rejectedRates = [Double?](repeating: nil, count: usable.count)
         conversionWarned = [Bool](repeating: false, count: usable.count)
+        rawRead = [Int64](repeating: 0, count: usable.count)
+        converted48 = [Int64](repeating: 0, count: usable.count)
+        stampOrigins = usable.map { (raw: 0, out: 0, ratio: Resampler.outputRate / $0.sampleRate) }
+        lastStamps = [(raw: Int64, time: Double)?](repeating: nil, count: usable.count)
+        overlapUntil = [Double?](repeating: nil, count: usable.count)
+        if let echo, echo.mode != .off {
+            setUpEcho(echo)
+        }
+    }
+
+    /// 两路都在录才做回声消除（没有电脑声音就没有参考）。建不起来就原样录麦克风，started 里报 unavailable，
+    /// 是用户要求一直开着（on）的话再提醒一下
+    private func setUpEcho(_ echo: EchoSetup) {
+        echoStatus = echo.mode == .on ? .on : .auto
+        let kinds = sources.map(\.kind)
+        guard kinds.contains(.mic) else { return }
+        guard kinds.contains(.system) else {
+            echoWithoutReference = true
+            return
+        }
+        guard let canceller = echo.makeCanceller() else {
+            echoStatus = .unavailable
+            log("回声消除没能打开，麦克风的声音原样录")
+            if echo.mode == .on {
+                events.send(.warning(.echoUnavailable, EchoMessages.unavailable))
+            }
+            return
+        }
+        let dump = echo.dumpDirectory.flatMap { EchoDump(directory: $0) }
+        echoStage = EchoStage(configuration: EchoStage.Configuration(mode: echo.mode, leadMilliseconds: echo.leadMilliseconds),
+                              canceller: canceller, route: echo.route, events: events, dump: dump, now: seconds(clock()))
     }
 
     private static func unsupportedRateWarning(_ source: CaptureSource, rate: Double) -> RecorderEvent {
@@ -121,9 +207,13 @@ public final class LiveEngine: RecordingEngine {
     public func pause() {
         queue.async {
             guard !self.finished, !self.pipeline.isPaused else { return }
-            // 点暂停之前采到的声音都编进去：先按时间混到现在，再把各路攒着的（约 0.15 秒）也混出来
+            // 点暂停之前采到的声音都编进去：先按时间混到现在，回声消除那里压着的麦克风声音原样先交出来，
+            // 再把各路攒着的（约 0.15 秒）也混出来
             self.tick()
             guard !self.finished else { return }
+            if let stage = self.echoStage, let mic = self.micIndex {
+                stage.previewHeld(into: &self.mixer.lanes[mic].queue)
+            }
             do {
                 try self.feedQueued()
                 try self.pipeline.pause()
@@ -136,11 +226,12 @@ public final class LiveEngine: RecordingEngine {
     public func resume() {
         queue.async {
             guard !self.finished, self.pipeline.isPaused else { return }
-            // 暂停期间采到的声音都丢掉：按时间混到现在（还暂停着，混出来的不编码），再清掉各路攒着的。
-            // 继续以后重新攒，编进去的只有点了继续以后采到的声音
+            // 暂停期间采到的声音都丢掉：按时间混到现在（还暂停着，混出来的不编码），回声消除那里压着的
+            // （暂停期间采到的）处理完也不要，再清掉各路攒着的。继续以后重新攒，编进去的只有点了继续以后采到的声音
             self.tick()
             // 最后一片写不下了的话，tick 已经结束了录音
             guard !self.finished else { return }
+            self.echoStage?.discardHeld()
             self.mixer.reset()
             self.pipeline.resume()
         }
@@ -148,6 +239,50 @@ public final class LiveEngine: RecordingEngine {
 
     public func stop() {
         queue.async { self.stopNow() }
+    }
+
+    /// 换一个麦克风接着录（跟着系统默认的麦克风换了，见 MicFollower）。replacement 已经开始录了。
+    /// 不能在 queue 上调用（会等 queue 上正在做的做完，再在 queue 上换）。
+    ///
+    /// 先停掉旧的，把它剩下的都取出来、转完（转换器也收尾），再从新的那里接着取：麦克风那一路接着往下，
+    /// 录音的时间轴不断，只少了换的时候两个麦克风都没在录的那一点。新的是先开始录、再换的，两个麦克风同时在录的
+    /// 那一小段按时间戳去掉新的那边的，不重复。有回声消除时，新的麦克风的时间戳从新的一段开始，处理到新的麦克风的
+    /// 声音时 AEC3 从头开始（回声的路径全变了）。新的麦克风的「有没有声音」从头看。换好了发 mic_changed。
+    /// 没换成时 replacement 由调用方停掉
+    public func switchMic(to replacement: CaptureSource) -> MicSwitchResult {
+        dispatchPrecondition(condition: .notOnQueue(queue))
+        return queue.sync { switchMicNow(to: replacement) }
+    }
+
+    private func switchMicNow(to replacement: CaptureSource) -> MicSwitchResult {
+        guard !finished, !stopping, let index = micIndex, replacement.kind == .mic else { return .notRecording }
+        let rate = replacement.sampleRate
+        guard let resampler = try? Resampler(inputRate: rate) else {
+            log("新的麦克风「\(replacement.name)」的采样率是 \(Resampler.describe(rate))，处理不了，不换")
+            return .unsupportedRate(rate)
+        }
+        let now = seconds(clock())
+        // 旧的先停掉：之后它的环形缓冲不会再变，剩下的都取出来、转完，接在麦克风那一路后面
+        let old = sources[index]
+        old.stop()
+        pull(index, now: now, final: true)
+        // 旧的一个时间戳都没有的话（比如上次换上来的还没交过数据），还按上次换的时候的时间去掉重叠
+        overlapUntil[index] = endTime(index) ?? overlapUntil[index]
+        sources[index] = replacement
+        resamplers[index] = resampler
+        rejectedRates[index] = nil
+        conversionWarned[index] = false
+        rawRead[index] = 0
+        stampOrigins[index] = (raw: 0, out: converted48[index], ratio: Resampler.outputRate / rate)
+        lastStamps[index] = nil
+        silence[index] = SilenceWatch()
+        micSwitchCount += 1
+        echoStage?.micDeviceChanged(at: converted48[index])
+        log("麦克风从「\(old.name)」换成了「\(replacement.name)」（\(Resampler.describe(rate))），接着录")
+        events.send(.micChanged(name: replacement.name))
+        // 新的已经采到的现在就取（先去掉和旧的重叠的那一段）
+        pull(index, now: now, final: false)
+        return .switched
     }
 
     /// 结束（在 queue 上）：收到了 stop，或者服务器能收的最后一片写不下了（见 tick）
@@ -162,8 +297,12 @@ public final class LiveEngine: RecordingEngine {
         }
         // 设备停了，环形缓冲不会再变：剩下的都取出来、混完、编完
         do {
+            let now = seconds(clock())
             for index in sources.indices {
-                pull(index, final: true)
+                pull(index, now: now, final: true)
+            }
+            if let stage = echoStage, let mic = micIndex {
+                stage.finish(now: now, into: &mixer.lanes[mic].queue)
             }
             try feedQueued()
             let result = try pipeline.finish()
@@ -174,17 +313,28 @@ public final class LiveEngine: RecordingEngine {
         }
     }
 
-    /// 从现在开始计时。测试里不开定时器，直接调用它和 tick（在 queue 上）
+    /// 从现在开始计时，回声消除报一次现在的状态（echo 事件，在 started 之后）。
+    /// 测试里不开定时器，直接调用它和 tick（在 queue 上）
     func startClock() {
         startTime = clock()
         produced = 0
+        if let stage = echoStage {
+            stage.begin(now: seconds(startTime))
+        } else if echoWithoutReference {
+            events.send(.echo(active: false, reason: .noReference))
+            log("回声消除：没在录电脑声音，不做")
+        }
     }
 
     /// 取新数据、按时间混到现在。正常由定时器调用
     func tick() {
         guard !finished else { return }
+        let now = seconds(clock())
         for index in sources.indices {
-            pull(index, final: false)
+            pull(index, now: now, final: false)
+        }
+        if let stage = echoStage, let mic = micIndex {
+            stage.process(now: now, into: &mixer.lanes[mic].queue)
         }
         let elapsed = clock() &- startTime
         let target = Int64(Double(elapsed) * Double(AACEncoder.sampleRate) / 1_000_000_000)
@@ -231,38 +381,162 @@ public final class LiveEngine: RecordingEngine {
         }
     }
 
-    /// 把一路的新采样从环形缓冲里取出来，转成 48 kHz 放进混音队列。final：这一路结束了，转换器也收尾
-    private func pull(_ index: Int, final: Bool) {
+    /// 把一路的新采样从环形缓冲里取出来，转成 48 kHz 放进混音队列（有回声消除时麦克风的先交给它）。
+    /// final：这一路结束了，转换器也收尾
+    private func pull(_ index: Int, now: Double, final: Bool) {
         let source = sources[index]
-        let lane = mixer.lanes[index]
-        followSampleRate(index)
+        followSampleRate(index, now: now)
+        // 刚换了麦克风、新的还没交来数据：先不取（取的时候要先去掉和旧的重叠的那一段）
+        if overlapUntil[index] != nil && !trimOverlap(index) && !final {
+            return
+        }
+        var arrived = false
         while true {
             let count = scratch.withUnsafeMutableBufferPointer { buffer in
                 zr_ring_read(source.ring, buffer.baseAddress!, buffer.count)
             }
             if count == 0 { break }
+            arrived = true
+            rawRead[index] += Int64(count)
             scratch.withUnsafeBufferPointer { buffer in
                 let samples = UnsafeBufferPointer(rebasing: buffer[0..<count])
                 watchSilence(index, samples)
-                do {
-                    try resamplers[index].process(samples, into: &lane.queue)
-                } catch {
-                    conversionFailed(index, error)
+                convert(index, now: now) { try resamplers[index].process(samples, into: &$0) }
+            }
+        }
+        readStamps(index, now: now, arrived: arrived)
+        if final {
+            finishResampler(index, now: now)
+        }
+    }
+
+    /// 刚换了麦克风，新的交来了第一批数据：它在 overlapUntil（旧的最后一个采样之后）以前采到的，旧的已经录了，去掉。
+    /// 按新的第一个时间戳算；新的没有时间戳的话不去掉（最多重复换的那一下的一点点）。
+    /// 返回 false 表示还没有数据（或者要去掉的比现在有的还多），下次再看
+    private func trimOverlap(_ index: Int) -> Bool {
+        guard let until = overlapUntil[index] else { return true }
+        let ring = sources[index].ring
+        // 先看有没有采样、再看时间戳：IOProc 先记时间戳再写采样，看得到的采样的时间戳一定已经在了（没有就是设备没给）
+        let available = Int(zr_ring_available(ring))
+        guard available > 0 else { return false }
+        overlapUntil[index] = nil
+        var first = zr_stamp()
+        guard zr_ring_peek_stamp(ring, &first) else {
+            log("新的麦克风没有时间戳，和原来的麦克风重叠的那一点（如果有）没去掉")
+            return true
+        }
+        let rate = resamplers[index].inputRate
+        // 下一个要取的采样是什么时候采到的
+        let next = Double(first.host_ns) / 1_000_000_000 + Double(rawRead[index] - Int64(first.index)) / rate
+        let overlap = until - next
+        guard overlap > 0 else { return true }
+        guard overlap < Self.maxOverlap else {
+            log("新的麦克风和原来的麦克风重叠了 \(milliseconds(overlap)) 毫秒，时间戳不对，不去掉")
+            return true
+        }
+        let needed = Int((overlap * rate).rounded())
+        let dropped = discard(index, count: min(needed, available))
+        // 之后的时间戳从留下的第一个采样算（readStamps 里，这一批前面去掉的部分也会跳过）
+        stampOrigins[index].raw = rawRead[index]
+        log("去掉了新的麦克风和原来的麦克风重叠的 \(dropped) 个采样（\(milliseconds(Double(dropped) / rate)) 毫秒）")
+        guard dropped >= needed else {
+            // 还没交够：后面来的接着去掉
+            overlapUntil[index] = until
+            return false
+        }
+        return true
+    }
+
+    /// 从环形缓冲里取出 count 个采样扔掉，返回扔掉了几个
+    private func discard(_ index: Int, count: Int) -> Int {
+        var remaining = count
+        while remaining > 0 {
+            let read = scratch.withUnsafeMutableBufferPointer { buffer in
+                zr_ring_read(sources[index].ring, buffer.baseAddress!, min(buffer.count, remaining))
+            }
+            if read == 0 { break }
+            rawRead[index] += Int64(read)
+            remaining -= read
+        }
+        return count - remaining
+    }
+
+    /// 这一路最后一个采样之后的时间（秒），按最近的时间戳算（取完以后用）。没有时间戳时是 nil
+    private func endTime(_ index: Int) -> Double? {
+        guard let stamp = lastStamps[index] else { return nil }
+        return stamp.time + Double(rawRead[index] - stamp.raw) / resamplers[index].inputRate
+    }
+
+    /// 用这一路的转换器转换（body 把结果追加到给它的队列里）。没有回声消除时直接进这一路的混音队列，
+    /// 和没有回声消除这个功能以前一样；有的话先放在 converted 里，再分给 EchoStage 和各自那一路
+    private func convert(_ index: Int, now: Double, _ body: (inout SampleFIFO) throws -> Void) {
+        guard let stage = echoStage else {
+            do {
+                try body(&mixer.lanes[index].queue)
+            } catch {
+                conversionFailed(index, error)
+            }
+            return
+        }
+        do {
+            try body(&converted)
+        } catch {
+            conversionFailed(index, error)
+        }
+        let count = converted.count
+        guard count > 0 else { return }
+        converted48[index] += Int64(count)
+        let lane = mixer.lanes[index]
+        converted.withUnsafeSamples { samples in
+            switch sources[index].kind {
+            case .mic:
+                stage.appendMic(samples, now: now)
+            case .system:
+                lane.queue.append(samples)
+                stage.appendReference(samples, now: now)
+            }
+        }
+        converted.removeAll()
+    }
+
+    /// 取出这一路的时间戳：记下最近的一个（换麦克风时要用），有回声消除时换算成 48 kHz 的序号交给 EchoStage。
+    /// arrived：这次取到了新采样
+    private func readStamps(_ index: Int, now: Double, arrived: Bool) {
+        let source = sources[index]
+        let origin = stampOrigins[index]
+        let rate = Resampler.outputRate / origin.ratio
+        var stamps: [(index: Double, time: Double)] = []
+        while true {
+            let count = stampBuffer.withUnsafeMutableBufferPointer { buffer in
+                zr_ring_read_stamps(source.ring, buffer.baseAddress!, buffer.count)
+            }
+            if count == 0 { break }
+            for stamp in stampBuffer[0..<count] {
+                var raw = Int64(stamp.index)
+                var time = Double(stamp.host_ns) / 1_000_000_000
+                if raw < origin.raw {
+                    // origin.raw 之前的不要了（换麦克风时和原来的重叠的那一段）：整批都在前面的跳过，
+                    // 跨过去的那一批从留下的第一个采样算
+                    guard raw + Int64(stamp.frames) > origin.raw else { continue }
+                    time += Double(origin.raw - raw) / rate
+                    raw = origin.raw
+                }
+                lastStamps[index] = (raw: raw, time: time)
+                if echoStage != nil {
+                    stamps.append((index: Double(origin.out) + Double(raw - origin.raw) * origin.ratio, time: time))
                 }
             }
         }
-        if final {
-            finishResampler(index)
+        guard let stage = echoStage else { return }
+        stage.addStamps(source.kind, stamps, now: now)
+        if arrived {
+            stage.noteArrival(source.kind, now: now)
         }
     }
 
     /// 这一路的转换器收尾：压着的声音都取出来
-    private func finishResampler(_ index: Int) {
-        do {
-            try resamplers[index].finish(into: &mixer.lanes[index].queue)
-        } catch {
-            conversionFailed(index, error)
-        }
+    private func finishResampler(_ index: Int, now: Double) {
+        convert(index, now: now) { try resamplers[index].finish(into: &$0) }
     }
 
     /// 转换出错，这一路少了一小段（混音时补成静音）。录音照常，但要告诉用户，每一路只提醒一次
@@ -280,15 +554,18 @@ public final class LiveEngine: RecordingEngine {
     }
 
     /// 设备换了采样率（比如蓝牙耳机切换了模式）：旧的转换器收尾，换一个新的
-    private func followSampleRate(_ index: Int) {
+    private func followSampleRate(_ index: Int, now: Double) {
         let source = sources[index]
         let rate = source.sampleRate
         guard rate != resamplers[index].inputRate, rate != rejectedRates[index] else { return }
         do {
             let replacement = try Resampler(inputRate: rate)
-            finishResampler(index)
+            finishResampler(index, now: now)
             resamplers[index] = replacement
             rejectedRates[index] = nil
+            // 之后的时间戳按新的转换器换算；回声消除的时间轴从头来
+            stampOrigins[index] = (raw: rawRead[index], out: converted48[index], ratio: Resampler.outputRate / rate)
+            echoStage?.streamRestarted(source.kind)
             log("\(source.name) 的采样率变成了 \(Resampler.describe(rate))")
         } catch {
             rejectedRates[index] = rate
@@ -296,18 +573,23 @@ public final class LiveEngine: RecordingEngine {
         }
     }
 
-    /// 麦克风刚开始的几秒一直全是 0（一点底噪都没有），多半是被静音了或者没有权限，提醒一次
+    /// 麦克风有没有声音（见 SilenceWatch）：刚开始录的几秒一直全是 0（多半是被静音了或者没有权限），
+    /// 或者录音中（不算暂停）很长一段时间都是静音（多半是被会议软件占住了），各提醒一次
     private func watchSilence(_ index: Int, _ samples: UnsafeBufferPointer<Float>) {
-        guard let message = sources[index].silenceWarning, !silence[index].heardSomething else { return }
-        if samples.contains(where: { $0 != 0 }) {
-            silence[index].heardSomething = true
-            return
-        }
-        silence[index].samples += samples.count
-        if Double(silence[index].samples) >= Self.silenceWarningSeconds * sources[index].sampleRate {
-            // 只提醒一次
-            silence[index].heardSomething = true
-            events.send(.warning(.micUnavailable, message))
+        let source = sources[index]
+        guard let startupMessage = source.silenceWarning else { return }
+        let alerts = silence[index].feed(samples, sampleRate: resamplers[index].inputRate, paused: pipeline.isPaused)
+        for alert in alerts {
+            switch alert {
+            case .startup:
+                log("麦克风「\(source.name)」刚开始录的 \(JSON.format(SilenceWatch.startupSeconds)) 秒一直全是 0，提醒用户")
+                events.send(.warning(.micUnavailable, startupMessage))
+            case .silent(let digital, let seconds):
+                log("麦克风「\(source.name)」已经 \(JSON.format(seconds)) 秒\(digital ? "全是 0" : "几乎没有声音")（不算暂停），提醒用户")
+                events.send(.warning(.micSilent, SilenceWatch.message(name: source.name, digital: digital)))
+            case .recovered(let seconds):
+                log("麦克风「\(source.name)」又有声音了（之前 \(JSON.format(seconds)) 秒几乎没有声音）")
+            }
         }
     }
 
@@ -319,6 +601,9 @@ public final class LiveEngine: RecordingEngine {
             let dropped = JSON.format(Double(lane.droppedSamples) / rate)
             let overflow = zr_ring_total_dropped(sources[index].ring)
             log("\(sources[index].name)：补了 \(padded) 秒静音，丢了 \(dropped) 秒积压，缓冲满时丢了 \(overflow) 个采样")
+        }
+        if micSwitchCount > 0 {
+            log("这次录音跟着系统默认的麦克风换了 \(micSwitchCount) 次麦克风")
         }
     }
 
@@ -338,6 +623,11 @@ public final class LiveEngine: RecordingEngine {
         finished = true
         onFinished?(result)
     }
+}
+
+/// 纳秒换成秒
+func seconds(_ nanoseconds: UInt64) -> Double {
+    Double(nanoseconds) / 1_000_000_000
 }
 
 /// 测试模式：读文件，尽快编完，读完就结束（和收到 stop 一样）。和现场录音用同一个 RecordingPipeline。

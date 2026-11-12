@@ -1,4 +1,4 @@
-//! 界面能调用的命令（`invoke`）。具体的事都在 core.rs、recorder/ 里做，这里只做和 Tauri 相关的部分。
+//! 界面能调用的命令（`invoke`）。具体的事都在 core.rs、recorder/、update.rs 里做，这里只做和 Tauri 相关的部分。
 
 use std::sync::Arc;
 
@@ -8,7 +8,8 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::core::{AppState, Core};
 use crate::export;
-use crate::recorder::{Devices, Recorder, RecorderState};
+use crate::recorder::{Devices, EchoCancel, Recorder, RecorderState};
+use crate::update::{self, CheckResult, Updates};
 
 type CoreState<'a> = State<'a, Arc<Core>>;
 type RecorderHandle<'a> = State<'a, Arc<Recorder>>;
@@ -178,15 +179,18 @@ pub async fn recorder_devices(recorder: RecorderHandle<'_>) -> Result<Devices, S
 }
 
 /// 开始录音（会议要先在服务器上建好，source 是 desktop）。mic：麦克风的 uid 或者 "default"，
-/// null 是不录麦克风；system：录不录电脑的声音。这场会议在这台电脑上有中断了的录音时接着录。
+/// null 是不录麦克风；system：录不录电脑的声音；echoCancel：「外放时去掉回声」（实验性，true 是
+/// --echo-cancel auto，false 或者不传是 off）。这场会议在这台电脑上有中断了的录音时接着录。
 #[tauri::command]
 pub async fn recorder_start(
     recorder: RecorderHandle<'_>,
     meeting_id: String,
     mic: Option<String>,
     system: bool,
+    echo_cancel: Option<bool>,
 ) -> Result<RecorderState, String> {
-    recorder.start(&meeting_id, mic, system).await
+    let echo_cancel = EchoCancel::from_switch(echo_cancel.unwrap_or(false));
+    recorder.start(&meeting_id, mic, system, echo_cancel).await
 }
 
 #[tauri::command]
@@ -232,4 +236,23 @@ pub fn recorder_discard(
 #[tauri::command]
 pub fn recorder_state(recorder: RecorderHandle) -> RecorderState {
     recorder.state()
+}
+
+// ---- 自动更新（update.rs） ----
+
+/// 现在的版本，GitHub Releases 上有没有新版本（界面上的「检查更新」）。
+#[tauri::command]
+pub async fn update_check(app: AppHandle) -> Result<CheckResult, String> {
+    update::check_now(&app).await
+}
+
+/// 装新版本：下载（事件 update://progress 报进度）、校验签名、换掉 zsmeet.app、重新打开。
+/// 正在录音、还有录音没传完时不装，返回原因。
+#[tauri::command]
+pub async fn update_install(
+    app: AppHandle,
+    updates: State<'_, Updates>,
+    recorder: RecorderHandle<'_>,
+) -> Result<(), String> {
+    update::install_and_relaunch(&app, &updates, &recorder).await
 }

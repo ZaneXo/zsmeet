@@ -94,20 +94,29 @@ desktop-dev: ## 开发桌面版：打开 App 窗口，界面改了自动刷新
 	pnpm -C desktop tauri dev
 
 .PHONY: desktop-build
-desktop-build: ## 构建桌面版的 .app 和 DMG（本机的架构，ad-hoc 签名）
+desktop-build: ## 构建桌面版的 .app 和 DMG（本机的架构，ad-hoc 签名，不打自动更新用的更新包）
 	pnpm -C desktop install --frozen-lockfile
 	pnpm -C desktop tauri build
 
 .PHONY: desktop-universal
-desktop-universal: ## 构建 Apple 芯片和 Intel 通用的 DMG（和发布时一样）
+desktop-universal: ## 构建 Apple 芯片和 Intel 通用的 DMG（和发布时一样，只是不打更新包：那要发布用的密钥，只在 GitHub 上有）
 	rustup target add aarch64-apple-darwin x86_64-apple-darwin
 	pnpm -C desktop install --frozen-lockfile
 	pnpm -C desktop tauri build --target universal-apple-darwin
 
+.PHONY: desktop-version
+desktop-version: ## 发布前改桌面版的版本号：make desktop-version VERSION=0.2.0（tauri.conf.json、Cargo.toml、Cargo.lock 一起改）
+	node desktop/scripts/set-version.mjs '$(VERSION)'
+	@# 只更新 Cargo.lock 里 zsmeet-desktop 自己的版本，依赖一个都不动（发布时用 --locked 构建，没更新会失败）。
+	@# 先不联网试；这台电脑上还没下载过依赖的索引时再联网
+	cd desktop/src-tauri && { cargo update --workspace --offline || cargo update --workspace; }
+
 .PHONY: desktop-test
-desktop-test: ## 桌面版的检查和测试：录音小程序的测试，cargo fmt、clippy、cargo test，和真的录音小程序一起录一遍（要 ffmpeg）
+desktop-test: ## 桌面版的检查和测试：录音小程序的测试，cargo fmt、clippy、cargo test，和真的录音小程序一起录一遍（要 ffmpeg），发布脚本的测试
 	pnpm -C web install --frozen-lockfile
 	pnpm -C web build --mode desktop
+	@# 发布用的脚本：生成自动更新清单、核对更新包签名（见 .github/workflows/desktop.yml），改版本号
+	node --test desktop/scripts/*.test.mjs
 	@# 先构建录音小程序（Rust 编译时要它已经在 desktop/src-tauri/binaries/ 下），再跑它自己的测试
 	desktop/recorder/test.sh
 	cd desktop/src-tauri && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked

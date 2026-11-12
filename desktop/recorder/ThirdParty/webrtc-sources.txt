@@ -1,0 +1,293 @@
+# 录音小程序编进去的 WebRTC 音频处理（webrtc-audio-processing 2.1）和 abseil（20240722.1）的源文件，
+# 一行一个，路径相对这个目录（desktop/recorder/ThirdParty/）。由 build-recorder.sh 编成 libwebrtc_apm.a，
+# prune.sh 照着它挑出要拷贝的源文件和头文件。
+#
+# 一行：<路径> [arm64 | x86_64] [这个文件额外的编译参数…]
+#   arm64 / x86_64：只在 Apple 芯片 / Intel 上编；没写就是两个都编
+#
+# WebRTC 部分照抄 webrtc-audio-processing 2.1 的 meson.build（libwebrtc_audio_processing 和它依赖的
+# rtc_base、api、system_wrappers、common_audio、pffft、rnnoise、fft、isac_vad），按 macOS 定下了条件：
+#   - Apple 芯片（aarch64）：加 common_audio 和 aecm 的 NEON 文件（meson 的 neon_opt）
+#   - Intel（x86_64）：加 common_audio_sse2（-msse2）、common_audio_avx 和 webrtc_audio_processing_privatearch
+#     （-mavx2 -mfma）。AVX2 在运行时按 CPU 选，没有 AVX2 的 CPU 不会走到这些代码
+#   - complex_bit_reverse.c、filter_ar_fast_q12.c 只编一次（meson 在 not have_arm 时又加了一遍）
+#   - pffft.c 照 meson 加 -D_GNU_SOURCE
+# abseil 部分：WebRTC 用到的、需要编译的 13 个 .cc（其余的 abseil 只用头文件）。
+
+webrtc-audio-processing/webrtc/rtc_base/checks.cc
+webrtc-audio-processing/webrtc/rtc_base/containers/flat_tree.cc
+webrtc-audio-processing/webrtc/rtc_base/event.cc
+webrtc-audio-processing/webrtc/rtc_base/event_tracer.cc
+webrtc-audio-processing/webrtc/rtc_base/experiments/field_trial_parser.cc
+webrtc-audio-processing/webrtc/rtc_base/logging.cc
+webrtc-audio-processing/webrtc/rtc_base/memory/aligned_malloc.cc
+webrtc-audio-processing/webrtc/rtc_base/platform_thread.cc
+webrtc-audio-processing/webrtc/rtc_base/platform_thread_types.cc
+webrtc-audio-processing/webrtc/rtc_base/race_checker.cc
+webrtc-audio-processing/webrtc/rtc_base/random.cc
+webrtc-audio-processing/webrtc/rtc_base/string_encode.cc
+webrtc-audio-processing/webrtc/rtc_base/string_to_number.cc
+webrtc-audio-processing/webrtc/rtc_base/string_utils.cc
+webrtc-audio-processing/webrtc/rtc_base/strings/string_builder.cc
+webrtc-audio-processing/webrtc/rtc_base/synchronization/sequence_checker_internal.cc
+webrtc-audio-processing/webrtc/rtc_base/synchronization/yield_policy.cc
+webrtc-audio-processing/webrtc/rtc_base/system/file_wrapper.cc
+webrtc-audio-processing/webrtc/rtc_base/system_time.cc
+webrtc-audio-processing/webrtc/rtc_base/time_utils.cc
+webrtc-audio-processing/webrtc/rtc_base/zero_memory.cc
+webrtc-audio-processing/webrtc/api/audio/audio_frame.cc
+webrtc-audio-processing/webrtc/api/audio/audio_processing.cc
+webrtc-audio-processing/webrtc/api/audio/audio_processing_statistics.cc
+webrtc-audio-processing/webrtc/api/audio/channel_layout.cc
+webrtc-audio-processing/webrtc/api/audio/echo_canceller3_config.cc
+webrtc-audio-processing/webrtc/api/rtp_headers.cc
+webrtc-audio-processing/webrtc/api/rtp_packet_info.cc
+webrtc-audio-processing/webrtc/api/task_queue/task_queue_base.cc
+webrtc-audio-processing/webrtc/api/units/frequency.cc
+webrtc-audio-processing/webrtc/api/units/time_delta.cc
+webrtc-audio-processing/webrtc/api/units/timestamp.cc
+webrtc-audio-processing/webrtc/api/video/color_space.cc
+webrtc-audio-processing/webrtc/api/video/hdr_metadata.cc
+webrtc-audio-processing/webrtc/api/video/video_content_type.cc
+webrtc-audio-processing/webrtc/api/video/video_timing.cc
+webrtc-audio-processing/webrtc/system_wrappers/source/cpu_features.cc
+webrtc-audio-processing/webrtc/system_wrappers/source/denormal_disabler.cc
+webrtc-audio-processing/webrtc/system_wrappers/source/field_trial.cc
+webrtc-audio-processing/webrtc/system_wrappers/source/metrics.cc
+webrtc-audio-processing/webrtc/system_wrappers/source/sleep.cc
+webrtc-audio-processing/webrtc/common_audio/audio_converter.cc
+webrtc-audio-processing/webrtc/common_audio/audio_util.cc
+webrtc-audio-processing/webrtc/common_audio/channel_buffer.cc
+webrtc-audio-processing/webrtc/common_audio/fir_filter_c.cc
+webrtc-audio-processing/webrtc/common_audio/fir_filter_factory.cc
+webrtc-audio-processing/webrtc/common_audio/resampler/push_resampler.cc
+webrtc-audio-processing/webrtc/common_audio/resampler/push_sinc_resampler.cc
+webrtc-audio-processing/webrtc/common_audio/resampler/resampler.cc
+webrtc-audio-processing/webrtc/common_audio/resampler/sinc_resampler.cc
+webrtc-audio-processing/webrtc/common_audio/resampler/sinusoidal_linear_chirp_source.cc
+webrtc-audio-processing/webrtc/common_audio/ring_buffer.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/auto_correlation.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/auto_corr_to_refl_coef.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/complex_bit_reverse.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/complex_fft.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/copy_set_operations.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/cross_correlation.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/division_operations.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/dot_product_with_scale.cc
+webrtc-audio-processing/webrtc/common_audio/signal_processing/downsample_fast.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/filter_ar.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/filter_ar_fast_q12.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/energy.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/filter_ma_fast_q12.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/get_hanning_window.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/get_scaling_square.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/ilbc_specific_functions.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/levinson_durbin.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/lpc_to_refl_coef.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/min_max_operations.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/randomization_functions.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/real_fft.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/refl_coef_to_lpc.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/resample_48khz.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/resample_by_2.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/resample_by_2_internal.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/resample.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/resample_fractional.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/spl_init.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/spl_inl.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/splitting_filter.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/spl_sqrt.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/sqrt_of_one_minus_x_squared.c
+webrtc-audio-processing/webrtc/common_audio/signal_processing/vector_scaling_operations.c
+webrtc-audio-processing/webrtc/common_audio/smoothing_filter.cc
+webrtc-audio-processing/webrtc/common_audio/third_party/ooura/fft_size_128/ooura_fft.cc
+webrtc-audio-processing/webrtc/common_audio/third_party/ooura/fft_size_256/fft4g.cc
+webrtc-audio-processing/webrtc/common_audio/third_party/spl_sqrt_floor/spl_sqrt_floor.c
+webrtc-audio-processing/webrtc/common_audio/vad/vad.cc
+webrtc-audio-processing/webrtc/common_audio/vad/vad_core.c
+webrtc-audio-processing/webrtc/common_audio/vad/vad_filterbank.c
+webrtc-audio-processing/webrtc/common_audio/vad/vad_gmm.c
+webrtc-audio-processing/webrtc/common_audio/vad/vad_sp.c
+webrtc-audio-processing/webrtc/common_audio/vad/webrtc_vad.c
+webrtc-audio-processing/webrtc/common_audio/fir_filter_neon.cc  arm64
+webrtc-audio-processing/webrtc/common_audio/resampler/sinc_resampler_neon.cc  arm64
+webrtc-audio-processing/webrtc/common_audio/signal_processing/cross_correlation_neon.c  arm64
+webrtc-audio-processing/webrtc/common_audio/signal_processing/downsample_fast_neon.c  arm64
+webrtc-audio-processing/webrtc/common_audio/signal_processing/min_max_operations_neon.c  arm64
+webrtc-audio-processing/webrtc/common_audio/third_party/ooura/fft_size_128/ooura_fft_neon.cc  arm64
+webrtc-audio-processing/webrtc/common_audio/fir_filter_sse.cc  x86_64 -msse2
+webrtc-audio-processing/webrtc/common_audio/resampler/sinc_resampler_sse.cc  x86_64 -msse2
+webrtc-audio-processing/webrtc/common_audio/third_party/ooura/fft_size_128/ooura_fft_sse2.cc  x86_64 -msse2
+webrtc-audio-processing/webrtc/common_audio/fir_filter_avx2.cc  x86_64 -mavx2 -mfma
+webrtc-audio-processing/webrtc/common_audio/resampler/sinc_resampler_avx2.cc  x86_64 -mavx2 -mfma
+webrtc-audio-processing/webrtc/third_party/pffft/src/pffft.c  -D_GNU_SOURCE
+webrtc-audio-processing/webrtc/third_party/rnnoise/src/rnn_vad_weights.cc
+webrtc-audio-processing/webrtc/modules/third_party/fft/fft.c
+webrtc-audio-processing/webrtc/modules/audio_coding/codecs/isac/main/source/filter_functions.c
+webrtc-audio-processing/webrtc/modules/audio_coding/codecs/isac/main/source/isac_vad.c
+webrtc-audio-processing/webrtc/modules/audio_coding/codecs/isac/main/source/pitch_estimator.c
+webrtc-audio-processing/webrtc/modules/audio_coding/codecs/isac/main/source/pitch_filter.c
+webrtc-audio-processing/webrtc/modules/audio_processing/aec_dump/null_aec_dump_factory.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/adaptive_fir_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/adaptive_fir_filter_erl.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/aec3_common.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/aec3_fft.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/aec_state.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/alignment_mixer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/api_call_jitter_metrics.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/block_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/block_delay_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/block_framer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/block_processor.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/block_processor_metrics.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/clockdrift_detector.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/coarse_filter_update_gain.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/comfort_noise_generator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/config_selector.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/decimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/dominant_nearend_detector.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/downsampled_render_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/echo_audibility.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/echo_canceller3.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/echo_path_delay_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/echo_path_variability.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/echo_remover.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/echo_remover_metrics.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/erle_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/erl_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/fft_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/filter_analyzer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/frame_blocker.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/fullband_erle_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/matched_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/moving_average.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/multi_channel_content_detector.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/refined_filter_update_gain.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/render_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/render_delay_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/render_delay_controller.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/render_delay_controller_metrics.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/render_signal_analyzer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/residual_echo_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/reverb_decay_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/reverb_frequency_response.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/reverb_model.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/reverb_model_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/signal_dependent_erle_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/spectrum_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/stationarity_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/subband_erle_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/subband_nearend_detector.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/subtractor.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/subtractor_output_analyzer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/subtractor_output.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/suppression_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/suppression_gain.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/transparent_mode.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aecm/aecm_core.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aecm/echo_control_mobile.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc/agc.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc/agc_manager_direct.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc/legacy/analog_agc.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc/legacy/digital_agc.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc/loudness_histogram.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc/utility.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/adaptive_digital_gain_controller.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/agc2_testing_common.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/biquad_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/clipping_predictor.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/clipping_predictor_level_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/compute_interpolated_gain_curve.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/cpu_features.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/fixed_digital_level_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/gain_applier.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/input_volume_controller.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/input_volume_stats_reporter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/interpolated_gain_curve.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/limiter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/limiter_db_gain_curve.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/noise_level_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/auto_correlation.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/features_extraction.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/lp_residual.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/pitch_search.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/pitch_search_internal.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/rnn.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/rnn_fc.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/rnn_gru.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/spectral_features.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/spectral_features_internal.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/saturation_protector.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/saturation_protector_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/speech_level_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/speech_probability_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/vad_wrapper.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/vector_float_frame.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/audio_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/audio_processing_builder_impl.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/audio_processing_impl.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/capture_levels_adjuster/audio_samples_scaler.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/capture_levels_adjuster/capture_levels_adjuster.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/echo_control_mobile_impl.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/echo_detector/circular_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/echo_detector/mean_variance_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/echo_detector/moving_max.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/echo_detector/normalized_covariance_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/gain_control_impl.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/gain_controller2.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/high_pass_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/include/aec_dump.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/include/audio_frame_proxies.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/logging/apm_data_dumper.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/fast_math.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/histograms.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/noise_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/noise_suppressor.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/ns_fft.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/prior_signal_model.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/prior_signal_model_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/quantile_noise_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/signal_model.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/signal_model_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/speech_probability_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/suppression_params.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/ns/wiener_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/residual_echo_detector.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/rms_level.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/splitting_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/three_band_filter_bank.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/utility/cascaded_biquad_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/utility/delay_estimator.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/utility/delay_estimator_wrapper.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/utility/pffft_wrapper.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/vad/gmm.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/vad/pitch_based_vad.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/vad/pitch_internal.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/vad/pole_zero_filter.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/vad/standalone_vad.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/vad/vad_audio_proc.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/vad/vad_circular_buffer.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/vad/voice_activity_detector.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aecm/aecm_core_c.cc
+webrtc-audio-processing/webrtc/modules/audio_processing/aecm/aecm_core_neon.cc  arm64
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/adaptive_fir_filter_avx2.cc  x86_64 -mavx2 -mfma
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/adaptive_fir_filter_erl_avx2.cc  x86_64 -mavx2 -mfma
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/fft_data_avx2.cc  x86_64 -mavx2 -mfma
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/matched_filter_avx2.cc  x86_64 -mavx2 -mfma
+webrtc-audio-processing/webrtc/modules/audio_processing/aec3/vector_math_avx2.cc  x86_64 -mavx2 -mfma
+webrtc-audio-processing/webrtc/modules/audio_processing/agc2/rnn_vad/vector_math_avx2.cc  x86_64 -mavx2 -mfma
+
+abseil-cpp/absl/base/internal/raw_logging.cc
+abseil-cpp/absl/base/internal/throw_delegate.cc
+abseil-cpp/absl/base/log_severity.cc
+abseil-cpp/absl/numeric/int128.cc
+abseil-cpp/absl/strings/ascii.cc
+abseil-cpp/absl/strings/charconv.cc
+abseil-cpp/absl/strings/internal/charconv_bigint.cc
+abseil-cpp/absl/strings/internal/charconv_parse.cc
+abseil-cpp/absl/strings/internal/memutil.cc
+abseil-cpp/absl/strings/internal/stringify_sink.cc
+abseil-cpp/absl/strings/match.cc
+abseil-cpp/absl/strings/numbers.cc
+abseil-cpp/absl/strings/str_cat.cc

@@ -6,7 +6,9 @@
 
 - **只做 macOS**，最低 **macOS 14.4**（录系统声音用 Core Audio 的进程音频捕获，权限是「录制系统音频」，不用申请录屏权限）。Apple 芯片和 Intel 都支持（universal）。
 - **Tauri 2**：Rust 写本地部分，界面复用网页版（`web/`）的同一套 React 代码，按「桌面版」模式构建打包进 App。网页版加的功能，桌面版重新构建就有。
-- **先不签名**：CI 打出未签名（ad-hoc 签名）的 DMG。第一次打开要在 Finder 里右键 →「打开」。签名、公证的步骤在 CI 里预留，配了 Apple 证书的 Secrets 才执行。
+- **不签名，只发在 GitHub Releases 上**：没有 Apple 开发者账号，CI 打出 ad-hoc 签名（等于没签名）、没有公证的 DMG，只发在仓库的 GitHub Releases 上。第一次打开要在「系统设置 → 隐私与安全性」里点「仍要打开」（macOS 14 也可以右键 →「打开」）。系统把每个版本都当成新的 App：更新以后钥匙串、麦克风、录制系统音频的权限可能要再允许一次。
+- **App 里自动更新**：用 Tauri 的 updater。更新包用项目自己的密钥签名（和苹果的签名无关），App 只装 `tauri.conf.json` 里的公钥核对得上的更新包。见「发布和自动更新」。
+- **回声消除用 WebRTC 的 AEC3，在录音小程序里做**：webrtc-audio-processing 2.1 的源码放在仓库里一起编译，拿录到的电脑声音当参考，只动麦克风那一路。不用苹果的 voice processing：它会压低别的 App 播放的声音，还可能让会议软件录到的麦克风变得很小。先作为试验功能，默认关着，在真机上试过再考虑默认打开（见「回声消除」）。
 - 安卓以后再说。
 
 ## 结构
@@ -14,9 +16,13 @@
 ```
 desktop/
   src-tauri/        Rust：本地代理、登录、钥匙串、菜单栏、录音管理（src/recorder/）
+  src/update.rs     自动更新（见「发布和自动更新」）
   recorder/         Swift：录电脑声音和麦克风的小程序 zsmeet-recorder
-  scripts/          build-recorder.sh：构建录音小程序，放到 src-tauri/binaries/ 给 Tauri 打包
+    ThirdParty/     回声消除用的 WebRTC 音频处理和 abseil 的源码（没改过，版本、来源、校验和见那里的 README.md）
+  scripts/          build-recorder.sh：构建录音小程序，放到 src-tauri/binaries/ 给 Tauri 打包；
+                    set-version.mjs（改版本号）、update-manifest.mjs（生成更新清单）：发布用
 web/src/platform/   网页版和桌面版不一样的地方（见下）
+THIRD_PARTY_NOTICES 打包进 App 的第三方代码的版权声明和许可证（WebRTC 是 BSD-3，abseil 是 Apache-2.0）
 ```
 
 桌面版的界面就是 `web/` 用 `pnpm -C web build --mode desktop` 构建出来的，`VITE_PLATFORM=desktop`。
@@ -91,30 +97,63 @@ Rust 在 App 进程里起一个只监听 `127.0.0.1` 随机端口的 HTTP 代理
 
 #### 录音小程序 zsmeet-recorder（`desktop/recorder/`）
 
-- 打包在 App 里（`zsmeet.app/Contents/MacOS/zsmeet-recorder`，Tauri 的 `externalBin`），由 App 启动，权限算在 App 头上：弹窗、系统设置里都是 zsmeet。`desktop/scripts/build-recorder.sh` 用 swiftc 把 Apple 芯片和 Intel 各编一份、用 lipo 合成通用的（只装 Command Line Tools 也能编），`tauri dev`、`tauri build` 之前自动执行。打包时 Tauri 用 App 的身份重新签名，带上 hardened runtime 和 `entitlements.plist` 里的 `com.apple.security.device.audio-input`（没有它，麦克风录到的全是静音）。App 的 Info.plist 里有麦克风（`NSMicrophoneUsageDescription`）和录制系统音频（`NSAudioCaptureUsageDescription`）的说明。
+- 打包在 App 里（`zsmeet.app/Contents/MacOS/zsmeet-recorder`，Tauri 的 `externalBin`），由 App 启动，权限算在 App 头上：弹窗、系统设置里都是 zsmeet。`desktop/scripts/build-recorder.sh` 用 swiftc 把 Apple 芯片和 Intel 各编一份、用 lipo 合成通用的（只装 Command Line Tools 也能编），`tauri dev`、`tauri build` 之前自动执行。回声消除用的 WebRTC 音频处理（`desktop/recorder/ThirdParty/`，几百个 C/C++ 文件，见那里的 README.md）每种架构编成一个静态库放在 `desktop/recorder/.build/webrtc-<架构>/`：第一次要几分钟，之后按源码、编译参数、编译器和 SDK 的指纹判断，没变就直接用（CI 缓存这个目录）。它们的许可证要求安装包里带着版权声明：仓库根目录的 `THIRD_PARTY_NOTICES` 打包时放进 App（`Contents/Resources/THIRD_PARTY_NOTICES.txt`，`tauri.conf.json` 的 `bundle.resources`），发布时 CI 会检查。打包时 Tauri 用 App 的身份重新签名，带上 hardened runtime 和 `entitlements.plist` 里的 `com.apple.security.device.audio-input`（没有它，麦克风录到的全是静音）。App 的 Info.plist 里有麦克风（`NSMicrophoneUsageDescription`）和录制系统音频（`NSAudioCaptureUsageDescription`）的说明。
 - `zsmeet-recorder devices`：标准输出一行 `{"microphones":[{"uid":"…","name":"…","default":true}]}`。只读设备信息，不弹权限窗口。
-- `zsmeet-recorder record --out <目录> [--start-seq N] [--chunk-seconds 10] [--mic <uid> | --mic default | --no-mic] [--no-system] [--input-file <音频文件> [--realtime]]`
-  - `--input-file` 是测试用的：拿音频文件代替麦克风和电脑声音（不要权限、不弹窗），尽快读完，读完自动结束（和收到 stop 一样）；加 `--realtime` 按文件的实际时长读，用来测暂停、继续。读到一半出错（比如文件被截短）以 error（`input_file`）结束、以 1 退出，不当成读完了。
+- `zsmeet-recorder record --out <目录> [--start-seq N] [--chunk-seconds 10] [--mic <uid> | --mic default | --no-mic] [--no-system] [--echo-cancel off|auto|on] [--input-file <音频文件> [--realtime [--reference-file <音频文件>]]]`
+  - `--mic default`（默认）：录系统默认的麦克风，录音中跟着系统设置换（见下面的「换麦克风」，换了发 `mic_changed`）。`--mic <uid>`：只录这一个，不跟着换；开始时找不到它就改用系统默认的（发 warning `mic_unavailable`），也不跟着换。
+  - `--echo-cancel`：回声消除，默认 `off`（见下面的「回声消除」）。`auto`：麦克风和电脑声音都在录、声音不是从耳机（包括耳麦、蓝牙耳机）或 AirPlay 出来时做；`on`：两路都在录就做；`off`：不做。App 只用 `off`、`auto`。
+  - `--input-file` 是测试用的：拿音频文件代替麦克风和电脑声音（不要权限、不弹窗），尽快读完，读完自动结束（和收到 stop 一样）；加 `--realtime` 按文件的实际时长读，用来测暂停、继续。读到一半出错（比如文件被截短）以 error（`input_file`）结束、以 1 退出，不当成读完了。再加 `--reference-file` 拿另一个文件当电脑声音（这时 `--input-file` 只当麦克风），两个文件的时间戳从同一刻开始，测回声消除用；读文件时 `auto` 不看真的输出设备，当成外放。
   - `--start-seq N`：接着录一场中断了的录音时，第一片写成 N。N 只能是 0 到 3999（服务器一场会议最多收 4000 片），别的数按参数不对处理（`bad_args`，以 2 退出）。目录里已经有序号不小于 N 的分片时拒绝开始（`chunk_exists`），不会覆盖；目录列不出里面有什么（比如只能写、不能读）时也不开始（`out_dir`），免得看不到已有的分片、把它们覆盖掉。录的过程中序号也不会到 4000：写到第 3999 片（服务器能收的最后一片）够长了也不切，发 warning（`chunk_limit`），后面的声音接着写进它，等 App 结束录音；它写到服务器能收的大小（8 MB，64 kbps 约 16 分钟）还没结束的话自己结束：写好这一片，发 stopped（`next_seq` 是 4000），以 0 退出。暂停时写好的是第 3999 片的话，`paused` 后面紧跟着这个 warning，继续以后马上自己结束。
 - 标准输入一行一个命令：`{"cmd":"pause"}`、`{"cmd":"resume"}`、`{"cmd":"stop"}`，标准输入关掉等于 stop；SIGINT、SIGTERM、SIGHUP 也按 stop 处理。标准输出一行一个事件（日志写在标准错误）：
 
 | 事件 | 说明 |
 |---|---|
-| `{"event":"started","sample_rate":48000,"channels":1,"mic":"<麦克风名>"或null,"system":true}` | 开始录了。第一次录音时要等用户点完权限弹窗，可能要等很久。`mic`、`system` 只算真的在录的：开始时去掉了的那一路（没有权限、打不开、采样率处理不了）是 null、false |
+| `{"event":"started","sample_rate":48000,"channels":1,"mic":"<麦克风名>"或null,"system":true,"echo_cancellation":"off"}` | 开始录了。第一次录音时要等用户点完权限弹窗，可能要等很久。`mic`、`system` 只算真的在录的：开始时去掉了的那一路（没有权限、打不开、采样率处理不了）是 null、false。`echo_cancellation` 是回声消除的模式：`off`、`auto`、`on`（照 `--echo-cancel`），要的模式没能打开（建不起来 WebRTC 的回声消除器）是 `unavailable`，这时麦克风的声音原样录 |
+| `{"event":"echo","active":true,"reason":"speakers"}` | 回声消除实际做没做、为什么，只在 `auto`、`on` 时有：开始录时（`started` 之后）报一次，变了再报。`reason`：`speakers`（auto，外放，在做）、`forced`（on，在做）、`headphones`（auto，戴着耳机，没做）、`airplay`（auto，AirPlay 的延迟太长，没做）、`no_reference`（电脑声音没在录、断了或者一直来得太晚，没做）、`off`（回声消除出错，这次录音不再做）。只录电脑声音（没录麦克风）时什么都不报 |
+| `{"event":"mic_changed","name":"AirPods Pro"}` | 只在 `--mic default` 时有：系统默认的麦克风换了（或者在录的断开了、系统换了一个默认的），已经换过去接着录了，`name` 是现在在录的麦克风。一定在 `started` 之后 |
 | `{"event":"level","seconds":12.3,"mic":0.5,"system":0.2}` | 约每 100 毫秒一个：录了多少秒（不算暂停），两路的音量（0 到 1）。暂停时没有 |
 | `{"event":"chunk","seq":3,"path":"<绝对路径>","bytes":80000,"seconds":10.005}` | 一片写好了：先写 `<序号>.aac.part`、落盘，改名成 `<序号>.aac` 以后才报告 |
 | `{"event":"paused"}`、`{"event":"resumed"}` | 暂停时先把正在写的那一片写完（`paused` 前面紧跟着一个 `chunk`） |
-| `{"event":"warning","code":"mic_denied","message":"…"}` | 提醒，录音照常进行。code 是 `mic_denied`、`mic_unavailable`、`system_denied`、`system_unavailable`（有一路录不了或者出了问题，另一路照常录），或者 `chunk_limit`（分片数到了服务器能收的上限，App 该结束录音了，只发一次）。message 是给用户看的中文，说了怎么处理。同一个 code 可能先后有几条，说的不是一回事（比如先是没找到选的麦克风、改用了别的，后来这个麦克风又断开了） |
+| `{"event":"warning","code":"mic_denied","message":"…"}` | 提醒，录音照常进行。code 是 `mic_denied`、`mic_unavailable`、`system_denied`、`system_unavailable`（有一路录不了或者出了问题，另一路照常录），`chunk_limit`（分片数到了服务器能收的上限，App 该结束录音了，只发一次），`mic_silent`（麦克风很长一段时间录到的全是静音或者几乎没有声音，见下面的「麦克风没有声音」；一段静音只发一次，有声音了以后又静音那么久会再发一条一样的），或者 `echo_unavailable`（要求一直做回声消除，`--echo-cancel on`，却没能打开或者中途出错关掉了；`auto` 时不提醒，只在 `started`、`echo` 里报）。message 是给用户看的中文，说了怎么处理。同一个 code 可能先后有几条，说的不是一回事（比如先是没找到选的麦克风、改用了别的，后来这个麦克风又断开了） |
 | `{"event":"error","code":"no_source","message":"…"}` | 录不下去了，接着以 1 退出（参数不对是 `bad_args`，以 2 退出） |
 | `{"event":"stopped","next_seq":7,"seconds":65.2}` | 停好了，最后一片也写完了，接着以 0 退出 |
+
+`stopped`、`error` 一定是最后一行：之后别的线程再发的事件（比如还在走的音量）都不写。
 
 - 分片 `<目录>/<序号>.aac`：AAC-LC、48 kHz、单声道、约 64 kbps、ADTS，每片约 10 秒（按录到的声音算，不算暂停的时间；第 3999 片可能更长，见上面的 `--start-seq`），不会有空的分片。分片（包括写着的 `.part`）只有自己能读写（0600）；录音目录要是录音小程序自己建的（包括中间的目录），只有自己能进（0700），已经有的目录不动。
   - 整场录音只建一个编码器，暂停、切分片都不重建，切分片只是把 ADTS 帧分到不同的文件里：所有分片按序号接起来就是一路连续的 ADTS，时长和录到的一样。每片重开编码器的话，每片开头多出约 44 毫秒的预热，一小时差十几秒。编码器开头的预热里够一整帧的部分丢掉，只剩 1.3 毫秒，标记的时间点和转写的时间都对得上。
   - 服务器把分片按序号原样接起来交给 ffmpeg，和网页录音的分片走同一条路。
 - 混音：麦克风和电脑声音各自转成 48 kHz 单声道，按时间混成一路。两个设备的时钟不一样快、交数据时快时慢，所以按经过的时间取：每一路先攒 0.15 秒，取的时候不够就补静音，积压超过 0.5 秒丢掉最早的，两路一直对得上。处理线程卡住一阵以后分几次补上，卡住期间录下、等着补上的声音不算积压。点暂停之前采到的声音（包括各路攒着的那 0.15 秒）都编进去，暂停时采到的声音直接丢掉，什么都不编码；继续以后各路重新攒，只编点了继续以后采到的声音，还用同一个编码器。结束时把编码器里剩下的编进最后一片（可能不满 10 秒）。
 - 采样率：每一路用一个转换器转成 48 kHz，转换器只支持 8 kHz 到 384 kHz。开始时哪一路的采样率处理不了，就不录这一路，发 warning（`mic_unavailable`、`system_unavailable`，说去「音频 MIDI 设置」里改成 48000 Hz），只录另一路；两路都不行时发 error（`no_source`）。录音中设备的采样率变了跟着换（先挂上监听再读一次、最后才开始录，开始前后变的都跟得上）。转换出错时那一小段丢掉（混音时补成静音），每一路提醒一次（同样是 `mic_unavailable`、`system_unavailable`，说「录音还在继续」），录音不停。
+- 换麦克风（`--mic default`，`MicFollower.swift`）：系统默认的输入设备换了（连上了 AirPods、插上了 USB 麦克风、在系统设置里换了一个），或者在录的麦克风断开了、系统换了一个默认的，就打开新的那个接着录，发 `mic_changed`，1 秒左右换过去（默认的设备变了先等 0.3 秒，插拔、连蓝牙时会连着变几下，只看最后一下）。
+  - 不重、不断：新的先开始录，再在处理线程上停掉旧的、把它剩下的都取出来转完，接着取新的；两个同时在录的那一小段按 IOProc 的时间戳去掉新的那边的（没有时间戳的设备不去掉，最多重复一点点）。麦克风那一路接着往下，录音的时长照样跟着时钟走，只少了换的时候两个麦克风都没在录的那一点（比如旧的断开了、新的还没开始）。新的采样率不一样就换一个转换器。
+  - 回声消除：新的麦克风的时间戳从新的一段开始（新的设备有自己的时钟），之前压着的旧麦克风的声音照旧按旧的时间配参考；处理到新的麦克风的第一帧时 AEC3 从头开始（麦克风换了，回声的路径全变了），参考重新对齐。auto 模式判断耳麦时看的也换成新的麦克风。
+  - 「有没有声音」（见下面）对新的麦克风从头看。
+  - 换不过去：新的打不开（蓝牙设备刚连上时可能还用不了）过 1 秒再试，一共试 3 次，都不行才发 warning（`mic_unavailable`），接着录原来的；采样率处理不了的不再试，直接提醒。默认的设备再变时再看。
+  - 在录的断开了、系统一时没有换一个能用的默认麦克风：断开 2 秒以后还是这样才发 warning（`mic_unavailable`，说接上麦克风或者在系统设置里选一个，录音会自动换过去），之后有了新的默认设备照样换过去。
+  - `--mic <uid>` 时不跟：断开了发 warning（`mic_unavailable`，说结束录音、接好以后重新开始），和以前一样。
+- 麦克风没有声音（`SilenceWatch.swift`，读环形缓冲里的原始采样，回声消除影响不到它，每 0.1 秒算一次）：
+  - 一个麦克风刚开始录的 5 秒一直全是 0（一点底噪都没有）：多半是被静音了、没有权限，马上发 warning（`mic_unavailable`）。
+  - 录音中（不算暂停）连续 30 秒全是 0（每个采样都不超过 -120 dBFS），或者连续 1 分钟每 0.1 秒的均方根都比 -90 dBFS 小：发 warning（`mic_silent`）。多半是开着的会议软件用它的语音处理（降噪、回声消除）占住了麦克风（别的程序录到的就是静音，或者小得多的声音），麦克风被静音了，或者录的不是正在用的麦克风；message 说了这几种可能和怎么检查。-90 dBFS 比安静房间里麦克风录到的底噪（一般 -75 到 -60 dBFS）小得多，一般的麦克风在再安静的房间里也不会误报（底噪特别低的专业声卡把增益调到最小时可能会）。有的耳麦、降噪软件的虚拟麦克风在没人说话时给的就是 0，一直不说话超过 30 秒也会提醒，所以 message 说的是「如果这段时间你说过话」。
+  - 一段静音只提醒一次（开头那 5 秒的提醒也算这一段的）；中间有 0.1 秒超过 -90 dBFS 就算恢复了（日志里记一笔），之后再静音那么久会再提醒。暂停时录到的不算时间，有声音照样算恢复。电脑声音不检查（没在放声音时本来就全是 0）。
+  - 会议软件的语音处理只是把麦克风压小了 20 多 dB（不是全是 0）时，你说话的声音还在 -90 dBFS 以上，这里发现不了；只能在录音页上看麦克风的音量条。
 - 权限：麦克风用 AVCaptureDevice 查，还没问过就弹窗问。电脑声音用 Core Audio 的进程音频捕获（`CATapDescription` + `AudioHardwareCreateProcessTap`，放进一个只有本进程看得见的聚合设备）；苹果没有公开查这个权限的接口，用系统 TCC 框架里的 `TCCAccessPreflight`、`TCCAccessRequest` 查和问（将来找不到这两个函数就照常开始，系统第一次录的时候自己弹窗，只是拒绝了的话发现不了，录到的是静音）。一路录不了发 warning、录另一路；两路都录不了发 error（`no_source`）。
 - 结束时拆掉 tap 和聚合设备再退出。结束卡住 8 秒（`stop_timeout`）或者结束时又收到一次信号（`killed`）就发 error 直接退出，系统会收回本进程私有的设备。
+
+##### 回声消除（试验功能，默认关着）
+
+外放开会时，麦克风也会录到扬声器放出来的会议声音，转写里同一句话就有两遍。电脑声音（进程音频捕获）正是扬声器放的东西，拿它当参考，用 WebRTC 的 AEC3（webrtc-audio-processing 2.1，编进录音小程序，见 `desktop/recorder/ThirdParty/README.md`）把它从麦克风里减掉。只动麦克风那一路，电脑声音那一路不变；不用新的权限，不影响会议软件和别的 App 播放、录音（不用苹果的 voice processing：它会压低别的 App 的声音，还可能让别的 App 录到的麦克风变得很小）。降噪、自动增益都关着，送去转写的声音除了去掉回声不做别的改动。
+
+- 在哪里做：每一路转成 48 kHz 以后、按时间混音之前（`EchoStage.swift`）。麦克风 → 转换器 → EchoStage（AEC3）→ 麦克风那一路；电脑声音 → 转换器 → 电脑声音那一路，再复制一份给 EchoStage 当参考。
+- 对齐：IOProc 记下每批采样第一个采样被硬件采到的时间（`zr_stamp`，主机时间），每一路用最近 20 秒的时间戳拟合一条直线（跟得上设备时钟的快慢），时间戳离直线超过 2 毫秒就从那里重新开始一段（丢了采样、设备停过）；没有时间戳的设备按收到数据的时间粗略对齐。麦克风一帧（480 个采样、10 毫秒）从 tm 开始，配上参考里从 tm + 170 毫秒开始的一帧，先喂参考、再处理麦克风，一比一。参考提前 170 毫秒（和 Chromium 拿系统声音做参考时一样），AEC3 看到的延迟是 170 毫秒加真正的回声延迟，它用 6 个滤波器能找到约 608 毫秒，所以回声比时间戳早到 170 毫秒以内、晚到约 438 毫秒以内都消得掉。两路时钟不一样快时，偏出一个多采样就在参考里补一个或者丢一个（100 ppm 一小时约 17000 个），麦克风的采样一个都不动；偏了 2 毫秒以上直接重新对齐，20 毫秒以上 AEC3 从头开始学。电脑声音断开过的那段时间喂 0。
+- 代价：麦克风要多等约 0.2 秒才交给混音（提前量加上等参考），所以录出来的声音里你说的话比会议里别人的晚约 0.2 秒，听不出问题，转写、标记都不受影响。AEC3 处理过的声音晚 431 个采样（约 9 毫秒，测试里量过，`ZR_AEC_LATENCY`）；最近送进去的这 431 个原声留一份，没经过 AEC3 的帧先交出它们：不管做不做回声消除，交出去的声音都晚 431 个采样，开、关切换时不多不少、一个不重。CPU：一帧几十微秒，不到一个核的 1%。
+- 什么时候做（`auto`）：两路都在录，并且默认输出设备不是耳机。判断耳机：输出流的类型是耳机（`hdph`，USB 的 0x0302、0x0303、0x0402），Intel 的 Mac 内置输出的数据源是 `hdpn`，名字里有 headphone、headset、earphone、earbud、AirPods、buds、耳机、耳麦，蓝牙设备（名字里有 speaker、音箱、音响这些的除外），和正在录的麦克风是同一个设备（耳麦；名字是显示器、扬声器的除外）；AirPlay 单独算（延迟太长）；别的都当外放（宁可多做）。默认输出设备、它的数据源和输出流变了都重新判断，变了要稳定 1 秒才跟着变。`on` 只要两路都在录就做（比如蓝牙音箱）。
+- 开、关：不做的时候麦克风原样通过（一个比特都不变），也照样多等一会儿，切换时不多不少。重新打开时 AEC3 从头开始（中间没喂过它，回声路径也可能变了），要一两秒重新学会。电脑声音 0.3 秒没来新的（刚开始录时 1.5 秒）、或者一直比麦克风晚 0.25 秒以上，就先不做（`no_reference`），麦克风不会一直等；电脑声音跟上了接着做。
+- 出了问题：建不起来回声消除器，录麦克风原声，`started` 报 `unavailable`（`on` 时再发 `echo_unavailable` 提醒）。处理中出错（WebRTC 返回错误、出来的不是有限的数）这一帧用原声，从头开始再试；连续出错 3 次就不再做（`echo`：`off`，`on` 时提醒）。WebRTC 内部的检查没通过会 abort 整个进程，所以 C 接口（`zr_aec.cc`）先查好所有参数（48 kHz、单声道、正好 480 个采样、指针不是空的），接住 C++ 的异常，送进去的声音先把 NaN、无穷大换成 0，超出 -1 到 1 的削掉。不管出什么事，麦克风进多少个采样就出多少个，录音不会因为回声消除停下来或者变短。
+- 暂停、继续、结束：点暂停时压在回声消除里的麦克风声音先原样交出去（这样点暂停之前采到的都编进去），暂停期间照常处理（AEC3 一直学着），处理出来的不要；点继续时压着的（暂停期间采到的）处理完也不要。结束时剩下的都处理完：最后提前量那么长的参考还没放出来，那部分喂 0（消这几帧的回声用的是以前的参考，AEC3 那里都有），最后不到 9 毫秒原样交出。
+- 已知的：两边同时说话时 AEC3 会把这边压低一些（合成的测试里平均约 7 dB，一阵一阵的）；从没找到回声（会议软件的声音其实从别的设备出来）时，前几秒对方一说话这边也会被压低（用了 WebRTC 的 HMM 透明模式，约 4 秒后就不压了，默认的那种要十几秒）；扬声器开得很响、蓝牙音箱、电视、AirPlay 可能还会留下一点回声。所以先作为试验功能，默认关着，等真机上试过再说（见下面的「测试」）。
+- 日志（标准错误，App 记进日志）：每 60 秒和结束时一行：模式、状态、输出路线，处理了多少帧、原样通过多少帧，补、丢了多少参考采样，重新对齐、从头开始、电脑声音断开、来晚、出错的次数，麦克风最多等了多久，两路时钟的偏差（ppm），AEC3 估计的延迟、ERLE 等。
+- 调回声消除用的参数（App 不用）：`--aec-lead-ms`（提前量，默认 170）、`--aec-filters`（滤波器个数，默认 6）、`--aec-delay-hint-ms`（告诉 AEC3 大概的延迟，默认不告诉）、`--aec-dump <目录>`（把送进去的麦克风原声、配对的参考、交出去的麦克风写成三个 48 kHz 的 WAV：`mic-in.wav`、`reference.wav`、`mic-out.wav`，第 n 个采样是对应的；只在这台电脑上，只有自己能读，真机上量消掉了多少、排查用）。
 
 #### App 里的录音管理（`desktop/src-tauri/src/recorder/`）
 
@@ -126,7 +165,7 @@ Rust 在 App 进程里起一个只监听 `127.0.0.1` 随机端口的 HTTP 代理
 | 命令 | 做什么 |
 |---|---|
 | `recorder_devices()` | `{ microphones: [{ uid, name, default }] }` |
-| `recorder_start({ meetingId, mic, system })` | 会议要先在服务器上建好（`source: "desktop"`）。mic 是麦克风的 uid 或 `"default"`，null 是不录麦克风；麦克风和电脑的声音至少录一个。这台电脑上有这场会议中断了的录音时接着录（分片到了 3999 片、只剩服务器能收的最后一片时不录，提示直接结束；上次断网时接着录的部分和服务器上已有的分片序号重了时也不录，返回原因，见下面的「接着录」）。等录音小程序报了 `started` 才返回（最多等 2 分钟，留给权限弹窗） |
+| `recorder_start({ meetingId, mic, system, echoCancel })` | 会议要先在服务器上建好（`source: "desktop"`）。mic 是麦克风的 uid 或 `"default"`，null 是不录麦克风；麦克风和电脑的声音至少录一个。echoCancel 是录音页上的「外放时去掉回声（实验）」：true 时让录音小程序按 `--echo-cancel auto` 做，false 或者不传是 `off`（总是明说，不靠录音小程序的默认值）。这台电脑上有这场会议中断了的录音时接着录（分片到了 3999 片、只剩服务器能收的最后一片时不录，提示直接结束；上次断网时接着录的部分和服务器上已有的分片序号重了时也不录，返回原因，见下面的「接着录」）。等录音小程序报了 `started` 才返回（最多等 2 分钟，留给权限弹窗） |
 | `recorder_pause()`、`recorder_resume()` | 暂停、继续 |
 | `recorder_mark()` | 记下现在录到第几秒（精确到 0.1 秒，1 秒内连着点只算一次，最多 500 个），顺带把整份标记存到服务器（`PUT …/marks`，存不上也没关系，complete 时一起交） |
 | `recorder_stop()` | 结束，等最后一片写完。都传完以后 `POST …/complete {chunks: next_seq, marks}` |
@@ -134,9 +173,9 @@ Rust 在 App 进程里起一个只监听 `127.0.0.1` 随机端口的 HTTP 代理
 | `recorder_discard({ meetingId })` | 删掉这台电脑上一段中断了的、传不上去的录音（服务器上已经收到的不动） |
 | `recorder_state()` | 现在的状态 |
 
-- 事件 `recorder://state`：状态一变就发，录音时随音量约每 100 毫秒发一次。内容（各个命令的返回值也是它）：`{ status, meetingId, title, seconds, level: { mic, system } 或 null, mic, system, marks, warnings: [{ code, message }], error, uploads: [{ meetingId, title, recorded, uploaded, status, error }] }`。
+- 事件 `recorder://state`：状态一变就发，录音时随音量约每 100 毫秒发一次。内容（各个命令的返回值也是它）：`{ status, meetingId, title, seconds, level: { mic, system } 或 null, mic, system, echo: { mode, active, reason } 或 null, marks, warnings: [{ code, message }], error, uploads: [{ meetingId, title, recorded, uploaded, status, error }] }`。
   - `status`：`idle`、`starting`（在等录音小程序开始，可能在等权限弹窗）、`recording`、`paused`、`stopping`（在等最后一片写完）。
-  - `warnings`：有一路录不了或者出了问题的提醒，同一个 code 说的事不一样时都留着（一模一样的只留一条）；没能开始录音时留着录音小程序说的原因，下次开始录音时清掉。`mic`：在录的麦克风的名字，录到一半断开了还是它的名字（`warnings` 里有提醒）。`error`：上一场不正常结束的原因（中断了、录满 6 小时或者分片数到了上限自动结束了）。
+  - `warnings`：有一路录不了或者出了问题的提醒，同一个 code 说的事不一样时都留着（一模一样的只留一条）；没能开始录音时留着录音小程序说的原因，下次开始录音时清掉。`mic`：在录的麦克风的名字，录到一半断开了还是它的名字（`warnings` 里有提醒）；跟着系统默认的麦克风换了（`mic_changed`）时换成新的名字。`echo`：回声消除，`mode` 是录音小程序在 `started` 里报的模式（`off`、`auto`、`on`、`unavailable`），`active`、`reason` 是最近一个 `echo` 事件说的（还没报过时 `active` 是 false、`reason` 是 null；`echo` 比 `started` 先到也不丢）；没在录、录音小程序还没报 `started`（或者是不报它的旧版本）、录的是别的账号的录音时是 null。录音小程序以后多了新的 `reason` 原样交给界面，认不出来的 `mode` 当成没报。`error`：上一场不正常结束的原因（中断了、录满 6 小时或者分片数到了上限自动结束了）。
   - `uploads`：当前账号在这台电脑上的录音，`status` 是 `recording`（边录边传）、`uploading`、`waiting`（暂时传不上去，过一会儿自动再试）、`completing`、`completed`（App 重启前一直留着）、`interrupted`、`failed`。录音时就传不上去了（会议被删了）也是 `failed`，录音照常进行。`uploaded` 一般只增不减，告诉服务器传完之前核对出服务器缺了分片、从缺的那一片起重传时会变小。
 - 接着录：从 `recording.json` 的 `next_seq`、目录里已有分片的下一片、服务器已经收到的分片（`GET …/chunks`）的下一片里取最大的开始写，哪一片都不会被覆盖。秒数和标记接着上次的：新标记的时间从已经写好的分片的总时长算起，和服务器接起来的录音对得上；中断前最后一片之后点的标记，对应的声音没存下来，不要了。`recording.json` 记少了、跳过了几片时（比如它退回了上一份），跳过的分片也算进时长：还在这台电脑上的照着分片算，只在服务器上的量不了，按每片 10 秒算（现在分片要等服务器开始处理以后才删，只有以前的版本留下的录音会这样），其中有暂停时的短片的话，时长、新标记的时间和 6 小时的上限会差一点。
   - 问不到服务器（连不上、出错、回复看不懂）时照这台电脑上记着的来，断网照样能接着录，在 `recording.json` 里记下从哪一片起没和服务器核对过（`unverified_from`）。前面的分片传完以后、传其中任何一片和 complete 之前先 `GET …/chunks` 核对：服务器上已经有这一片以后的分片（核对之前这些序号一片也不传，所以不是这台电脑传的）时不覆盖，这场录音算 `failed`，原因说清楚，本地的分片都留着，可以删掉；会议页面上可以先「用已经收到的部分生成纪要」（见「界面」），不然这场会议一直结束不了；服务器上没有就记下核对过了（存下来以后才传），照常上传。接着录、直接结束时问得到服务器的话也先核对，重了就不录、不传，返回同样的原因，前面没传完的分片照常传完。
@@ -155,20 +194,116 @@ Rust 在 App 进程里起一个只监听 `127.0.0.1` 随机端口的 HTTP 代理
 
 #### 界面（`web/src/platform/`，只在桌面版里）
 
-- 录音页 `/record`（`DesktopRecord.tsx`，不是网页录音的 MediaRecorder）：开始前填标题、模板、本场热词、谁能看（和网页录音一样），选麦克风（或者不录）、录不录电脑里的声音（说明是录飞书、腾讯会议这些会议软件里其他人的声音）。开始时先通过平常的接口客户端（本地代理）`POST /api/meetings {title, source: "desktop", template, hotwords, visibility}`，再 `recorder_start`；开始不了、或者一片都没录下来就结束了，删掉刚建的空会议。录音中：时长、两路音量、暂停/继续、标记重点（显示个数）、结束录音（要确认）、提醒（没有权限时说去哪里打开）。结束以后：上传进度，传完给会议链接。
+- 录音页 `/record`（`DesktopRecord.tsx`，不是网页录音的 MediaRecorder）：开始前填标题、模板、本场热词、谁能看（和网页录音一样），选麦克风（或者不录）、录不录电脑里的声音（说明是录飞书、腾讯会议这些会议软件里其他人的声音），「外放时去掉回声（实验）」（默认关；两样都录时才能选，不然变灰；每台电脑记自己的：`localStorage` 的 `zsmeet.recorder.echoCancel`，没点过的用 `recorderView.ts` 的 `ECHO_CANCEL_DEFAULT`，以后要默认打开只改它）。开始时先通过平常的接口客户端（本地代理）`POST /api/meetings {title, source: "desktop", template, hotwords, visibility}`，再 `recorder_start`；开始不了、或者一片都没录下来就结束了，删掉刚建的空会议。录音中：时长、两路音量（麦克风的名字跟着 `mic_changed` 换）、回声消除开没开（`echoLabel`：开 / 没开（戴着耳机、用 AirPlay 外放）/ 暂时没开（没收到电脑里的声音）/ 不可用；没打开这个选项、不录麦克风时不显示）、暂停/继续、标记重点（显示个数）、结束录音（要确认）、提醒（没有权限时说去哪里打开；`mic_silent`、`echo_unavailable` 这些录音小程序没给说明时界面自己有一句）。结束以后：上传进度，传完给会议链接。
+- 自动更新（`DesktopUpdate.tsx`、`updater.ts`、`updateView.ts`）：登录以后有新版本时在页面顶上提示（版本、发布日期、更新说明，「更新并重启」「以后再说」），还没登录（填服务器地址、在浏览器里登录）时在右下角提示；「设置 → 账号」最下面的「版本」显示现在的版本和「检查更新」，有新版本时也在这里（这时页面顶上的提示收起来）。正在录音（包括正在开始、暂停、正在结束）、还有录音没传完时「更新并重启」变灰，下面说为什么（和 App 的 `update_blocker` 说法一样）；更新时显示下载进度，没装上时说原因、可以再点。「以后再说」以后这个版本 24 小时内不在页面顶上提示（`localStorage` 的 `zsmeet.update.dismissed`），更新的版本出来了马上提示。正在下载时录音页照样能开始录音（说明这次先不装）；下载完在安装、装好了等重新打开时，开始录音的按钮变灰（App 这时也不让开始）。
 - 别的页面（`DesktopRecordings.tsx`）：录音时顶上一条（时长、回到录音），没传完的录音一行一个（接着录、传上去生成纪要、删除）；会议页面上，这场会议正在这台电脑上录、在传时显示出来。这台电脑上没有这场会议的录音时（别的电脑录的，或者这台电脑上的已经删了），和网页版一样显示服务器收到了多少，录音的电脑找不回来时可以「用已经收到的部分生成纪要」（`MeetingDetail.tsx` 的 `ReceivedSoFar`，不在 `platform/` 里，网页版也用它；什么时候给见上面「上传」里录音的电脑找不回来的那一条）。这台电脑上的录音传不上去了（`failed`，比如断网时接着录的分片和服务器上已有的重了），那一行只能删掉录音，在它下面也给出同一张卡片（`ReceivedSoFar` 的 `here`：原因上面那一行已经说了，只说服务器收到了多少），不然这场会议一直结束不了；和别处一样，服务器 90 秒没再收到分片以后才有。这台电脑在录、在传、等网络、中断了等着选的时候不给，它自己会传完。
 - 网页版的构建里没有这些代码。
 
 #### 测试
 
-- `desktop/recorder/test.sh`：录音小程序的单元测试（事件格式、ADTS、分片、混音、编码、暂停）和端到端测试（真的跑 zsmeet-recorder，用 `--input-file`，ffmpeg、ffprobe 检查分片能解码、接起来的时长对得上）。每次运行用自己的临时目录，几个工作区同时跑互不影响（同一个工作区里的 `build-recorder.sh`、`test.sh` 不要同时跑：它们会删掉重建 `.build/` 下的目录）。`ZSMEET_RECORDER_TEST_FILTER=暂停 desktop/recorder/test.sh` 只跑名字里有「暂停」的测试；一个都没选中时算没通过（多半是写错了），故意一个都不跑时再设 `ZSMEET_RECORDER_TEST_ALLOW_EMPTY=1`。
+- `desktop/recorder/test.sh`：录音小程序的单元测试（事件格式、ADTS、分片、混音、编码、暂停）和端到端测试（真的跑 zsmeet-recorder，用 `--input-file`，ffmpeg、ffprobe 检查分片能解码、接起来的时长对得上）。回声消除的测试都不放声音、不要设备：
+  - EchoStage（假的回声消除器，看得到调用的顺序）：每帧配的是提前 170 毫秒的参考、一帧参考一帧麦克风；交付时快时慢、成批到、卡住、电脑声音断了的时候麦克风进多少出多少、顺序不变（包括像 AEC3 一样晚 431 个采样的时候）；电脑声音断了不做、恢复了接着做；时钟差 100 ppm 模拟一小时，对齐一直在几个采样以内；时间戳断开重新对齐；不做时原样通过（一个比特都不变），开、关切换不多不少；输出路线变了要稳定 1 秒；暂停、继续、结束；出错时用原声、连续出错关掉；建不起来、只录一路、`off` 时和以前一模一样。
+  - AEC3 消得好不好（`EchoQualityTests.swift`）：合成的像说话的声音（有音高、共振峰，一阵一阵的），对方的声音延迟一段、经过房间的反射录进麦克风，再加上这边说话。量到的（M4 Pro）：回声消掉约 28 到 37 dB；回声比时间戳早到 60 毫秒靠提前量照样消掉（42 dB，不提前只有 2 dB）；晚到 400 毫秒消掉 23 dB；延迟突然变了 100 毫秒，第 3 秒起又消掉 45 dB；时钟差 100 ppm 消掉 33 dB；扬声器削顶失真消掉 37 dB；这边单独说话音量不变（-0.2 dB），两边同时说话时这边平均被压低约 7 dB；没有回声时约 4 秒后不再压低这边；处理的延迟正好是 431 个采样；每帧几十到一百多微秒。门槛是量到的减去一些余量。
+  - 端到端：`--input-file --realtime --reference-file`，`--echo-cancel on` 和 `off` 一起跑：`--aec-dump` 里回声消掉 39 dB，录出来的音量事件里麦克风那一路的回声小了约 25 dB，分片照样能解码、时长对得上；只录麦克风时报 `no_reference`。
+  - 换麦克风、没有声音（`MicTests.swift`，不要设备）：换麦克风用假的「系统」（默认的麦克风换了、断开了、打不开、采样率处理不了）驱动真的 `MicFollower` 和 `LiveEngine`：默认的换了就换过去、抖一下又回来不换；断开了换到新的默认设备、没有时等 2 秒才提醒；打不开试 3 次才提醒；录音结束了不换；真的计时 1 秒以内换过去，换了以后录到的是新的麦克风的声音，时长照样跟着时钟走。换的时候按时间戳去掉重叠：编了号的采样换过去以后一个不重、一个不少（新的是 44.1 kHz 时按它的采样率去掉）；有回声消除时压着的旧麦克风的声音照旧处理，处理到新的麦克风时 AEC3 从头开始，新旧麦克风都配上了各自 170 毫秒以后的参考（时间戳只差 1 毫秒也分开算）。没有声音：开头 5 秒全是 0、录音中 30 秒全是 0、1 分钟比 -90 dBFS 小各提醒一次，恢复以后再提醒，暂停的时间不算，安静房间的底噪（-70、-85 dBFS）录 3 分钟也不提醒，16 kHz、44.1 kHz 也按秒算。
+  - 在 Apple 芯片的 Mac 上，装了 Rosetta 的话再在 Rosetta 下把用到 WebRTC 的测试（AEC3 本身、回声消除的端到端测试）跑一遍 Intel 那一份（WebRTC 的 SSE2 代码；AVX2 要真的 Intel 机器），结果和 Apple 芯片的差不多。不想跑设 `ZSMEET_RECORDER_TEST_X86=0`；`ZSMEET_RECORDER_TEST_FILTER` 可以用「|」隔开几个。
+  - 运行：每次用自己的临时目录，几个工作区同时跑互不影响（同一个工作区里的 `build-recorder.sh`、`test.sh` 不要同时跑：它们会删掉重建 `.build/` 下的目录）。`ZSMEET_RECORDER_TEST_FILTER=暂停 desktop/recorder/test.sh` 只跑名字里有「暂停」的测试；一个都没选中时算没通过（多半是写错了），故意一个都不跑时再设 `ZSMEET_RECORDER_TEST_ALLOW_EMPTY=1`。
 - `cargo test`：假的录音小程序（一个 sh 脚本，照协议说话）加假的服务器，测录音、上传、断网、401、冒充服务器的回复、中断和接着录、换账号。
 - `real_helper` 开头的 Rust 测试（`#[ignore]`）：真的录音小程序（`ZSMEET_RECORDER`，`--input-file`）加 App 的录音管理和假的服务器，录一遍、暂停、标记、结束、传完，用 ffprobe 检查服务器收到的分片接起来能完整解码，时长和原来的声音相差不到 50 毫秒。`make desktop-test` 和 CI 都会跑。
 - 没法自动测的：真的麦克风、电脑声音和权限弹窗。用打包出来的 App（`make desktop-build`）试：第一次录音时两个弹窗都写着 zsmeet，说话时麦克风的音量条会动，放视频、开会时电脑声音的音量条会动，录出来两路都有。开发模式（`make desktop-dev`）下权限算在终端头上。
+- 换麦克风、没有声音也要在真机上试：选「系统默认的麦克风」录音，中途连上、断开 AirPods，插拔 USB 麦克风，在「系统设置 → 声音 → 输入」里换一个：1 秒左右麦克风的名字跟着变（日志里有「麦克风从……换成了……」和去掉了多少重叠），录出来的声音接得上、不重复；拔掉唯一的外接麦克风、系统换回自带的麦克风时不提醒；选了某个麦克风（不是系统默认的）时不跟着换。开着飞书、腾讯会议、Zoom 通话时看 zsmeet 的麦克风会不会变成静音（会的话 30 秒左右提醒 `mic_silent`）；安静的房间里不说话录几分钟不提醒；有的耳麦、降噪的虚拟麦克风不说话时给 0，看提醒得多不多。
+- 回声消除在真机上要试过才能默认打开（都用 `--aec-dump` 量）：MacBook 自带的麦克风和扬声器，飞书、腾讯会议、Zoom 外放 50%、100% 音量，消掉 20 dB 以上、转写里重复的句子少八成以上，AEC3 估计的延迟在 190 到 420 毫秒之间、不乱跳；两边同时说话时你说的话至少九成五还在转写里，听不出断断续续；有线耳机、AirPods 插拔、连上断开时 1 秒左右跟着变，录音不断；Intel 的 Mac（AVX2）；一小时 CPU 多用不到一个核的 1%、内存不涨；IOProc 的时间戳（麦克风和电脑声音的）连续、两个时钟差不多；USB 麦克风加电脑扬声器录两个小时（看补、丢的采样）；改音量、静音、通知声音；会议软件和别的 App 听不出受影响；换采样率、睡眠、拔麦克风、暂停继续时录音不断。
+
+## 发布和自动更新
+
+桌面版和服务器各发各的：服务器的标签是 `v` 开头的（`release.yml`，仓库的「Latest」是它的），桌面版的是 `desktop-v` 开头的（`.github/workflows/desktop.yml`）。
+
+### 发布一个版本
+
+1. `make desktop-version VERSION=0.2.0`：改 `desktop/src-tauri/tauri.conf.json` 的 `version` 和 `Cargo.toml` 里 `[package]` 的 `version`（`desktop/scripts/set-version.mjs`，别的内容不动），再用 `cargo update --workspace` 改 `Cargo.lock` 里它自己的版本，依赖都不动（发布时用 `--locked` 构建，没改会失败）。提交，合并到 main。
+2. 第一次发布、改过发布流程或者换过密钥时，先试运行一次（见下面的「试运行」）。
+3. `git tag -a desktop-v0.2.0 -m "更新说明"`，`git push origin desktop-v0.2.0`。标签的说明就是更新说明（签了名的标签去掉签名），显示在 App 的新版本提示和 Release 页面上；没写说明的轻量标签只写「zsmeet 桌面版 0.2.0。」。
+4. Actions 跑完以后看一眼 Release，再用装着旧版本的 App 在「设置 → 账号 → 版本」里点「检查更新」，更新一次试试。
+
+### 发布流程（`.github/workflows/desktop.yml`）
+
+推了 `desktop-v` 标签以后有三个 job：
+
+- **check**（macOS）：和 PR 一样的检查和测试：录音小程序、Rust、发布用的脚本（`node --test desktop/scripts/*.test.mjs`）、按桌面版模式构建界面。
+- **build**（macOS，只能读仓库）：
+  1. 核对标签是 `desktop-v` 加上 `tauri.conf.json` 里的版本，`Cargo.toml` 里的版本也一样；对不上就停下，说清楚改哪里。
+  2. `tauri build --target universal-apple-darwin --no-bundle -- --locked`：编 Apple 芯片和 Intel 两种架构、合成 universal 的程序，录音小程序和界面也在这一步构建（`beforeBuildCommand`）。这一步拿不到更新密钥，依赖包的构建脚本、界面的构建工具都碰不到它。
+  3. `tauri bundle --target universal-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":true}}'`：打包成 App 和 DMG（ad-hoc 签名，`signingIdentity` 是 `"-"`），再把 App 打成更新包 `zsmeet.app.tar.gz`，用 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 签出 `zsmeet.app.tar.gz.sig`。只有这一步拿得到这两个 Secrets。`createUpdaterArtifacts` 平时是 false：本机的 `make desktop-build`、`make desktop-universal` 不打更新包，不需要私钥。
+  4. 检查打出来的东西：两个程序都是 universal 的，签名里有麦克风权限，签名有效，Info.plist 里的版本对，App 里带着第三方代码的许可证声明（`THIRD_PARTY_NOTICES.txt`），更新包里是完整的 `zsmeet.app`，DMG 完好。
+  5. `desktop/scripts/update-manifest.mjs` 生成 `latest.json`：先用 App 里的公钥（`plugins.updater.pubkey`）照 App 的规则核对更新包的签名和签名里绑定的版本，再核对 App 查更新的地址（`plugins.updater.endpoints`）里有 `desktop-latest` 的那个，都对了才生成。Secrets 里的私钥和 App 里的公钥不是一对时停在这里，说出两把密钥的 ID。
+  6. 改好名字的四个文件作为这次运行的 Artifacts 上传（保留 7 天）。
+- **publish**（Ubuntu，check 和 build 都通过了才跑；能写仓库，但拿不到更新密钥）：
+  1. 这个标签的 Release：先建成草稿，传完四个文件再发出去（页面上不会出现缺文件的版本），`--latest=false`，不顶掉服务器版本的「Latest」。重新运行时 Release 已经在了，只换文件。
+  2. 正式版本：把 `latest.json` 换到固定的 Release `desktop-latest` 上（还没有就建一个：预发布、不是 Latest，只放 `latest.json`）。那里已经是更新的版本时不换（比如发了 0.3.0 以后又重新运行了 0.2.0 的发布）。两次发布挨着时一个一个来（`concurrency: desktop-publish`）。
+  3. 预发布版本（版本号带「-」，比如 `0.3.0-rc.1`）：Release 标成预发布，不换 `desktop-latest` 上的清单，App 不会提示更新到它，想试的人自己下载 DMG。
+
+发到 Release 上的文件：
+
+| 文件 | 是什么 |
+|---|---|
+| `zsmeet-desktop-<版本>-macos-universal.dmg` | 安装包 |
+| `zsmeet-desktop-<版本>-macos-universal.app.tar.gz` | 自动更新用的更新包：整个 `zsmeet.app` 打成的 tar.gz |
+| `zsmeet-desktop-<版本>-macos-universal.app.tar.gz.sig` | 更新包的签名（minisign 格式，Tauri 签的），内容也写在 `latest.json` 里 |
+| `latest.json` | 这个版本的更新清单，和换到 `desktop-latest` 上的一样 |
+
+### 更新清单 `latest.json`
+
+Tauri v2 updater 的静态清单。App 只看 `https://github.com/ZaneXo/zsmeet/releases/download/desktop-latest/latest.json`（写死在 `tauri.conf.json` 的 `plugins.updater.endpoints` 里），不依赖仓库的「Latest」。
+
+```json
+{
+  "version": "0.2.0",
+  "notes": "这一版改了什么",
+  "pub_date": "2026-11-12T10:00:00Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "<.sig 文件的内容>",
+      "url": "https://github.com/ZaneXo/zsmeet/releases/download/desktop-v0.2.0/zsmeet-desktop-0.2.0-macos-universal.app.tar.gz"
+    },
+    "darwin-x86_64": { "signature": "<同上>", "url": "<同上>" },
+    "darwin-universal": { "signature": "<同上>", "url": "<同上>" }
+  }
+}
+```
+
+- 三项都指向同一个 universal 的更新包：App 按自己运行的架构找 `darwin-aarch64` 或 `darwin-x86_64`。
+- `pub_date` 是 RFC 3339（App 解析不了就整个清单都不认）；`version` 是 semver，比 App 现在的版本新才算有新版本。
+
+### 更新密钥
+
+- minisign 的密钥对，项目的所有者自己用 `tauri signer generate` 生成。公钥（密钥 ID `A1D64D1C47997E80`）在 `tauri.conf.json` 的 `plugins.updater.pubkey`；私钥和它的密码只放在仓库的 Secrets 里（`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`），不进仓库，不打进日志，开发用的电脑上也不需要。
+- App 开了 `requireSignedVersion`：打包时版本号写进了受签名保护的 trusted comment，清单里的版本和签名里的对不上就不装。这样没有私钥的人不能把旧版本的更新包配上一个新版本号，让大家「更新」回有问题的旧版本。`tauri bundle`（CLI 2.12 起）自己会写进去；万一要手动用 `tauri signer sign` 签，要加 `--app-version <版本>`，不然签出来的 App 不装。`update-manifest.mjs` 用 `tauri.conf.json` 的版本写 `latest.json`，并核对签名里记着版本、和它一样，对不上就不生成清单。
+- 私钥丢了或者换了：装着旧版本的 App 只认原来的公钥，收不到之后的更新。只能换上新的公钥发一个新版本，请大家自己下载 DMG 装一次，之后的更新用新密钥。
+
+### 试运行
+
+在 Actions 页面选 Desktop → Run workflow（或者 `gh workflow run desktop.yml --ref main -f dry_run=true`），`dry_run` 默认勾着：check 和 build 照常跑（打包、签名、核对、生成 `latest.json`），build 的结果只放在这次运行的 Artifacts 里，publish 不跑，什么都不发布。第一次发布之前先跑一次，确认两个 Secrets 配对了。在分支上试运行时不核对标签。
+
+取消 `dry_run`、在「Use workflow from」里选一个 `desktop-v` 标签，和推这个标签一样正式发布（比如推标签的时候 Secrets 还没配好）。在分支上取消 `dry_run` 会直接报错，什么都不发布。
+
+### App 这边
+
+App 打开约 10 秒后和之后每 6 小时查一次 `latest.json`（按墙上的时间算，电脑睡眠的时间也算），有新版本时界面上提示；用户点了「更新并重启」才下载、核对签名、安装、重新打开，从不自己装。代码在 `desktop/src-tauri/src/update.rs`，界面见上面「界面」里的自动更新。
+
+- 命令：`update_check()` → `{ current, available: { version, notes, date } 或 null }`（`notes` 是更新说明，没写时是 null；`date` 是发布时间，RFC 3339）。`update_install()`：再查一次最新的版本，下载（事件 `update://progress`：`{ downloaded, total 或 null }`，最多每 100 毫秒一个）、核对签名、换掉 `zsmeet.app`、重新打开（和退出一样先让录音那边结束），不能装时返回给人看的原因。定时检查发现新版本时发事件 `update://available`，内容和 `available` 一样；`update_check` 不发这个事件，界面照它的返回值更新。updater 插件自己的命令不开放给界面。
+- 不装的时候：正在录音（包括正在开始、暂停、正在结束）；当前账号还有录音没传完（边录边传、在传、暂时传不上去在等着再试、在告诉服务器传完了。中断了、传不上去了、别的账号的不算：它们要等人处理，不能一直挡着更新，重启以后也还在）；不是从打包好的 `zsmeet.app` 运行（开发版）；macOS 从一个只读的临时位置运行它（直接在下载的地方或者安装盘里打开、没拖进「应用程序」的）。下载的时候开始了录音的，下载完也不装；开始安装以后不让开始录音（`recorder_start` 返回「正在安装 zsmeet 的新版本…」），没装上就又可以了。
+- 代理：检查、下载新版本走「系统设置 → 网络 → 详细信息 → 代理」里的「安全网页代理（HTTPS）」（有的网络要靠代理才连得上 GitHub；设了环境变量 `HTTPS_PROXY` 时照它），不看「忽略这些主机与域的代理设置」。App 连 zsmeet 服务器、传录音照旧直连，不受系统代理影响。不要打开 updater 插件的 `system-proxy` 功能（`Cargo.toml` 里关掉了它）：它会让 App 所有的请求都走系统代理，局域网里的服务器也走代理，服务器连不上时收到的是代理的 502，离线时就显示不了缓存；有测试防着。
+- 连不上 GitHub、签名对不上、没装上时，原因里都说了能怎么办（检查网络和代理、稍后再试、到 Releases 页面下载 DMG 自己装）。
+
+### 注意
+
+- 不要删掉 `desktop-latest` 这个 Release 和它的标签，也不要把它改成正式版本或者「Latest」。
+- 仓库不要打开 Release 的「不可变」（immutable releases）：打开以后发出去的 Release 不能再换文件，`desktop-latest` 上的 `latest.json` 就换不了了。
+- 更新包是 App 自己下载的，macOS 不给它加隔离标记，所以更新以后不用再点「仍要打开」。但系统把新版本当成新的 App，钥匙串、麦克风、录制系统音频的权限可能要再允许一次（本地网络的权限按 App 的标识记，不用再允许）。
 
 ## 分阶段
 
 1. **服务端**：App 令牌、授权页、设备管理、`desktop` 来源、`api` 版本号。
 2. **桌面外壳**：Tauri 项目、本地代理和离线缓存、登录、钥匙串、菜单栏、平台差异、CI 打包。
 3. **录音**：Swift 录音程序、上传、录音页和菜单栏的录音控制。已完成，真的麦克风和电脑声音还要在真机上试（见上面的「测试」）。
-4. **收尾**：审查、在真机上试、文档、发布流程。
+4. **收尾**：回声消除（试验功能，默认关）、跟着换系统默认的麦克风、麦克风没有声音时提醒、App 里自动更新、在 GitHub Releases 上发布（不签名）。代码和自动测试都做完了；还要在真机上试（见上面的「测试」），回声消除试好了再考虑默认打开；第一次发布前先试运行一次（见「试运行」），标签由项目的所有者推。

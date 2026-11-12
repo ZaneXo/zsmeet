@@ -40,6 +40,10 @@
     "targets": ["app", "dmg"],
     "category": "Productivity",
     "externalBin": ["binaries/zsmeet-recorder"],
+    "resources": {
+      "../../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES.txt"
+    },
+    "createUpdaterArtifacts": false,
     "shortDescription": "zsmeet 会议纪要",
     "copyright": "© 2026 zsmeet contributors · Apache License 2.0",
     "icon": [
@@ -60,6 +64,13 @@
       "desktop": {
         "schemes": ["zsmeet"]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEExRDY0RDFDNDc5OTdFODAKUldTQWZwbEhIRTNXb1VzODRsSll0Szl0Nkp5ZFhPd2Ruc1hCa1liTzQzSGgyTW5FY2M0a3VncmcK",
+      "endpoints": [
+        "https://github.com/ZaneXo/zsmeet/releases/download/desktop-latest/latest.json"
+      ],
+      "requireSignedVersion": true
     }
   }
 }

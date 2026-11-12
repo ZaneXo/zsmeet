@@ -25,6 +25,12 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-window-state = "2"
+# 自动更新：从 GitHub Releases 上的 latest.json 查新版本，用 tauri.conf.json 里的公钥校验签名（见 src/update.rs）。
+# 不要它默认带的 system-proxy：那个功能是打开在 hyper-util 上的，上面的 reqwest 也会跟着读系统代理（连 zsmeet 服务器、
+# 传录音都改走代理），而且不认系统设置里「忽略这些主机」：局域网里的服务器也走代理，服务器连不上时收到的是代理的 502，
+# 离线时显示缓存、提示连不上都不对了。检查、下载新版本要用的系统代理由 update.rs 自己读出来交给它。
+# zip 只有 Windows、Linux 用得到，macOS 的更新包（.app.tar.gz）不靠它
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "io-util", "process"] }
@@ -39,9 +45,13 @@ rand = "0.9"
 hex = "0.4"
 percent-encoding = "2"
 log = "0.4"
+# 新版本的发布时间（latest.json 的 pub_date）按 RFC 3339 交给界面
+time = { version = "0.3", features = ["formatting"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+# 读「系统设置」里的 HTTPS 代理，只给检查、下载新版本用（src/update.rs 的 system_proxy）
+system-configuration = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

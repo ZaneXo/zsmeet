@@ -100,9 +100,10 @@ final class PropertyListener {
     private let block: AudioObjectPropertyListenerBlock
     private var active = false
 
-    init(object: AudioObjectID, selector: AudioObjectPropertySelector, queue: DispatchQueue, handler: @escaping () -> Void) {
+    init(object: AudioObjectID, selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+         queue: DispatchQueue, handler: @escaping () -> Void) {
         self.object = object
-        address = AudioProperty.address(selector)
+        address = AudioProperty.address(selector, scope)
         self.queue = queue
         block = { _, _ in handler() }
         active = AudioObjectAddPropertyListenerBlock(object, &address, queue, block) == noErr

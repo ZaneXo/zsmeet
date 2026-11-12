@@ -40,6 +40,12 @@ struct Script {
     hang_on_stop: bool,
     /// 结束时最后一片写到一半就报错退出（比如录音程序自己等了 8 秒还没写完）：错误码、给用户看的原因
     stop_error: Option<(&'static str, &'static str)>,
+    /// started 里报的回声消除模式。None 时照着 --echo-cancel 报（和真的录音程序一样）
+    echo_report: Option<&'static str>,
+    /// 报 started 之前先报的事件
+    before_start: Vec<Value>,
+    /// 报完 started（和提醒）以后、录分片之前报的事件
+    after_start: Vec<Value>,
 }
 
 /// 假的 zsmeet-recorder：按约定的协议说话，录音时写 `<序号>.aac`（内容是 audio-<序号>）。
@@ -50,17 +56,20 @@ if [ "$1" = devices ]; then
   exit 0
 fi
 args="$*"
-out=""; seq=0; total=0
+out=""; seq=0; total=0; echo_mode=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) out="$2"; shift 2 ;;
     --start-seq) seq="$2"; shift 2 ;;
+    --echo-cancel) echo_mode="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 dir="${out%/*}"; dir="${dir%/*}"
 CHUNKS=0; CRASH=0; START_ERROR=""; WARNING=""; HANG_ON_STOP=0; STOP_ERROR=""
+ECHO_REPORT=""; BEFORE_START=""; AFTER_START=""
 [ -f "$dir/fake.conf" ] && . "$dir/fake.conf"
+[ -n "$ECHO_REPORT" ] || ECHO_REPORT="$echo_mode"
 echo "$args" >> "$dir/helper-args.log"
 chunk() {
   printf 'audio-%s' "$seq" > "$out/$seq.aac.part"
@@ -75,9 +84,13 @@ if [ -n "$START_ERROR" ]; then
   echo "$START_ERROR"
   exit 2
 fi
-echo '{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true}'
+[ -n "$BEFORE_START" ] && echo "$BEFORE_START"
+echo "{\"event\":\"started\",\"sample_rate\":48000,\"channels\":1,\"mic\":\"MacBook Pro 麦克风\",\"system\":true,\"echo_cancellation\":\"$ECHO_REPORT\"}"
 if [ -n "$WARNING" ]; then
   echo "$WARNING"
+fi
+if [ -n "$AFTER_START" ]; then
+  echo "$AFTER_START"
 fi
 i=0
 while [ $i -lt "$CHUNKS" ]; do
@@ -160,6 +173,18 @@ fn fake_helper(dir: &Path, script: &Script) -> PathBuf {
     if let Some((code, message)) = script.stop_error {
         let event = json!({ "event": "error", "code": code, "message": message });
         conf.push_str(&format!("STOP_ERROR='{event}'\n"));
+    }
+    if let Some(mode) = script.echo_report {
+        conf.push_str(&format!("ECHO_REPORT='{mode}'\n"));
+    }
+    for (name, events) in [
+        ("BEFORE_START", &script.before_start),
+        ("AFTER_START", &script.after_start),
+    ] {
+        if !events.is_empty() {
+            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+            conf.push_str(&format!("{name}='{}'\n", lines.join("\n")));
+        }
     }
     std::fs::write(dir.join("fake.conf"), conf).unwrap();
     shared_helper()
@@ -621,7 +646,7 @@ async fn records_uploads_in_order_and_completes() {
 
     let state = r
         .recorder
-        .start("m1", Some("default".into()), true)
+        .start("m1", Some("default".into()), true, EchoCancel::Off)
         .await
         .unwrap();
     assert_eq!(state.status, Phase::Recording);
@@ -632,9 +657,18 @@ async fn records_uploads_in_order_and_completes() {
     assert_eq!(
         helper_runs(r.f.dir.path()),
         [format!(
-            "record --out {} --start-seq 0 --chunk-seconds 10 --mic default",
+            "record --out {} --start-seq 0 --chunk-seconds 10 --mic default --echo-cancel off",
             r.root.join("m1").display()
         )]
+    );
+    // 没要回声消除：录音程序报的是 off，一直没开
+    assert_eq!(
+        state.echo,
+        Some(Echo {
+            mode: EchoMode::Off,
+            active: false,
+            reason: None
+        })
     );
     // 录音只有自己能看
     #[cfg(unix)]
@@ -670,13 +704,17 @@ async fn records_uploads_in_order_and_completes() {
     assert_eq!(r.recorder.pause().await.unwrap().status, Phase::Paused);
     assert_eq!(r.recorder.resume().await.unwrap().status, Phase::Recording);
     // 一次只录一场
-    let err = r.recorder.start("m2", None, true).await.unwrap_err();
+    let err = r
+        .recorder
+        .start("m2", None, true, EchoCancel::Off)
+        .await
+        .unwrap_err();
     assert!(err.contains("另一场"), "{err}");
 
     // 结束：最后一片写完，全部传完以后告诉服务器开始处理
     let state = r.recorder.stop().await.unwrap();
     assert_eq!(state.status, Phase::Idle);
-    assert_eq!(state.meeting_id, None);
+    assert_eq!((state.meeting_id, state.echo), (None, None));
     let state = wait_for(&r.recorder, "传完", |s| {
         upload_is(s, "m1", UploadStatus::Completed)
     })
@@ -741,7 +779,7 @@ async fn waits_while_offline_and_uploads_when_back() {
     // 连不上服务器也照样录（标题等连上了也不要紧）
     let state = r
         .recorder
-        .start("m1", Some("default".into()), false)
+        .start("m1", Some("default".into()), false, EchoCancel::Off)
         .await
         .unwrap();
     assert_eq!(state.status, Phase::Recording);
@@ -774,7 +812,7 @@ async fn waits_while_offline_and_uploads_when_back() {
         [json!({ "chunks": 3, "marks": [] })]
     );
     assert!(
-        helper_runs(r.f.dir.path())[0].ends_with("--mic default --no-system"),
+        helper_runs(r.f.dir.path())[0].ends_with("--mic default --no-system --echo-cancel off"),
         "{:?}",
         helper_runs(r.f.dir.path())
     );
@@ -789,7 +827,10 @@ async fn unauthorized_signs_out_and_resumes_for_the_same_account() {
     .await;
     r.mock.chunk_error.lock().unwrap().insert("m1".into(), 401);
 
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     // 401：这个令牌不能用了，App 退出登录；录音照常进行，录好的留在本地
     until("退出登录", || r.f.core.state().expired).await;
     assert!(!r.f.core.state().signed_in);
@@ -832,7 +873,10 @@ async fn missing_meeting_fails_and_can_be_discarded() {
     .await;
     r.mock.chunk_error.lock().unwrap().insert("m1".into(), 404);
 
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     // 会议在服务器上没了：录音照常进行，只是传不上去了（界面上要说清楚不是暂时的）
     let state = wait_for(&r.recorder, "发现传不上去", |s| {
         upload(s, "m1").is_some_and(|u| u.error.is_some())
@@ -856,7 +900,11 @@ async fn missing_meeting_fails_and_can_be_discarded() {
     // 重启以后还是失败的，不会再传，也不能接着录
     r.restart();
     assert!(upload_is(&r.recorder.state(), "m1", UploadStatus::Failed));
-    let err = r.recorder.start("m1", None, true).await.unwrap_err();
+    let err = r
+        .recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap_err();
     assert!(err.contains("传不上去"), "{err}");
 
     let state = r.recorder.discard("m1").unwrap();
@@ -874,7 +922,10 @@ async fn conflict_on_complete_is_done_only_if_processing_started() {
         .lock()
         .unwrap()
         .insert("m1".into(), (409, "这场会议已经在处理了".into()));
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     r.mock
         .meeting_status
         .lock()
@@ -892,7 +943,10 @@ async fn conflict_on_complete_is_done_only_if_processing_started() {
         "m2".into(),
         (409, "第 1 片还没有传上来，请补传后再试".into()),
     );
-    r.recorder.start("m2", None, true).await.unwrap();
+    r.recorder
+        .start("m2", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     r.recorder.stop().await.unwrap();
     let state = wait_for(&r.recorder, "m2 失败", |s| {
         upload_is(s, "m2", UploadStatus::Failed)
@@ -941,7 +995,7 @@ async fn continues_an_interrupted_recording_after_restart() {
     // 接着录：从第 2 片开始写，秒数和标记接着上次的
     let state = r
         .recorder
-        .start("m1", Some("default".into()), false)
+        .start("m1", Some("default".into()), false, EchoCancel::Off)
         .await
         .unwrap();
     assert_eq!(state.status, Phase::Recording);
@@ -987,7 +1041,11 @@ async fn continuing_drops_marks_from_the_lost_tail() {
     r.restart();
 
     // 接着录：接着录的声音从 20 秒算起，25 秒的标记会指到新录的声音上，不要了
-    let state = r.recorder.start("m1", None, true).await.unwrap();
+    let state = r
+        .recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     assert_eq!(state.marks, vec![5.0]);
     // 刚接上就点标记：记在 20 秒（不能因为比 25 秒早就当成连着点的）；连着点的只算一次
     assert_eq!(r.recorder.mark().unwrap().marks, vec![5.0, 20.0]);
@@ -1026,7 +1084,11 @@ async fn continuing_never_reuses_a_chunk_number() {
     r.restart();
 
     // 接着录：从第 4 片开始写，不占用服务器上、这台电脑上已有的序号
-    let state = r.recorder.start("m1", None, true).await.unwrap();
+    let state = r
+        .recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     assert!(
         helper_runs(r.f.dir.path())
             .last()
@@ -1310,7 +1372,10 @@ async fn another_account_signing_in_stops_the_recording() {
         ..Script::default()
     })
     .await;
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     wait_for(&r.recorder, "传完第 0 片", |s| {
         upload(s, "m1").is_some_and(|u| u.uploaded == 1)
     })
@@ -1358,6 +1423,9 @@ fn live_session(server: &str, user: &str, meeting: &str) -> Session {
         }),
         mic: Some("MacBook Pro 麦克风".into()),
         system: true,
+        echo_mode: Some(EchoMode::Auto),
+        echo_active: true,
+        echo_reason: Some("speakers".into()),
         warnings: vec![Warning {
             code: "system_denied".into(),
             message: "没有录电脑声音的权限".into(),
@@ -1388,6 +1456,7 @@ fn only_the_recording_account_sees_what_is_being_recorded() {
         error: None,
         start_warnings: Vec::new(),
         ended: None,
+        updating: false,
     };
 
     // 录音的人自己，和没人登录的时候（登录失效了，录音照常，菜单栏上要显示）：都能看
@@ -1397,15 +1466,25 @@ fn only_the_recording_account_sees_what_is_being_recorded() {
         assert_eq!(state.title.as_deref(), Some("会议 m1"));
         assert_eq!((state.seconds, state.marks.clone()), (12.0, vec![3.0]));
         assert_eq!(state.warnings.len(), 1);
+        assert_eq!(
+            state.echo,
+            Some(Echo {
+                mode: EchoMode::Auto,
+                active: true,
+                reason: Some("speakers".into())
+            })
+        );
     }
     // 换了别人登录，上一个人的录音还没结束：只知道这台电脑在录音
     let state = snapshot(&inner, Some(&account("u2")));
     assert_eq!(state.status, Phase::Recording);
+    // 别人的录音也不能被更新打断
+    assert!(state.update_blocker().unwrap().contains("正在录音"));
     assert_eq!(
         (state.meeting_id, state.title, state.seconds, state.level),
         (None, None, 0.0, None)
     );
-    assert_eq!((state.mic, state.system), (None, false));
+    assert_eq!((state.mic, state.system, state.echo), (None, false, None));
     assert!(state.marks.is_empty() && state.warnings.is_empty() && state.uploads.is_empty());
 }
 
@@ -1417,7 +1496,10 @@ async fn helper_crash_interrupts_and_recording_can_go_on() {
         ..Script::default()
     })
     .await;
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     let state = wait_for(&r.recorder, "中断", |s| {
         upload_is(s, "m1", UploadStatus::Interrupted)
     })
@@ -1432,7 +1514,11 @@ async fn helper_crash_interrupts_and_recording_can_go_on() {
         .contains("意外退出"));
 
     // 接着录：这次录音程序从第 1 片开始写
-    let state = r.recorder.start("m1", None, true).await.unwrap();
+    let state = r
+        .recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     assert_eq!(state.error, None);
     assert!(helper_runs(r.f.dir.path())[1].contains("--start-seq 1"));
 }
@@ -1444,7 +1530,10 @@ async fn helper_crash_before_the_first_chunk_says_nothing_was_recorded() {
         ..Script::default()
     })
     .await;
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     let state = wait_for(&r.recorder, "录音结束", |s| s.status == Phase::Idle).await;
     // 一片都没录下来：不能说「录好的部分都在，可以接着录」，这场录音也不留
     assert_eq!(state.error.as_deref(), Some(NOTHING_RECORDED));
@@ -1460,7 +1549,11 @@ async fn reports_why_recording_could_not_start() {
         ..Script::default()
     })
     .await;
-    let err = r.recorder.start("m1", None, true).await.unwrap_err();
+    let err = r
+        .recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap_err();
     assert_eq!(err, "麦克风和电脑声音都录不了");
     let state = r.recorder.state();
     assert_eq!(state.status, Phase::Idle);
@@ -1481,17 +1574,29 @@ async fn reports_why_recording_could_not_start() {
         .lock()
         .unwrap()
         .insert("m2".into(), "done".into());
-    let err = r.recorder.start("m2", None, true).await.unwrap_err();
+    let err = r
+        .recorder
+        .start("m2", None, true, EchoCancel::Off)
+        .await
+        .unwrap_err();
     assert!(err.contains("已经开始处理"), "{err}");
     assert!(r.recorder.state().warnings.is_empty());
     // 会议编号不对、麦克风不对、两路声音都不录
-    assert!(r.recorder.start("../x", None, true).await.is_err());
     assert!(r
         .recorder
-        .start("m3", Some("--no-system".into()), true)
+        .start("../x", None, true, EchoCancel::Off)
         .await
         .is_err());
-    let err = r.recorder.start("m3", None, false).await.unwrap_err();
+    assert!(r
+        .recorder
+        .start("m3", Some("--no-system".into()), true, EchoCancel::Off)
+        .await
+        .is_err());
+    let err = r
+        .recorder
+        .start("m3", None, false, EchoCancel::Off)
+        .await
+        .unwrap_err();
     assert!(err.contains("至少要录一个"), "{err}");
 
     // 找不到录音程序
@@ -1501,7 +1606,10 @@ async fn reports_why_recording_could_not_start() {
         Arc::new(Seen::default()),
         server::http_client(),
     );
-    let err = missing.start("m4", None, true).await.unwrap_err();
+    let err = missing
+        .start("m4", None, true, EchoCancel::Off)
+        .await
+        .unwrap_err();
     assert!(err.contains("找不到录音程序"), "{err}");
     assert!(missing
         .devices()
@@ -1522,7 +1630,10 @@ async fn passes_on_warnings_and_lists_microphones() {
     assert_eq!(devices.microphones[0].name, "MacBook Pro 麦克风");
     assert!(devices.microphones[0].default);
 
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     let state = wait_for(&r.recorder, "提醒", |s| !s.warnings.is_empty()).await;
     assert_eq!(
         state.warnings,
@@ -1560,7 +1671,10 @@ async fn keeps_every_different_warning_of_the_same_kind() {
         ..Script::default()
     })
     .await;
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     // 最后一条到了，前面的就都处理过了（录音程序的事件按顺序处理）
     let state = wait_for(&r.recorder, "提醒", |s| {
         s.warnings.iter().any(|w| w.message == SYSTEM)
@@ -1582,6 +1696,264 @@ async fn keeps_every_different_warning_of_the_same_kind() {
 }
 
 #[tokio::test]
+async fn follows_echo_cancellation_and_microphone_changes() {
+    const SILENT: &str = "麦克风一直几乎没有声音，可能被会议软件占用了。请在会议软件里关掉降噪、回声消除，或者戴耳机录音。";
+    const ECHO_FAILED: &str =
+        "回声消除没能打开，这次录音里外放的会议声音可能会录两遍。戴耳机可以避免。";
+    let echo = |mode, active, reason: Option<&str>| {
+        Some(Echo {
+            mode,
+            active,
+            reason: reason.map(str::to_string),
+        })
+    };
+    // 开始录的时候就判断了声音从哪出来：回声消除开没开可能比 started 先报，started 不能把它清掉。
+    // 录的是系统默认的麦克风，录着录着换了默认的麦克风：显示现在在录的这个
+    let r = rig(Script {
+        before_start: vec![json!({"event": "echo", "active": true, "reason": "speakers"})],
+        after_start: vec![json!({"event": "mic_changed", "name": "AirPods Pro"})],
+        ..Script::default()
+    })
+    .await;
+    let state = r
+        .recorder
+        .start("m1", Some("default".into()), true, EchoCancel::Auto)
+        .await
+        .unwrap();
+    assert_eq!(state.echo, echo(EchoMode::Auto, true, Some("speakers")));
+    assert!(
+        helper_runs(r.f.dir.path())[0].ends_with("--mic default --echo-cancel auto"),
+        "{:?}",
+        helper_runs(r.f.dir.path())
+    );
+    let state = wait_for(&r.recorder, "换麦克风", |s| {
+        s.mic.as_deref() == Some("AirPods Pro")
+    })
+    .await;
+    assert_eq!(state.echo, echo(EchoMode::Auto, true, Some("speakers")));
+    let state = r.recorder.stop().await.unwrap();
+    assert_eq!((state.echo, state.mic), (None, None));
+
+    // 戴上了耳机：不用消除了。麦克风长时间几乎没声音的提醒照常交给界面
+    fake_helper(
+        r.f.dir.path(),
+        &Script {
+            warnings: &[("mic_silent", SILENT)],
+            after_start: vec![json!({"event": "echo", "active": false, "reason": "headphones"})],
+            ..Script::default()
+        },
+    );
+    r.recorder
+        .start("m2", Some("default".into()), true, EchoCancel::Auto)
+        .await
+        .unwrap();
+    let state = wait_for(&r.recorder, "戴上耳机", |s| {
+        s.echo.as_ref().and_then(|e| e.reason.as_deref()) == Some("headphones")
+    })
+    .await;
+    assert_eq!(state.echo, echo(EchoMode::Auto, false, Some("headphones")));
+    assert_eq!(state.mic.as_deref(), Some("MacBook Pro 麦克风"));
+    assert_eq!(
+        state.warnings,
+        [Warning {
+            code: "mic_silent".into(),
+            message: SILENT.into()
+        }]
+    );
+    r.recorder.stop().await.unwrap();
+
+    // 要的回声消除没能打开：照原样录麦克风，提醒交给界面
+    fake_helper(
+        r.f.dir.path(),
+        &Script {
+            echo_report: Some("unavailable"),
+            warnings: &[("echo_unavailable", ECHO_FAILED)],
+            ..Script::default()
+        },
+    );
+    r.recorder
+        .start("m3", None, true, EchoCancel::Auto)
+        .await
+        .unwrap();
+    let state = wait_for(&r.recorder, "提醒", |s| !s.warnings.is_empty()).await;
+    assert_eq!(state.echo, echo(EchoMode::Unavailable, false, None));
+    assert_eq!(state.warnings[0].code, "echo_unavailable");
+    r.recorder.stop().await.unwrap();
+}
+
+#[test]
+fn an_update_never_cuts_a_recording_or_an_upload_short() {
+    let state = |status, uploads: &[UploadStatus]| RecorderState {
+        status,
+        meeting_id: None,
+        title: None,
+        seconds: 0.0,
+        level: None,
+        mic: None,
+        system: false,
+        echo: None,
+        marks: vec![],
+        warnings: vec![],
+        error: None,
+        uploads: uploads
+            .iter()
+            .enumerate()
+            .map(|(i, status)| Upload {
+                meeting_id: format!("m{i}"),
+                title: String::new(),
+                recorded: 2,
+                uploaded: 1,
+                status: *status,
+                error: None,
+            })
+            .collect(),
+    };
+    assert_eq!(state(Phase::Idle, &[]).update_blocker(), None);
+    for phase in [Phase::Starting, Phase::Recording, Phase::Paused] {
+        let reason = state(phase, &[]).update_blocker().unwrap();
+        assert!(reason.contains("正在录音"), "{phase:?}：{reason}");
+    }
+    let reason = state(Phase::Stopping, &[]).update_blocker().unwrap();
+    assert!(reason.contains("正在结束"), "{reason}");
+    // 还没传完的（包括暂时传不上去、在等着再试的）
+    for status in [
+        UploadStatus::Recording,
+        UploadStatus::Uploading,
+        UploadStatus::Completing,
+    ] {
+        assert_eq!(
+            state(Phase::Idle, &[status]).update_blocker().as_deref(),
+            Some("还有 1 段录音没传完。传完以后再更新"),
+            "{status:?}"
+        );
+    }
+    let reason = state(
+        Phase::Idle,
+        &[UploadStatus::Waiting, UploadStatus::Uploading],
+    )
+    .update_blocker()
+    .unwrap();
+    // 说法和界面上的一样（web/src/platform/updateView.ts 的 updateBlocker）
+    assert_eq!(
+        reason,
+        "还有 2 段录音没传完，其中 1 段暂时传不上去，在等着自动再试。请检查网络和服务器，传完以后再更新"
+    );
+    assert_eq!(
+        state(Phase::Idle, &[UploadStatus::Waiting, UploadStatus::Waiting])
+            .update_blocker()
+            .as_deref(),
+        Some("还有 2 段录音暂时传不上去，在等着自动再试。请检查网络和服务器，传完以后再更新")
+    );
+    // 传完了的，和中断了、传不上去了的（要等用户处理，可能一直放着）
+    assert_eq!(
+        state(
+            Phase::Idle,
+            &[
+                UploadStatus::Completed,
+                UploadStatus::Interrupted,
+                UploadStatus::Failed
+            ]
+        )
+        .update_blocker(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn an_update_waits_for_the_recording_and_holds_off_new_ones() {
+    let r = rig(Script {
+        chunks: 1,
+        ..Script::default()
+    })
+    .await;
+    // 没在录、没有没传完的：可以装。装的时候不让开始录音（装好就重启了），没装上就又可以了
+    assert_eq!(r.recorder.update_blocker(), None);
+    r.recorder.hold_for_update().unwrap();
+    let err = r
+        .recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap_err();
+    assert!(err.contains("正在安装"), "{err}");
+    assert!(helper_runs(r.f.dir.path()).is_empty(), "没启动录音程序");
+    assert_eq!(r.recorder.state().status, Phase::Idle);
+    r.recorder.release_update_hold();
+
+    // 在录（暂停了也算）：不装，也不占住
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
+    let err = r.recorder.hold_for_update().unwrap_err();
+    assert!(err.contains("正在录音"), "{err}");
+    r.recorder.pause().await.unwrap();
+    assert!(r.recorder.update_blocker().unwrap().contains("正在录音"));
+    assert_eq!(r.recorder.resume().await.unwrap().status, Phase::Recording);
+
+    // 录完、传完了才能装
+    r.recorder.stop().await.unwrap();
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m1", UploadStatus::Completed)
+    })
+    .await;
+    r.recorder.hold_for_update().unwrap();
+    r.recorder.release_update_hold();
+}
+
+#[tokio::test]
+async fn an_update_waits_for_recordings_that_are_not_uploaded_yet() {
+    // 服务器连不上：先占一个端口再放掉，连过去会被拒绝
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let mock = Arc::new(Mock::default());
+    let mut r = rig_with(mock.clone(), format!("http://{addr}"), Script::default());
+    r.run.abort();
+    // 中断了的、传不上去的要等用户处理（可能一直放着），别的账号的要等那个账号登录了才传：都不耽误更新
+    let planted = [
+        ("u1", "m1", Status::Interrupted),
+        ("u1", "m2", Status::Failed),
+        ("u2", "m3", Status::Stopped),
+    ];
+    for (i, (user, meeting, status)) in planted.into_iter().enumerate() {
+        let mut rec = recording(&r.server, user, meeting, status);
+        rec.started_at += i as u64;
+        plant(&r.root, &rec, &[(0, b"audio-0".to_vec())]);
+    }
+    r.restart();
+    assert_eq!(r.recorder.update_blocker(), None);
+
+    // 录完了还没传上去的：等它传完
+    r.run.abort();
+    plant(
+        &r.root,
+        &recording(&r.server, "u1", "m4", Status::Stopped),
+        &[(0, b"audio-0".to_vec())],
+    );
+    r.restart();
+    let state = wait_for(&r.recorder, "等网络", |s| {
+        upload_is(s, "m4", UploadStatus::Waiting)
+    })
+    .await;
+    let reason = state.update_blocker().unwrap();
+    assert_eq!(
+        reason,
+        "还有 1 段录音暂时传不上去，在等着自动再试。请检查网络和服务器，传完以后再更新"
+    );
+    assert_eq!(r.recorder.hold_for_update().unwrap_err(), reason);
+
+    // 服务器连上了，传完了：可以装
+    let listener = TcpListener::bind(addr).await.unwrap();
+    serve(listener, mock.clone()).await;
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m4", UploadStatus::Completed)
+    })
+    .await;
+    assert_eq!(mock.seqs("m4"), [0]);
+    r.recorder.hold_for_update().unwrap();
+}
+
+#[tokio::test]
 async fn will_not_continue_past_the_last_chunk_the_server_takes() {
     let mut r = rig(Script::default()).await;
     r.run.abort();
@@ -1598,7 +1970,11 @@ async fn will_not_continue_past_the_last_chunk_the_server_takes() {
 
     // 不启动录音程序（它不接受 4000 以上的 --start-seq，说的是参数的事），直接说清楚为什么、能怎么办
     for (meeting, recorded) in planted {
-        let err = r.recorder.start(meeting, None, true).await.unwrap_err();
+        let err = r
+            .recorder
+            .start(meeting, None, true, EchoCancel::Off)
+            .await
+            .unwrap_err();
         assert_eq!(err, CHUNKS_FULL, "{meeting}");
         let state = r.recorder.state();
         assert_eq!(state.status, Phase::Idle);
@@ -1626,7 +2002,10 @@ async fn stops_before_the_next_chunk_would_be_past_what_the_server_takes() {
 
     // 接着录：录好第 3997、3998 片，下一片就是服务器能收的最后一片了，自动结束，录音程序把剩下的写成第 3999 片。
     // 和录满 6 小时一样说清楚为什么结束了
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     let state = wait_for(&r.recorder, "自动结束", |s| s.status == Phase::Idle).await;
     assert_eq!(state.error.as_deref(), Some(CHUNKS_REACHED));
     let state = wait_for(&r.recorder, "传完", |s| {
@@ -1654,7 +2033,10 @@ async fn stops_when_the_helper_says_it_is_writing_the_last_chunk_the_server_take
         ..Script::default()
     })
     .await;
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     let state = wait_for(&r.recorder, "自动结束", |s| s.status == Phase::Idle).await;
     assert_eq!(state.error.as_deref(), Some(CHUNKS_REACHED));
     {
@@ -1928,7 +2310,11 @@ async fn continuing_offline_never_overwrites_chunks_already_on_the_server() {
     r.restart();
 
     // 断网也照样能接着录：从第 2 片开始写（记下这些序号还没和服务器核对过）
-    let state = r.recorder.start("m1", None, true).await.unwrap();
+    let state = r
+        .recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     assert_eq!(state.status, Phase::Recording);
     assert!(
         helper_runs(r.f.dir.path())
@@ -2004,7 +2390,10 @@ async fn continuing_offline_uploads_once_the_server_has_none_of_those_chunks() {
     *r.mock.received_page.lock().unwrap() = Some("<html>请先登录</html>");
     r.restart();
 
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     wait_for(&r.recorder, "录好第 2 片", |s| {
         upload(s, "m1").is_some_and(|u| u.recorded == 3)
     })
@@ -2053,7 +2442,11 @@ async fn will_not_continue_over_chunks_already_on_the_server_but_uploads_the_res
     r.restart();
 
     // 接着录：再录、再传都会覆盖服务器上的第 3 片，不录（录音程序不启动）；直接结束也一样
-    let err = r.recorder.start("m1", None, true).await.unwrap_err();
+    let err = r
+        .recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap_err();
     assert!(err.contains("第 3 片") && err.contains("覆盖"), "{err}");
     assert!(helper_runs(r.f.dir.path()).is_empty());
     assert!(upload_is(
@@ -2168,7 +2561,10 @@ async fn shutdown_stops_and_uploads_continue_next_launch() {
     })
     .await;
     r.mock.chunk_error.lock().unwrap().insert("m1".into(), 503);
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     // 退出 App：结束录音，等最后一片写完
     r.recorder.shutdown().await;
     assert_eq!(r.recorder.state().status, Phase::Idle);
@@ -2213,7 +2609,10 @@ async fn a_helper_that_has_to_be_killed_leaves_the_recording_interrupted() {
         stop_timeout: Duration::from_millis(300),
         ..options(&r.root, &r.helper)
     });
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     wait_for(&r.recorder, "传完第 0 片", |s| {
         upload(s, "m1").is_some_and(|u| u.uploaded == 1)
     })
@@ -2251,7 +2650,10 @@ async fn a_helper_that_cannot_finish_the_last_chunk_interrupts_the_recording() {
         ..Script::default()
     })
     .await;
-    r.recorder.start("m1", None, true).await.unwrap();
+    r.recorder
+        .start("m1", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
     // 点结束：录音程序自己等了 8 秒还没写完最后一片，报错退出。录好的部分算中断，原因照录音程序说的
     let state = r.recorder.stop().await.unwrap();
     assert_eq!(state.status, Phase::Idle);
@@ -2276,6 +2678,11 @@ fn state_uses_the_agreed_field_names() {
         }),
         mic: Some("MacBook Pro 麦克风".into()),
         system: true,
+        echo: Some(Echo {
+            mode: EchoMode::Auto,
+            active: false,
+            reason: Some("headphones".into()),
+        }),
         marks: vec![3.0],
         warnings: vec![Warning {
             code: "mic_denied".into(),
@@ -2301,6 +2708,7 @@ fn state_uses_the_agreed_field_names() {
             "level": {"mic": 0.5, "system": 0.0},
             "mic": "MacBook Pro 麦克风",
             "system": true,
+            "echo": {"mode": "auto", "active": false, "reason": "headphones"},
             "marks": [3.0],
             "warnings": [{"code": "mic_denied", "message": "没有麦克风权限"}],
             "error": null,
@@ -2328,6 +2736,19 @@ fn state_uses_the_agreed_field_names() {
     ] {
         assert_eq!(serde_json::to_value(phase).unwrap(), name);
     }
+    for (mode, name) in [
+        (EchoMode::Off, "off"),
+        (EchoMode::On, "on"),
+        (EchoMode::Unavailable, "unavailable"),
+    ] {
+        assert_eq!(serde_json::to_value(mode).unwrap(), name);
+    }
+    // 没在录时是 null
+    let idle = RecorderState {
+        echo: None,
+        ..state
+    };
+    assert_eq!(serde_json::to_value(&idle).unwrap()["echo"], Value::Null);
 }
 
 // ---- 和真的录音程序一起跑 ----
@@ -2453,10 +2874,17 @@ async fn real_helper_records_and_uploads() {
     } = real_rig(25, false).await;
 
     let state = recorder
-        .start("m1", Some("default".into()), true)
+        .start("m1", Some("default".into()), true, EchoCancel::Off)
         .await
         .unwrap();
     assert!(state.error.is_none(), "{state:?}");
+    // 没要回声消除：录音程序在 started 里报 off
+    assert_eq!(
+        state.echo.as_ref().map(|e| e.mode),
+        Some(EchoMode::Off),
+        "{:?}",
+        state.echo
+    );
     // 文件尽快读完，录音程序自己结束（和点了结束一样）：传完以后告诉服务器开始处理
     wait_for(&recorder, "传完", |s| {
         upload_is(s, "m1", UploadStatus::Completed)
@@ -2510,8 +2938,21 @@ async fn real_helper_pauses_marks_and_stops() {
     } = real_rig(30, true).await;
 
     let began = std::time::Instant::now();
-    let state = recorder.start("m1", None, true).await.unwrap();
+    // 打开回声消除（auto）录：录音程序报 auto（没能打开时是 unavailable）。开着它也不能影响录音，
+    // 下面的暂停、标记、时长照样检查
+    let state = recorder
+        .start("m1", None, true, EchoCancel::Auto)
+        .await
+        .unwrap();
     assert_eq!(state.status, Phase::Recording);
+    assert!(
+        matches!(
+            state.echo.as_ref().map(|e| e.mode),
+            Some(EchoMode::Auto | EchoMode::Unavailable)
+        ),
+        "{:?}",
+        state.echo
+    );
     wait_for(&recorder, "录到 1.5 秒", |s| s.seconds >= 1.5).await;
     let marks = recorder.mark().unwrap().marks;
     assert_eq!(marks.len(), 1);

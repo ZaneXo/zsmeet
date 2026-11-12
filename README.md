@@ -179,15 +179,40 @@ zsmeet 的访问地址要填同事能打开的地址（卡片上的链接、用�
 
 ## 桌面版（macOS）
 
-macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自己部署的 zsmeet 服务器：看会议、搜索、问会议、上传录音、导出，和网页版一样；打开过的会议在断网时也能看。它还能录电脑里会议软件（飞书、腾讯会议、Zoom 这些）的声音和麦克风，断网也能录，联网后自动补传。设计见 [docs/desktop.md](docs/desktop.md)。
+macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自己部署的 zsmeet 服务器：看会议、搜索、问会议、上传录音、导出，和网页版一样；打开过的会议在断网时也能看。它还能录电脑里会议软件（飞书、腾讯会议、Zoom 这些）的声音和麦克风，断网也能录，联网后自动补传。有新版本时在 App 里点一下就能更新。设计见 [docs/desktop.md](docs/desktop.md)。
 
-**安装**：在 [Releases](https://github.com/ZaneXo/zsmeet/releases) 里找 `desktop-v` 开头的版本，下载 `zsmeet-desktop-…-macos-universal.dmg`，打开后把 zsmeet 拖进「应用程序」。目前的安装包没有签名，第一次打开时 macOS 会提示「无法验证开发者」：在「应用程序」里右键点 zsmeet →「打开」，再点一次「打开」（只用做一次）。新版本的 macOS 上如果没有「打开」按钮，到「系统设置 → 隐私与安全性」最下面点「仍要打开」。
+**安装**：在 [Releases](https://github.com/ZaneXo/zsmeet/releases) 里找 `desktop-v` 开头的版本（`v` 开头的是服务器的版本；桌面版不会标成「Latest」，往下翻一翻就能看到），下载 `zsmeet-desktop-<版本号>-macos-universal.dmg`，打开后把 zsmeet 拖进「应用程序」。同一个版本里的 `.app.tar.gz`、`.sig` 和 `latest.json` 是给 App 自动更新用的，不用下载。
 
-**第一次打开**：
+**第一次打开（安装包没有签名）**：zsmeet 没有苹果的开发者签名，第一次打开时 macOS 会拦住，提示 Apple 无法验证 zsmeet 是否包含恶意软件（各版本 macOS 的说法不太一样）。这样打开：
 
-1. 填服务器地址，也就是在浏览器里打开 zsmeet 用的地址（比如 `https://meet.example.com`）。没写 `http://` 或 `https://` 时先试 https，连不上再试 http。服务器要先在网页上完成初始化，并且是支持桌面版的版本。
+1. 在提示框上点「完成」或「好」（不要点「移到废纸篓」）。
+2. 打开「系统设置 → 隐私与安全性」，拉到最下面的「安全性」，那里写着 zsmeet 已被阻止，点旁边的「仍要打开」，输入这台电脑的登录密码，再点一次「仍要打开」。macOS 14 也可以在「应用程序」里右键点 zsmeet →「打开」，再点一次「打开」。
+
+只用做一次，之后在 App 里更新到新版本也不用再做。要是提示「zsmeet 已损坏，无法打开」、系统设置里也没有「仍要打开」，打开「终端」执行下面这一行（去掉 macOS 给下载的文件加的隔离标记），再打开 zsmeet：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/zsmeet.app
+```
+
+**连上服务器、登录**：
+
+1. 填服务器地址，也就是在浏览器里打开 zsmeet 用的地址（比如 `https://meet.example.com`）。没写 `http://` 或 `https://` 时先试 https，连不上再试 http。服务器要先在网页上完成初始化，并且是支持桌面版的版本。服务器在公司或家里的局域网里时，macOS 15 起第一次连接会问是否允许 zsmeet 查找本地网络上的设备，点「允许」（见下面的「权限」）。
 2. 点「在浏览器里登录」：浏览器会打开 zsmeet 的登录页，用密码或飞书登录后点「允许」，浏览器会跳回 App，就登录好了。App 里不输密码。浏览器问「要打开 zsmeet 吗」时点允许。
-3. 登录信息存在 macOS 的钥匙串里（名称是 `io.github.zanexo.zsmeet`，账户是服务器地址），下次打开不用再登录。重新安装新版本后第一次打开，macOS 可能会问是否允许 zsmeet 使用钥匙串里的这一项，点「允许」或「始终允许」（没签名的 App 每个版本在系统看来都是新的）。
+3. 登录信息存在 macOS 的钥匙串里（名称是 `io.github.zanexo.zsmeet`，账户是服务器地址），下次打开不用再登录。更新到新版本、重新安装以后第一次打开，macOS 可能会问是否允许 zsmeet 使用钥匙串里的这一项，点「始终允许」（没签名的 App 每个版本在系统看来都是新的）。
+
+**权限**：都在「系统设置 → 隐私与安全性」里。第一次用到时 macOS 会问，点「允许」；点了「不允许」的话，到下面说的地方打开 zsmeet 的开关。
+
+- **本地网络**：服务器在公司或家里的局域网里（地址是 `192.168.…`、`10.…`、`172.16.…` 到 `172.31.…`，或者以 `.local` 结尾）时要用，macOS 15 起才会问。没允许的话填服务器地址时连不上，App 会提示去「本地网络」里打开。
+- **麦克风**：录你这边说话的声音，第一次录音时问。在「麦克风」里。
+- **录制系统音频**：录电脑里会议软件的声音，第一次录音时问。在「屏幕与系统录音」的「仅系统录音」里。zsmeet 只录声音，不录屏幕。
+
+两项录音的权限只给了一项也能录，只是只录到那一路的声音。
+
+**更新**：zsmeet 自己会查有没有新版本（打开后和之后每 6 小时一次），有的话页面顶上会提示，写着这一版改了什么；点「更新并重启」才会下载、安装，装好后自动重新打开。也可以在「设置 → 账号」最下面的「版本」里点「检查更新」。
+
+- 新版本从 GitHub 下载，装之前核对签名（发布时用 zsmeet 自己的密钥签的），对不上的不装。这台电脑连不上 GitHub 时查不到新版本，可以照上面「安装」那样下载新的 DMG，把 zsmeet 拖进「应用程序」替换掉，登录、设置和没传完的录音都还在。
+- 正在录音、还有录音没传完时不能更新（更新要重启 zsmeet），录完、传完再点。
+- 安装包没有签名，系统把每个版本都当成新的 App：更新以后第一次用时，macOS 可能会再问一次钥匙串、麦克风和录制系统音频的权限，点「允许」就行。要是录音页说没有权限、系统设置里 zsmeet 的开关却开着，把开关关掉再打开；还不行就选中 zsmeet 点「−」删掉，下次录音时重新允许。
 
 **用起来和网页版的不同**：
 
@@ -200,13 +225,14 @@ macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自�
 
 1. 点「开始录音」，填标题、选纪要模板和谁能看（和网页录音一样），再选录什么声音：
    - **电脑里的声音**：飞书、腾讯会议、Zoom 这些会议软件里其他人说话的声音（电脑上同时在放的别的声音也会录进去）。
-   - **麦克风**：你自己和身边的人说话的声音。可以选用哪个麦克风，也可以不录。开线上会议时建议戴耳机，不然对方的声音从扬声器放出来，会被麦克风再录一遍。
+   - **麦克风**：你自己和身边的人说话的声音。可以选用哪个麦克风，也可以不录；选「系统默认的麦克风」时，录到一半换了默认的麦克风（比如连上了 AirPods），zsmeet 跟着换。开线上会议时建议戴耳机，不然对方的声音从扬声器放出来，会被麦克风再录一遍，转写里同一句话出现两次。
+   - **外放时去掉回声（实验）**：两样都录、又只能用扬声器外放时可以打开。zsmeet 用录到的电脑声音，把外放出来又被麦克风录进去的会议声音去掉，不影响会议软件和别的 App 的声音；戴耳机（包括 AirPods）、用 AirPlay 外放时自动不处理，录音时页面上显示回声消除开没开。这是实验功能，默认关着，效果还在验证：外放音量很大、用蓝牙音箱或电视外放时可能还会留下一点回声；你和别人同时说话时，如果转写里你说的话缺了，关掉它、改用耳机。能戴耳机就戴耳机，效果最好，也用不着这个选项。每台电脑记着自己的选择。
 2. 第一次录音时 macOS 会问两次，都点「允许」：是否允许 zsmeet 使用麦克风，是否允许 zsmeet 录制电脑的声音（系统音频）。点了「不允许」的话，录音页会提示去哪里打开：
    - 麦克风：「系统设置 → 隐私与安全性 → 麦克风」，打开 zsmeet。
    - 电脑里的声音：「系统设置 → 隐私与安全性 → 屏幕与系统录音」，在「仅系统录音」里打开 zsmeet。
 
    打开以后重新开始录音。只给了一项权限也能录，只是只录到那一路的声音。
-3. 录音时可以暂停（暂停的时候什么都不录）、继续、标记重点（写纪要时会重点写这些时间点前后的内容）。关掉窗口录音也不停：菜单栏的 zsmeet 图标旁边显示录了多久，点开可以暂停、标记重点、结束录音。
+3. 录音时可以暂停（暂停的时候什么都不录）、继续、标记重点（写纪要时会重点写这些时间点前后的内容）。关掉窗口录音也不停：菜单栏的 zsmeet 图标旁边显示录了多久，点开可以暂停、标记重点、结束录音。麦克风很久都录不到声音时（比如被静音了，或者开着的会议软件占着它），录音页会提醒你检查。
 4. 结束录音以后，剩下的部分传完，服务器自动开始转写、生成纪要，录音页上有这场会议的链接。一场最长约 6 小时，到时自动结束。
 
 断网、退出和意外中断：
@@ -218,13 +244,26 @@ macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自�
 - 退出登录、切换服务器会先结束正在录的那一场（点的时候会先提醒你）。录好的留在这台电脑上，以后用这个账号登录这台服务器时接着传，换别的账号登录看不到、也不会传。
 - 录音存在 `~/Library/Application Support/io.github.zanexo.zsmeet/recordings/` 下，只有你自己的 macOS 账户能打开。传上去的分片先留着，等服务器确认整场都收到、开始处理以后才整个删掉（万一有一片其实没传成功，还能补传）；6 小时的录音大约占 170 MB。
 
+**卸载**：
+
+1. 先看一眼有没有没传完的录音（页面顶上和菜单栏图标的菜单里会列出来），有的话等它传完：卸载以后就传不上去了。
+2. 在「设置 → 账号」里退出登录，服务器上这台电脑的登录随之作废。忘了这一步也没关系，在网页上「设置 → 账号 → 已登录的 App」里退出它。
+3. 退出 zsmeet（菜单栏图标 →「退出」，或者 ⌘Q），把「应用程序」里的 zsmeet 拖到废纸篓。
+4. 想把这台电脑上的数据也删干净：在访达里按 ⇧⌘G，分别打开下面几个文件夹，把它们拖到废纸篓。
+
+   - `~/Library/Application Support/io.github.zanexo.zsmeet`：设置，以及没传完的录音
+   - `~/Library/Caches/io.github.zanexo.zsmeet`：断网时看的会议内容
+   - `~/Library/WebKit/io.github.zanexo.zsmeet`：界面记下的选择（比如上次选的麦克风）
+
+   没退出登录就卸载了的话，再打开「钥匙串访问」，搜 `io.github.zanexo.zsmeet`，删掉那一项。系统设置里给过的权限可以留着，也可以在「终端」里执行 `tccutil reset All io.github.zanexo.zsmeet` 收回麦克风和录音的权限。
+
 **开发**：需要 Rust（[rustup](https://rustup.rs)，版本由 `desktop/src-tauri/rust-toolchain.toml` 固定）和上面「开发」一节的 Node + pnpm。
 
 ```bash
 make desktop-dev        # 打开桌面版窗口，界面（web/）改了自动刷新。先用 make dev-api 起好服务器
-make desktop-test       # 录音小程序的测试，cargo fmt、clippy 和 Rust 的测试（不碰钥匙串，用假的服务器），再和真的录音小程序一起录一遍（用测试音频，不要权限）
+make desktop-test       # 录音小程序的测试，cargo fmt、clippy 和 Rust 的测试（不碰钥匙串，用假的服务器），再和真的录音小程序一起录一遍（用测试音频，不要权限），还有发布脚本的测试
 make desktop-build      # 构建本机架构的 .app 和 DMG，在 desktop/src-tauri/target/release/bundle/ 下
-make desktop-universal  # 构建 Apple 芯片和 Intel 通用的 DMG，和发布时一样
+make desktop-universal  # 构建 Apple 芯片和 Intel 通用的 DMG，和发布时一样（只是不打自动更新用的更新包，那要发布用的密钥）
 ```
 
 开发模式下（`make desktop-dev`）macOS 不会把 `zsmeet://` 的链接交给它，浏览器登录完跳不回来：要试登录，用 `make desktop-build` 打出来的 App。界面里网页版和桌面版不一样的地方都在 `web/src/platform/`；网页版的构建（`pnpm -C web build`）里没有桌面版的代码。
@@ -316,13 +355,17 @@ git tag v0.1.0 && git push origin v0.1.0
 
 Actions（`.github/workflows/release.yml`）会先跑一遍检查和测试，再分别在 amd64 和 arm64 的机器上构建镜像（识别库通过 cgo 调用，不交叉编译），合成一个多架构镜像推到 `ghcr.io/zanexo/zsmeet`，打上 `0.1.0`、`0.1`、`latest` 三个标签（`v0.2.0-rc.1` 这样带「-」的预发布版本只打它自己的版本号），最后发一个 GitHub Release。在 Actions 页面手动运行 Release 时只试着构建两种架构，不推镜像、不发 Release。
 
-桌面版单独发布，推一个 desktop-v 开头的标签（版本号要和 `desktop/src-tauri/tauri.conf.json`、`Cargo.toml` 里的一致）：
+桌面版单独发布，推一个 desktop-v 开头的标签（版本号要和 `desktop/src-tauri/tauri.conf.json`、`Cargo.toml` 里的一致，用 `make desktop-version` 改）：
 
 ```bash
-git tag desktop-v0.1.0 && git push origin desktop-v0.1.0
+make desktop-version VERSION=0.2.0    # 改版本号（Cargo.lock 一起改），提交并合并到 main
+git tag -a desktop-v0.2.0 -m "这一版改了什么"    # 标签的说明就是 App 里看到的更新说明
+git push origin desktop-v0.2.0
 ```
 
-Actions（`.github/workflows/desktop.yml`）跑完检查和测试，在 macOS 上打一个通用的 DMG，附到这个标签的 Release 上（不会顶掉服务器版本的「Latest」）。默认是 ad-hoc 签名；在仓库的 Secrets 里配了 Apple 的证书（`APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`）和公证用的账号（`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`）以后，自动签名并公证，说明写在 workflow 文件开头。平时改了 `desktop/` 或 `web/` 的 PR 也会跑一遍桌面版的检查和测试。
+Actions（`.github/workflows/desktop.yml`）先核对标签和 App 的版本号，跑完检查和测试，在 macOS 上打一个 Apple 芯片和 Intel 通用的 DMG（ad-hoc 签名，没有苹果的开发者签名，也不做公证），再把 App 打成自动更新用的更新包，用仓库 Secrets 里的更新密钥（`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）签名，用 App 里的公钥核对过以后生成更新清单 `latest.json`。DMG、更新包、签名和 `latest.json` 发到这个标签的 Release 上（不会顶掉服务器版本的「Latest」），`latest.json` 同时换到固定的 Release「desktop-latest」上：装着旧版本的 App 从那里知道有新版本。`desktop-v0.3.0-rc.1` 这样带「-」的预发布版本只发它自己的 Release，App 不会提示更新到它。
+
+第一次发布之前，先在 Actions 页面选 Desktop → Run workflow 试运行一次（`dry_run` 默认勾着）：照样打包、签名、核对，只把打出来的文件放在这次运行的 Artifacts 里，什么都不发布，用来确认两个 Secrets 配对了。细节（更新清单的格式、密钥丢了怎么办）见 [docs/desktop.md](docs/desktop.md#发布和自动更新)。平时改了 `desktop/` 或 `web/` 的 PR 也会跑一遍桌面版的检查和测试。
 
 第一次发布后如果别人拉镜像提示没有权限，说明镜像还是私有的：在仓库主页右边的 Packages 里打开 zsmeet，到 Package settings 把 Visibility 改成 Public（只用改一次）。
 
@@ -340,7 +383,7 @@ PR 由 [CodeAnt AI](https://www.codeant.ai) 自动做 AI 代码审查，审查�
 
 接下来：
 
-- **桌面版收尾**（正在做）：录音的回声消除、换了默认麦克风时跟着换、App 内自动更新、在 GitHub 上发布安装包。
+- **桌面版收尾**（正在做）：录音的回声消除、换了默认麦克风时跟着换、App 内自动更新、在 GitHub 上发布安装包都写好了，正在真机上试。回声消除先作为默认关着的实验功能，在外放开会时试好了再默认打开。
 - **国际化**：
   1. **界面多语言**：先做英文。默认跟随浏览器和电脑的语言，也能在设置里自己选。
   2. **报错和提示多语言**：服务器返回的报错、参数校验的提示、界面上的提示和说明文字，都按用户选的语言显示。
@@ -352,10 +395,12 @@ PR 由 [CodeAnt AI](https://www.codeant.ai) 自动做 AI 代码审查，审查�
 
 - 说话人区分的聚类阈值只在合成语音上调过，还需要用真实的多人会议校准（`internal/asr/asr.go`）；按声音认出说话人的阈值也一样（`internal/voiceprint`）。
 - 界面和报错只有中文。
-- 桌面版录音没有回声消除：开会时外放的话，对方的声音会从麦克风再录进去一遍（和电脑声音那一路稍微错开），戴耳机就没有这个问题。
+- 桌面版录音的回声消除还是实验功能，默认关着（录音页上的「外放时去掉回声（实验）」）：没打开时外放开会，对方的声音会从麦克风再录进去一遍（和电脑声音那一路稍微错开）；打开了以后，外放音量很大、用蓝牙音箱或电视外放时也可能留下一点回声，两边同时说话时你的声音会被压低一些。戴耳机就没有这些问题。
 
 ## 开源协议
 
 [Apache License 2.0](LICENSE)：可以免费使用、修改和分发，也可以商用，需要保留原来的版权和许可声明。
+
+桌面版的录音小程序编进了 WebRTC 的音频处理（BSD-3-Clause，回声消除用）和 Abseil（Apache-2.0），源码在 `desktop/recorder/ThirdParty/`，它们的版权声明和许可证见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)，App 里也带着一份。
 
 语音识别用到的模型（SenseVoice 识别、语音检测、说话人区分）不在这个仓库里，第一次处理会议时才从 Hugging Face 下载。它们各有自己的许可，不受上面这份协议约束，商用前请自行确认。

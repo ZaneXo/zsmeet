@@ -1,3 +1,4 @@
+import CoreAudio
 import Foundation
 
 /// 程序入口：解析参数，执行 devices 或 record
@@ -42,6 +43,13 @@ final class RecordSession {
         let sources: [CaptureSource]
         let micName: String?
         let system: Bool
+        let echo: EchoCancelStatus
+        /// 回声消除 auto 模式看的输出路线（结束时停掉它的监听）
+        var route: OutputRouteSource?
+        /// 录系统默认的麦克风时跟着系统设置换麦克风（结束时停掉）
+        var follower: MicFollower?
+        /// 开始跟（发了 started 以后调用，mic_changed 一定在 started 后面）
+        var startFollowing: (() -> Void)?
     }
 
     /// 准备的时候 App 让停止了
@@ -56,6 +64,8 @@ final class RecordSession {
     private var phase = Phase.preparing
     private var engine: RecordingEngine?
     private var sources: [CaptureSource] = []
+    private var route: OutputRouteSource?
+    private var follower: MicFollower?
     private var signalSources: [DispatchSourceSignal] = []
     private var activity: NSObjectProtocol?
 
@@ -108,23 +118,55 @@ final class RecordSession {
     private func prepareFile(_ path: String, pipeline: RecordingPipeline) throws -> Setup {
         let reader = try AudioFileReader(path: path)
         guard options.realtime else {
-            return Setup(engine: try FileEngine(reader: reader, pipeline: pipeline), sources: [], micName: reader.name, system: false)
+            // 尽快读完的测试模式只有一路，不做回声消除，started 里照样报要的模式
+            return Setup(engine: try FileEngine(reader: reader, pipeline: pipeline), sources: [], micName: reader.name, system: false,
+                         echo: EchoCancelStatus(rawValue: options.echoCancel.rawValue) ?? .off)
         }
         // 文件的采样率处理不了时直接报错（unsupported_format），和不加 --realtime 时一样
         _ = try Resampler(inputRate: reader.sampleRate)
         let source = try RealtimeFileSource(reader: reader)
+        var sources = [source]
+        // --reference-file：再拿一个文件当电脑声音（回声消除的参考）。它比「麦克风」短的话，后面当成电脑声音断了
+        if let referencePath = options.referenceFile {
+            let referenceReader = try AudioFileReader(path: referencePath)
+            _ = try Resampler(inputRate: referenceReader.sampleRate)
+            sources.append(try RealtimeFileSource(reader: referenceReader, kind: .system))
+        }
+        // 「麦克风」的文件读完了就结束
         source.onEnded = { DispatchQueue.main.async { self.requestStop() } }
-        // 读到一半出错：以 error 结束，不能当成读完了、正常结束（后面的声音就悄悄没了）
-        source.onFailed = { failure in DispatchQueue.main.async { self.fail(failure) } }
-        let engine = try LiveEngine(sources: [source], pipeline: pipeline, events: events)
-        try source.start()
-        return Setup(engine: engine, sources: [source], micName: reader.name, system: false)
+        for file in sources {
+            // 读到一半出错：以 error 结束，不能当成读完了、正常结束（后面的声音就悄悄没了）
+            file.onFailed = { failure in DispatchQueue.main.async { self.fail(failure) } }
+        }
+        // 读文件时不看真的输出设备，auto 当成外放
+        let engine = try LiveEngine(sources: sources, pipeline: pipeline, events: events, echo: echoSetup(route: FixedRoute(.speakers)))
+        // 两个文件从同一个时间开始，时间戳严格对齐
+        let startTime = DispatchTime.now().uptimeNanoseconds
+        for file in sources {
+            file.startTime = startTime
+            try file.start()
+        }
+        return Setup(engine: engine, sources: sources, micName: reader.name, system: sources.count > 1, echo: engine.echoStatus)
+    }
+
+    /// 回声消除的设置（--echo-cancel off 时是 nil）。route：auto 模式看的输出路线
+    private func echoSetup(route: OutputRouteSource?) -> EchoSetup? {
+        guard options.echoCancel != .off else { return nil }
+        let filters = options.aecFilters
+        let hint = options.aecDelayHintMilliseconds
+        return EchoSetup(mode: options.echoCancel, leadMilliseconds: options.aecLeadMilliseconds,
+                         makeCanceller: { WebRTCEchoCanceller(filters: filters, streamDelayMilliseconds: hint) },
+                         route: route, dumpDirectory: options.aecDump)
     }
 
     private func prepareDevices(pipeline: RecordingPipeline) throws -> Setup {
         var sources: [CaptureSource] = []
-        if options.mic != .none, let mic = openMicrophone() {
-            sources.append(mic)
+        // 录系统默认的麦克风时跟着系统设置换（指定了麦克风时不跟）
+        let follower = options.mic == .systemDefault ? MicFollower(system: SystemMicrophones(), events: events) : nil
+        var opened: (capture: MicCapture, microphone: Microphone)?
+        if options.mic != .none, let mic = openMicrophone(follower: follower) {
+            sources.append(mic.capture)
+            opened = mic
         }
         if isStopWanted { throw Cancelled() }
         if options.system, let capture = openSystemAudio() {
@@ -135,15 +177,30 @@ final class RecordSession {
             // 每一路为什么录不了，前面已经各发了一个 warning（App 和它一起显示）
             throw RecorderFailure.noSource
         }
+        // 回声消除的 auto 模式要跟着输出设备（外放还是耳机）。两路都在录才用得上
+        let route: OutputRouteSource? = options.echoCancel == .auto && opened != nil && sources.count == 2
+            ? OutputRoute(micDevice: opened?.capture.deviceID) : nil
         // 采样率处理不了的那一路，LiveEngine 停掉它、发 warning，只录剩下的（一路都不剩时抛出 no_source）
-        let engine = try LiveEngine(sources: sources, pipeline: pipeline, events: events)
+        let engine = try LiveEngine(sources: sources, pipeline: pipeline, events: events, echo: echoSetup(route: route))
         let recorded = engine.sources
+        // 麦克风真的在录才跟（没开起来、采样率处理不了的不跟）
+        var startFollowing: (() -> Void)?
+        if let follower, let opened, recorded.contains(where: { $0 === opened.capture }) {
+            startFollowing = {
+                follower.start(current: opened.microphone, capture: opened.capture, engine: engine) { microphone in
+                    // 判断输出是不是耳麦要看录的是哪个麦克风
+                    route?.updateMicDevice(microphone.id)
+                }
+            }
+        }
         return Setup(engine: engine, sources: recorded,
                      micName: recorded.first { $0.kind == .mic }?.name,
-                     system: recorded.contains { $0.kind == .system })
+                     system: recorded.contains { $0.kind == .system },
+                     echo: engine.echoStatus, route: route, follower: follower, startFollowing: startFollowing)
     }
 
-    private func openMicrophone() -> MicCapture? {
+    /// 打开麦克风。follower 不是 nil（录系统默认的麦克风）时，麦克风断开了交给它（看系统有没有换一个默认的）
+    private func openMicrophone(follower: MicFollower?) -> (capture: MicCapture, microphone: Microphone)? {
         switch MicPermission.ensure(cancelled: { self.isStopWanted }) {
         case .granted, .unknown:
             break
@@ -165,11 +222,16 @@ final class RecordSession {
         }
         do {
             let capture = try MicCapture(microphone)
-            capture.onLost = { [events] in
-                events.send(.warning(.micUnavailable, "麦克风「\(microphone.name)」断开了，后面录不到你这边的声音。接好以后结束这次录音，再重新开始。"))
+            if let follower {
+                // 先看系统有没有换一个默认的麦克风，换过去接着录；换不过去它会提醒
+                capture.onLost = { [weak follower] in follower?.lost(microphone) }
+            } else {
+                capture.onLost = { [events] in
+                    events.send(.warning(.micUnavailable, "麦克风「\(microphone.name)」断开了，后面录不到你这边的声音。接好以后结束这次录音，再重新开始。"))
+                }
             }
             try capture.start()
-            return capture
+            return (capture, microphone)
         } catch {
             log("打开麦克风「\(microphone.name)」：\(error)")
             warn(.micUnavailable, "麦克风「\(microphone.name)」打不开，录不到你这边的声音。换一个麦克风再试。")
@@ -207,6 +269,8 @@ final class RecordSession {
 
     private func begin(_ setup: Setup) {
         sources = setup.sources
+        route = setup.route
+        follower = setup.follower
         if isStopWanted {
             finishWithoutRecording()
             return
@@ -215,11 +279,13 @@ final class RecordSession {
         phase = .running
         // 录音期间不让系统把我们当成闲着：App Nap 会拖慢定时器，闲置睡眠会让录音停下来
         activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "录音")
-        events.send(.started(sampleRate: AACEncoder.sampleRate, channels: 1, mic: setup.micName, system: setup.system))
+        events.send(.started(sampleRate: AACEncoder.sampleRate, channels: 1, mic: setup.micName, system: setup.system,
+                             echoCancellation: setup.echo))
         setup.engine.onFinished = { result in
             DispatchQueue.main.async { self.finish(result) }
         }
         setup.engine.start()
+        setup.startFollowing?()
     }
 
     private func handle(_ command: ControlCommand) {
@@ -276,14 +342,18 @@ final class RecordSession {
         quit(1, after: .error(failure))
     }
 
-    /// 发出最后一个事件（这时分片都已经落盘了），拆掉录音用的设备，退出
+    /// 发出最后一个事件（这时分片都已经落盘了），拆掉录音用的设备，退出。最后一个事件之后什么都不再写
+    /// （比如一路声音读文件出错时，引擎的定时器还在走，不能在 error 后面又冒出一个音量）
     private func quit(_ code: Int32, after event: RecorderEvent) {
         guard phase != .done else { return }
         phase = .done
-        events.send(event)
+        events.sendLast(event)
+        // 先不跟了（停掉换上来的麦克风），再停开始时打开的
+        follower?.stop()
         for source in sources {
             source.stop()
         }
+        route?.stop()
         AudioCleanup.runAll()
         if let activity {
             ProcessInfo.processInfo.endActivity(activity)
@@ -297,7 +367,7 @@ final class RecordSession {
         guard phase != .done else { return }
         phase = .done
         log(failure.message)
-        events.send(.error(failure))
+        events.sendLast(.error(failure))
         _exit(1)
     }
 

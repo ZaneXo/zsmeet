@@ -5,11 +5,12 @@ import { errorMessage } from "../api/client";
 import type { User } from "../api/client";
 import { Button, Card, Notice } from "../components/ui";
 import { logout, openServerPage, switchServer, useDesktopState, useSigningOut } from "./desktop";
+import { UpdateSection } from "./DesktopUpdate";
 import { useRecorder } from "./recorder";
 import { signOutNote } from "./recorderView";
 
 /**
- * 桌面版的「账号」：连的哪台服务器、退出登录、切换服务器。
+ * 桌面版的「账号」：连的哪台服务器、退出登录、切换服务器；最下面是版本和「检查更新」。
  * 改密码、关联飞书这些要跳来跳去的事在网页里做（在 App 里改密码会让这台电脑的登录一起失效）。
  */
 export function DesktopAccountSection({ user }: { user: User }) {
@@ -118,7 +119,7 @@ export function DesktopAccountSection({ user }: { user: User }) {
         </div>
       </Card>
 
-      {state && <p className="text-xs text-muted">zsmeet 桌面版 {state.version}</p>}
+      <UpdateSection />
     </div>
   );
 }

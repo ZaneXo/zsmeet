@@ -7,6 +7,12 @@ import {
   DEFAULT_MIC,
   DEFAULT_SOURCES,
   discardConfirm,
+  ECHO_CANCEL_DEFAULT,
+  ECHO_CANCEL_OFF,
+  ECHO_CANCEL_ON,
+  echoCancelArg,
+  echoCancelUsable,
+  echoLabel,
   effectiveMic,
   endedGone,
   endedUpload,
@@ -21,6 +27,7 @@ import {
   nextEnded,
   NO_MIC,
   normalizeState,
+  parseEchoCancel,
   parseSources,
   recordedLength,
   sentence,
@@ -46,6 +53,7 @@ function state(patch: Partial<RecorderState> = {}): RecorderState {
     warnings: [],
     error: null,
     uploads: [],
+    echo: null,
     ...patch,
   };
 }
@@ -63,8 +71,33 @@ test("Rust 推过来的状态缺了字段时用默认值补上", () => {
   assert.deepEqual(IDLE_STATE, state());
   assert.deepEqual(normalizeState(null), state());
   assert.deepEqual(normalizeState({ status: "recording", meetingId: "m1", seconds: 3, mic: "USB 麦克风" }), state({ status: "recording", meetingId: "m1", seconds: 3, mic: "USB 麦克风" }));
-  const full = state({ status: "paused", meetingId: "m1", title: "周会", seconds: 9, level: { mic: 0.5, system: 0.1 }, system: true, marks: [1], uploads: [upload()] });
+  const full = state({
+    status: "paused",
+    meetingId: "m1",
+    title: "周会",
+    seconds: 9,
+    level: { mic: 0.5, system: 0.1 },
+    system: true,
+    marks: [1],
+    uploads: [upload()],
+    echo: { mode: "auto", active: true, reason: "speakers" },
+  });
   assert.deepEqual(normalizeState(full), full);
+});
+
+test("回声消除的情况：没报、报得不全时不出错", () => {
+  // 旧版本的 App 没有这个字段
+  assert.equal(normalizeState({ status: "recording" }).echo, null);
+  assert.equal(normalizeState({ status: "recording", echo: null }).echo, null);
+  // 没有模式、模式不认识的当成没报（不显示，免得说错）；缺了 active、reason 的当成没开、不知道为什么
+  assert.equal(normalizeState({ echo: { active: true, reason: "speakers" } as never }).echo, null);
+  assert.equal(normalizeState({ echo: { mode: "speakers_only", active: true, reason: "speakers" } as never }).echo, null);
+  assert.equal(normalizeState({ echo: { mode: "" } as never }).echo, null);
+  assert.deepEqual(normalizeState({ echo: { mode: "auto" } as never }).echo, { mode: "auto", active: false, reason: null });
+  assert.deepEqual(normalizeState({ echo: { mode: "on", active: true, reason: "" } }).echo, { mode: "on", active: true, reason: null });
+  for (const mode of ["off", "auto", "on", "unavailable"] as const) {
+    assert.deepEqual(normalizeState({ echo: { mode, active: false, reason: "off" } }).echo, { mode, active: false, reason: "off" }, mode);
+  }
 });
 
 // ---- 开始前 ----
@@ -122,6 +155,27 @@ test("麦克风和电脑里的声音至少要录一种", () => {
   assert.match(sourcesProblem({ mic: NO_MIC, system: false }), /至少要录一种/);
 });
 
+test("外放时去掉回声（实验）：默认关；点过的照点的来，读不懂的用默认的", () => {
+  assert.equal(ECHO_CANCEL_DEFAULT, false);
+  assert.equal(parseEchoCancel(null), false);
+  assert.equal(parseEchoCancel(ECHO_CANCEL_ON), true);
+  assert.equal(parseEchoCancel(ECHO_CANCEL_OFF), false);
+  for (const bad of ["", "true", "1", "ON", '{"on":true}']) assert.equal(parseEchoCancel(bad), ECHO_CANCEL_DEFAULT, bad);
+});
+
+test("外放时去掉回声：麦克风和电脑里的声音都录才用得上，交给 App 的也照这个来", () => {
+  const both = { mic: DEFAULT_MIC, system: true };
+  assert.equal(echoCancelUsable(both), true);
+  assert.equal(echoCancelUsable({ mic: "usb-1", system: true }), true);
+  assert.equal(echoCancelUsable({ mic: NO_MIC, system: true }), false);
+  assert.equal(echoCancelUsable({ mic: DEFAULT_MIC, system: false }), false);
+  assert.equal(echoCancelArg(both, true), true);
+  assert.equal(echoCancelArg(both, false), false);
+  // 打开了，但只录一样：不处理
+  assert.equal(echoCancelArg({ mic: NO_MIC, system: true }, true), false);
+  assert.equal(echoCancelArg({ mic: DEFAULT_MIC, system: false }, true), false);
+});
+
 // ---- 录音中 ----
 
 // 录音程序（desktop/recorder 的 RecordSession.swift）给的说明，原样拿来测
@@ -173,6 +227,69 @@ test("录音中在录的这一路有提示（断开了、一直没有声音、�
   // 电脑里的声音也一样
   const system = state({ status: "recording", system: true, warnings: [{ code: "system_unavailable", message: "" }] });
   assert.equal(sourceLabels(system).system, "正在录（见下面的提示）");
+});
+
+test("系统默认的麦克风换了（mic_changed）：麦克风的名字跟着 App 报的换", () => {
+  const before = state({ status: "recording", meetingId: "m1", mic: "MacBook Pro 麦克风", system: true });
+  // App 收到 mic_changed 以后推过来的状态里 mic 换成了新的名字
+  const after = normalizeState({ ...before, mic: "AirPods Pro" });
+  assert.equal(sourceLabels(before).mic, "MacBook Pro 麦克风");
+  assert.equal(sourceLabels(after).mic, "AirPods Pro");
+});
+
+// 录音程序给的说明，原样拿来测
+const MIC_SILENT = "麦克风已经 30 秒没有声音了，可能被会议软件占用了。看看会议软件里选的麦克风，或者戴上耳机再说话试试。";
+const ECHO_FAILED = "回声消除没能打开，这次录音里外放的会议声音可能会录两遍。戴耳机可以避免。";
+
+test("麦克风一直没有声音（mic_silent）：照录音程序说的显示，麦克风的名字后面指向提示", () => {
+  assert.equal(warningText({ code: "mic_silent", message: MIC_SILENT }), MIC_SILENT);
+  // 没给说明时用自己的：说清楚可能的原因和怎么办
+  const own = warningText({ code: "mic_silent", message: "" });
+  assert.match(own, /^麦克风很长时间都没有声音/);
+  assert.match(own, /会议软件/);
+  assert.match(own, /换一个麦克风/);
+  const silent = state({ status: "recording", mic: "MacBook Pro 麦克风", system: true, warnings: [{ code: "mic_silent", message: MIC_SILENT }] });
+  assert.deepEqual(sourceLabels(silent), { mic: "MacBook Pro 麦克风（见下面的提示）", system: "正在录" });
+});
+
+test("回声消除没能打开（echo_unavailable）：说外放的声音可能录两遍、戴耳机可以避免，不算哪一路录不到", () => {
+  assert.equal(warningText({ code: "echo_unavailable", message: ECHO_FAILED }), ECHO_FAILED);
+  assert.equal(warningText({ code: "echo_unavailable", message: "" }), ECHO_FAILED);
+  const s = state({ status: "recording", mic: "MacBook Pro 麦克风", system: true, warnings: [{ code: "echo_unavailable", message: ECHO_FAILED }] });
+  assert.deepEqual(sourceLabels(s), { mic: "MacBook Pro 麦克风", system: "正在录" });
+});
+
+test("录音中的「回声消除：…」：开着、没开（为什么）、不可用", () => {
+  const live = (echo: RecorderState["echo"], patch: Partial<RecorderState> = {}) =>
+    echoLabel(state({ status: "recording", meetingId: "m1", mic: "MacBook Pro 麦克风", system: true, echo, ...patch }));
+  // 外放，开着
+  assert.deepEqual(live({ mode: "auto", active: true, reason: "speakers" }), { text: "回声消除：开", tone: "ok" });
+  assert.deepEqual(live({ mode: "on", active: true, reason: "forced" }), { text: "回声消除：开", tone: "ok" });
+  assert.deepEqual(live({ mode: "auto", active: true, reason: null }), { text: "回声消除：开", tone: "ok" });
+  // 自动不处理的几种
+  assert.deepEqual(live({ mode: "auto", active: false, reason: "headphones" }), { text: "回声消除：没开（戴着耳机，没有回声）", tone: "mute" });
+  assert.deepEqual(live({ mode: "auto", active: false, reason: "airplay" }), { text: "回声消除：没开（用 AirPlay 外放时处理不了）", tone: "mute" });
+  // 电脑里的声音录着录着断了：等它恢复；开始时就录不到：说录不到
+  assert.deepEqual(live({ mode: "auto", active: false, reason: "no_reference" }), { text: "回声消除：暂时没开（没收到电脑里的声音）", tone: "mute" });
+  assert.deepEqual(live({ mode: "auto", active: false, reason: "no_reference" }, { system: false }), { text: "回声消除：没开（录不到电脑里的声音）", tone: "mute" });
+  // 不认识的原因：只说没开
+  assert.deepEqual(live({ mode: "auto", active: false, reason: "bluetooth_speaker" }), { text: "回声消除：没开", tone: "mute" });
+  // 录音程序还没说现在开没开（App 这时报的 active 是 false）：说选的是什么，不说「没开」
+  assert.deepEqual(live({ mode: "auto", active: false, reason: null }), { text: "回声消除：外放时自动处理", tone: "mute" });
+  // 一会儿外放、一会儿戴耳机：跟着录音程序报的变
+  assert.equal(live({ mode: "auto", active: false, reason: "headphones" })?.text, "回声消除：没开（戴着耳机，没有回声）");
+  assert.equal(live({ mode: "auto", active: true, reason: "speakers" })?.text, "回声消除：开");
+  // 要开但没能打开：录的是原来的声音，提醒外放的声音可能录两遍
+  const unavailable = live({ mode: "unavailable", active: false, reason: null });
+  assert.equal(unavailable?.tone, "warn");
+  assert.match(unavailable?.text ?? "", /^回声消除：不可用（.*录两遍.*戴耳机可以避免）$/);
+});
+
+test("没打开这个选项、不录麦克风、App 没报时，不显示回声消除", () => {
+  assert.equal(echoLabel(state({ status: "recording", mic: "MacBook Pro 麦克风", system: true, echo: null })), null);
+  assert.equal(echoLabel(state({ status: "recording", mic: "MacBook Pro 麦克风", system: true, echo: { mode: "off", active: false, reason: "off" } })), null);
+  // 麦克风开始时就录不到：没有要去掉回声的声音
+  assert.equal(echoLabel(state({ status: "recording", mic: null, system: true, echo: { mode: "auto", active: false, reason: "no_reference" } })), null);
 });
 
 // App（desktop/src-tauri 的 recorder）给的几种原因，原样拿来测

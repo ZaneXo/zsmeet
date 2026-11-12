@@ -10,7 +10,8 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::process::{self, Child, ChildStderr, ChildStdin, ChildStdout};
 
 pub const HELPER_NAME: &str = "zsmeet-recorder";
@@ -52,12 +53,28 @@ fn resolve(env: Option<OsString>, exe: Option<PathBuf>) -> Option<PathBuf> {
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    /// 开始录了。mic 是麦克风的名字，没录麦克风时是 null；system：在录电脑的声音
+    /// 开始录了。mic 是麦克风的名字，没录麦克风时是 null；system：在录电脑的声音；
+    /// echo_cancellation：回声消除用的哪种模式（以前的录音程序不报，是 None）
     Started {
         #[serde(default)]
         mic: Option<String>,
         #[serde(default)]
         system: bool,
+        #[serde(default, deserialize_with = "lenient")]
+        echo_cancellation: Option<EchoMode>,
+    },
+    /// 回声消除实际上开没开变了：auto 模式下声音改从耳机、扬声器出来了，电脑声音那一路断了、又有了。
+    /// reason 是 speakers、headphones、airplay、no_reference、forced、off，以后可能会加，原样交给界面
+    Echo {
+        #[serde(default)]
+        active: bool,
+        #[serde(default, deserialize_with = "lenient")]
+        reason: Option<String>,
+    },
+    /// 录的是系统默认的麦克风（--mic default），用户在系统设置里换了默认的麦克风，录音程序跟着换了：
+    /// name 是现在在录的麦克风的名字
+    MicChanged {
+        name: String,
     },
     /// 大约每 100 毫秒一次：录了多少秒（不算暂停），两路声音的音量（0 到 1）
     Level {
@@ -74,7 +91,8 @@ pub enum Event {
     },
     Paused,
     Resumed,
-    /// 提醒，录音照常进行：有一路声音录不了（没有权限、设备不在），另一路照常录；
+    /// 提醒，录音照常进行：有一路声音录不了（没有权限、设备不在），另一路照常录；麦克风长时间录到的几乎
+    /// 全是静音（mic_silent，比如被会议软件的语音处理占住了）；要求打开的回声消除没能打开（echo_unavailable）。
     /// code 是 CHUNK_LIMIT 时是分片数到了服务器能收的上限，该结束录音了
     Warning {
         code: String,
@@ -98,6 +116,59 @@ pub enum Event {
 /// stdout 的一行。不是 JSON、不是事件的返回 None。
 pub fn parse_event(line: &str) -> Option<Event> {
     serde_json::from_str(line.trim()).ok()
+}
+
+/// 字段的值认不出来（以后的版本可能会加新的取值）时当成没报，不让整个事件都看不懂：
+/// 开始录音的命令要等 started，它看不懂的话要一直等到超时。
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// 录音程序报的回声消除模式（started 的 echo_cancellation，界面上的 echo.mode）。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EchoMode {
+    /// 不做回声消除
+    Off,
+    /// 麦克风和电脑的声音都在录、声音不是从耳机（包括头戴式耳麦、AirPods）或 AirPlay 出来时才消除
+    Auto,
+    /// 只要两路都在录就消除
+    On,
+    /// 要的模式没能打开，麦克风的声音照原样录
+    Unavailable,
+}
+
+/// 要录音程序怎么做回声消除（record 的 --echo-cancel）。录音程序还认 on（只要两路都在录就一直消除），App 不用。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EchoCancel {
+    /// 不做（录音程序的默认值）
+    #[default]
+    Off,
+    /// 两路都在录、声音不是从耳机或 AirPlay 出来时才做
+    Auto,
+}
+
+impl EchoCancel {
+    /// 界面上「外放时去掉回声」的开关：开着是 auto，关着（或者没传）是 off。
+    pub fn from_switch(on: bool) -> Self {
+        if on {
+            Self::Auto
+        } else {
+            Self::Off
+        }
+    }
+
+    fn arg(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+        }
+    }
 }
 
 /// 发给录音程序的命令。
@@ -131,6 +202,8 @@ pub struct RecordArgs<'a> {
     pub mic: Option<&'a str>,
     /// 录不录电脑的声音
     pub system: bool,
+    /// 回声消除（--echo-cancel）。总是明说，不靠录音程序的默认值
+    pub echo_cancel: EchoCancel,
     /// 测试用（--input-file）：拿这个音频文件代替麦克风和电脑的声音，不要权限、不弹提示，读完自动结束
     pub input_file: Option<&'a Path>,
     /// 测试用（--realtime）：和 input_file 一起，按文件的实际时长读，像真的在录
@@ -157,6 +230,8 @@ pub fn record_args(a: &RecordArgs) -> Vec<OsString> {
     if !a.system {
         args.push("--no-system".into());
     }
+    args.push("--echo-cancel".into());
+    args.push(a.echo_cancel.arg().into());
     if let Some(file) = a.input_file {
         args.push("--input-file".into());
         args.push(file.into());
@@ -293,18 +368,21 @@ mod tests {
     fn reads_events() {
         assert_eq!(
             parse_event(
-                r#"{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true}"#
+                r#"{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true,"echo_cancellation":"auto"}"#
             ),
             Some(Event::Started {
                 mic: Some("MacBook Pro 麦克风".into()),
-                system: true
+                system: true,
+                echo_cancellation: Some(EchoMode::Auto),
             })
         );
+        // 以前的录音程序不报回声消除
         assert_eq!(
             parse_event(r#"{"event":"started","mic":null,"system":false}"#),
             Some(Event::Started {
                 mic: None,
-                system: false
+                system: false,
+                echo_cancellation: None,
             })
         );
         assert_eq!(
@@ -349,6 +427,93 @@ mod tests {
     }
 
     #[test]
+    fn reads_echo_cancellation_and_microphone_changes() {
+        let started = |echo: &str| {
+            parse_event(&format!(
+                r#"{{"event":"started","mic":"MacBook Pro 麦克风","system":true,"echo_cancellation":{echo}}}"#
+            ))
+        };
+        for (raw, mode) in [
+            (r#""off""#, EchoMode::Off),
+            (r#""auto""#, EchoMode::Auto),
+            (r#""on""#, EchoMode::On),
+            (r#""unavailable""#, EchoMode::Unavailable),
+        ] {
+            assert_eq!(
+                started(raw),
+                Some(Event::Started {
+                    mic: Some("MacBook Pro 麦克风".into()),
+                    system: true,
+                    echo_cancellation: Some(mode),
+                }),
+                "{raw}"
+            );
+        }
+        // 认不出来的模式当成没报：started 还是看得懂，开始录音的命令不会一直等着
+        for raw in [r#""adaptive""#, "null", "3", r#"{"mode":"auto"}"#] {
+            assert_eq!(
+                started(raw),
+                Some(Event::Started {
+                    mic: Some("MacBook Pro 麦克风".into()),
+                    system: true,
+                    echo_cancellation: None,
+                }),
+                "{raw}"
+            );
+        }
+
+        assert_eq!(
+            parse_event(r#"{"event":"echo","active":true,"reason":"speakers"}"#),
+            Some(Event::Echo {
+                active: true,
+                reason: Some("speakers".into())
+            })
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"echo","active":false,"reason":"headphones"}"#),
+            Some(Event::Echo {
+                active: false,
+                reason: Some("headphones".into())
+            })
+        );
+        // 以后加的原因原样交给界面；没说原因的也看得懂
+        assert_eq!(
+            parse_event(r#"{"event":"echo","active":false,"reason":"bluetooth"}"#),
+            Some(Event::Echo {
+                active: false,
+                reason: Some("bluetooth".into())
+            })
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"echo","active":false}"#),
+            Some(Event::Echo {
+                active: false,
+                reason: None
+            })
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"mic_changed","name":"AirPods Pro"}"#),
+            Some(Event::MicChanged {
+                name: "AirPods Pro".into()
+            })
+        );
+        assert_eq!(parse_event(r#"{"event":"mic_changed"}"#), None);
+
+        // 新的提醒照常是 warning
+        for code in ["mic_silent", "echo_unavailable"] {
+            assert_eq!(
+                parse_event(&format!(
+                    r#"{{"event":"warning","code":"{code}","message":"说明"}}"#
+                )),
+                Some(Event::Warning {
+                    code: code.into(),
+                    message: "说明".into()
+                })
+            );
+        }
+    }
+
+    #[test]
     fn writes_commands() {
         assert_eq!(Command::Pause.line(), "{\"cmd\":\"pause\"}\n");
         assert_eq!(Command::Resume.line(), "{\"cmd\":\"resume\"}\n");
@@ -358,13 +523,14 @@ mod tests {
     #[test]
     fn builds_record_arguments() {
         let out = PathBuf::from("/data/recordings/m1");
-        let args = |mic, system| -> Vec<String> {
+        let args = |mic, system, echo_cancel| -> Vec<String> {
             record_args(&RecordArgs {
                 out: &out,
                 start_seq: 4,
                 chunk_seconds: 10,
                 mic,
                 system,
+                echo_cancel,
                 input_file: None,
                 realtime: false,
             })
@@ -373,7 +539,7 @@ mod tests {
             .collect()
         };
         assert_eq!(
-            args(Some("default"), true),
+            args(Some("default"), true, EchoCancel::Auto),
             [
                 "record",
                 "--out",
@@ -383,13 +549,20 @@ mod tests {
                 "--chunk-seconds",
                 "10",
                 "--mic",
-                "default"
+                "default",
+                "--echo-cancel",
+                "auto"
             ]
         );
+        // 不做回声消除也明说，不靠录音程序的默认值
         assert_eq!(
-            args(None, false)[7..],
-            ["--no-mic".to_string(), "--no-system".to_string()]
+            args(None, false, EchoCancel::Off)[7..],
+            ["--no-mic", "--no-system", "--echo-cancel", "off"]
         );
+        // 界面上的开关：开着是 auto，关着、没传是 off
+        assert_eq!(EchoCancel::from_switch(true), EchoCancel::Auto);
+        assert_eq!(EchoCancel::from_switch(false), EchoCancel::Off);
+        assert_eq!(EchoCancel::default(), EchoCancel::Off);
         // 测试模式：拿音频文件代替麦克风和电脑的声音
         let input = PathBuf::from("/tmp/speech.wav");
         let test_args = |realtime| -> Vec<String> {
@@ -399,6 +572,7 @@ mod tests {
                 chunk_seconds: 10,
                 mic: Some("default"),
                 system: true,
+                echo_cancel: EchoCancel::Off,
                 input_file: Some(&input),
                 realtime,
             })
@@ -406,9 +580,9 @@ mod tests {
             .map(|a| a.into_string().unwrap())
             .collect()
         };
-        assert_eq!(test_args(false)[9..], ["--input-file", "/tmp/speech.wav"]);
+        assert_eq!(test_args(false)[11..], ["--input-file", "/tmp/speech.wav"]);
         assert_eq!(
-            test_args(true)[9..],
+            test_args(true)[11..],
             ["--input-file", "/tmp/speech.wav", "--realtime"]
         );
         assert!(valid_mic("BuiltInMicrophoneDevice"));

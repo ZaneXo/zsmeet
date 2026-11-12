@@ -1,16 +1,29 @@
-# 桌面版（macOS，desktop/）：
-#   - 改了 desktop/ 或 web/ 的 PR、push 到 main：录音小程序（Swift）的构建和测试，rustfmt、clippy、cargo test、
-#     录音的端到端测试，以及按桌面版模式构建界面
-#   - 推 desktop-v 开头的标签（比如 desktop-v0.1.0）：再打一个 universal（Apple 芯片 + Intel）的 DMG，附到 GitHub Release 上
+# 桌面版（macOS，desktop/）的检查、打包和发布。
 #
-# 默认打出来的是 ad-hoc 签名（未签名）的 DMG，第一次打开要在 Finder 里右键 →「打开」。
-# 在仓库的 Settings → Secrets and variables → Actions 里配了下面这些 Secrets，就改成正式签名并公证：
-#   APPLE_CERTIFICATE           Developer ID Application 证书导出的 .p12，base64 编码（base64 -i cert.p12 | pbcopy）
-#   APPLE_CERTIFICATE_PASSWORD  导出 .p12 时设的密码
-#   APPLE_SIGNING_IDENTITY      证书名，比如 "Developer ID Application: Your Name (TEAMID)"
-#   APPLE_ID                    用来公证的 Apple ID
-#   APPLE_PASSWORD              这个 Apple ID 的 App 专用密码（appleid.apple.com 里生成）
-#   APPLE_TEAM_ID               开发者团队 ID
+# 改了 desktop/ 或 web/ 的 PR、push 到 main：只跑「检查和测试」（check）：录音小程序（Swift）的构建和测试，rustfmt、
+# clippy、cargo test、录音的端到端测试、发布脚本的测试，以及按桌面版模式构建界面。
+#
+# 推 desktop-v 开头的标签（比如 desktop-v0.2.0）发布一个版本（服务器版本用 v 开头的标签，见 release.yml）：
+#   1. 打包（build）：核对标签和 tauri.conf.json、Cargo.toml 里的版本一样；打一个 universal（Apple 芯片 + Intel）的 App
+#      和 DMG，ad-hoc 签名（没有 Apple 开发者账号，不做代码签名和公证）；再把 App 打成自动更新用的更新包，用下面的
+#      更新密钥签名，用 App 里的公钥核对签名以后生成更新清单 latest.json
+#   2. 发布（publish，检查和测试也都通过了才发）：DMG、更新包、更新包的 .sig 和 latest.json 发到这个标签的 GitHub Release，
+#      不标成仓库的「Latest」（那是服务器版本的）；再把 latest.json 换到固定的 Release「desktop-latest」上（预发布，也
+#      不是 Latest）。App 只从 https://github.com/ZaneXo/zsmeet/releases/download/desktop-latest/latest.json 查新版本。
+#      带「-」的预发布版本（desktop-v0.3.0-rc.1）只发它自己的 Release，不换 desktop-latest，App 不会提示更新到它。
+#      仓库的 Settings 里不要打开 Release 的「不可变」（immutable releases）：打开以后发出去的 Release 不能再换文件，
+#      desktop-latest 上的 latest.json 就换不了了
+#
+# 在 Actions 页面手动运行（Run workflow）默认是试运行（dry_run）：照样打包、签名、核对、生成 latest.json，只作为这次运行的
+# Artifacts 上传，什么都不发布。第一次发布之前先试运行一次，确认两个更新密钥的 Secrets 配对了。取消 dry_run、并在
+# 「Use workflow from」里选一个 desktop-v 标签，和推这个标签一样正式发布（比如推标签时 Secrets 还没配好）。
+#
+# 更新密钥（Settings → Secrets and variables → Actions → Repository secrets）：
+#   TAURI_SIGNING_PRIVATE_KEY           tauri signer generate 生成的私钥（私钥文件的内容）
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  生成私钥时设的密码
+# 对应的公钥是 desktop/src-tauri/tauri.conf.json 里的 plugins.updater.pubkey。私钥只交给打包时「打包并签名更新包」这一步，
+# 那个 job 没有写仓库的权限；能写 Release 的 publish 拿不到私钥。私钥丢了或者换了，装着旧版本的人收不到之后的更新，
+# 只能自己下载新版本装一次。
 name: Desktop
 
 on:
@@ -28,6 +41,11 @@ on:
       - "web/**"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 试运行：打包、签名，只作为 Artifacts 上传，什么都不发布。正式发布要取消它，并在上面选 desktop-v 标签
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -36,11 +54,23 @@ concurrency:
   group: desktop-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+defaults:
+  run:
+    # 明确写 bash，GitHub 才会加上 -o pipefail：管道里前面的命令失败也算失败。
+    # 变量后面紧跟着中文（包括中文标点）时一定写成 ${变量}：macOS 上的 bash 会把中文的第一个字节当成变量名的一部分，
+    # "$VERSION。" 展开出来是乱码
+    shell: bash
+
+env:
+  # App 查新版本用的 latest.json 放在这个固定的 Release 上（App 里写死了这个地址）
+  UPDATE_TAG: desktop-latest
+
 jobs:
   check:
     name: 检查和测试
     runs-on: macos-15
-    timeout-minutes: 40
+    # 回声消除用的 WebRTC 没有缓存时，两种架构各编一遍要二三十分钟
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
@@ -59,10 +89,41 @@ jobs:
       - name: 按桌面版模式构建界面
         run: pnpm -C web build --mode desktop
 
+      # 发布用的脚本：生成更新清单、核对更新包签名（update-manifest.mjs），改版本号（set-version.mjs）
+      - name: 发布脚本的测试
+        run: node --test desktop/scripts/*.test.mjs
+
+      # 录音小程序带着回声消除用的 WebRTC 音频处理（desktop/recorder/ThirdParty/，几百个 C/C++ 文件），两种架构各编成一个
+      # 静态库，放在 desktop/recorder/.build/webrtc-<架构>/。构建脚本按第三方源码、编译参数、编译器和 SDK 的内容算指纹，
+      # 对得上就直接用（和文件的修改时间无关），所以把这个目录缓存起来，省掉两种架构各十几分钟的编译。key 跟着这些东西变：
+      # 编译器和 SDK 的版本、第三方源码、编译参数（webrtc-flags.sh、webrtc-sources.txt）和构建脚本（编译命令写在它里面；
+      # ThirdParty 里的 README.md、prune.sh 不影响编出来的东西，不算）。会改变编译结果的文件一个都不能漏：漏了的话 key 对得上、
+      # 指纹却对不上，每次都全部重编，又存不进缓存。key 对不上时先取同一个编译器和 SDK 下最近的一份，指纹不对的话构建脚本自己
+      # 全部重编，不会用错
+      - name: 查编译器版本
+        id: clang
+        run: echo "version=$({ xcrun clang --version; xcrun --sdk macosx --show-sdk-version; } | shasum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: 取缓存的 WebRTC 编译结果
+        id: webrtc
+        uses: actions/cache/restore@v6
+        with:
+          path: desktop/recorder/.build/webrtc-*
+          key: desktop-webrtc-${{ runner.os }}-${{ steps.clang.outputs.version }}-${{ hashFiles('desktop/recorder/ThirdParty/webrtc-audio-processing/**', 'desktop/recorder/ThirdParty/abseil-cpp/**', 'desktop/recorder/ThirdParty/webrtc-flags.sh', 'desktop/recorder/ThirdParty/webrtc-sources.txt', 'desktop/scripts/build-recorder.sh') }}
+          restore-keys: desktop-webrtc-${{ runner.os }}-${{ steps.clang.outputs.version }}-
+
       # 录音小程序 zsmeet-recorder 是 App 带着的 sidecar：Rust 编译时（tauri-build）要求它已经在
       # desktop/src-tauri/binaries/ 下，所以在 Rust 的步骤之前构建
       - name: 构建录音小程序（Swift）
         run: desktop/scripts/build-recorder.sh
+
+      # 编好就存，不等整个 job 结束：后面的测试没通过时，下次运行也不用重编 WebRTC
+      - name: 存 WebRTC 的编译结果
+        if: steps.webrtc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: desktop/recorder/.build/webrtc-*
+          key: ${{ steps.webrtc.outputs.cache-primary-key }}
 
       # 录音小程序的端到端测试用 ffmpeg 检查录出来的分片（服务器也是用它解码的）
       - name: 安装 ffmpeg
@@ -109,36 +170,78 @@ jobs:
         working-directory: desktop/src-tauri
         run: ZSMEET_RECORDER="$PWD/binaries/zsmeet-recorder-universal-apple-darwin" cargo test --locked real_helper -- --ignored
 
-  release:
-    name: 打包 DMG 并发布
-    needs: check
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
+  build:
+    name: 打包（App、DMG 和更新包）
+    if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
-    timeout-minutes: 60
+    # 没有缓存的 WebRTC（二三十分钟）加上两种架构的 Rust 发布构建（开了 LTO），留足余量：发布时超时要整个重来
+    timeout-minutes: 150
+    # 这个 job 拿得到更新密钥，所以只能读仓库，发布交给 publish
     permissions:
-      contents: write
-    env:
-      # 配了证书才签名、公证；secrets 不能直接写在步骤的 if 里
-      HAS_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
 
-      - name: 检查版本号
+      # 推了标签、或者手动选了标签正式发布时 publish=true；试运行、在分支上运行时只打包
+      - name: 核对版本号
         id: version
         env:
+          REF: ${{ github.ref }}
           TAG: ${{ github.ref_name }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           version="$(node -p 'require("./desktop/src-tauri/tauri.conf.json").version')"
-          if [[ "$TAG" != "desktop-v$version" ]]; then
-            echo "标签 $TAG 和 desktop/src-tauri/tauri.conf.json 里的版本 $version 对不上，请先改版本号（Cargo.toml 也一起改）"
+          cargo_version="$(awk -F'"' '/^\[/ { p = ($0 == "[package]") } p && /^version *=/ { print $2; exit }' desktop/src-tauri/Cargo.toml)"
+          if [[ "$version" != "$cargo_version" ]]; then
+            echo "::error::desktop/src-tauri/tauri.conf.json 里的版本是 ${version}，Cargo.toml 里是 ${cargo_version}，请改成一样的（make desktop-version VERSION=…）"
+            exit 1
+          fi
+          publish=false
+          if [[ "$REF" == refs/tags/desktop-v* ]]; then
+            if [[ "$TAG" != "desktop-v$version" ]]; then
+              echo "::error::标签 $TAG 和 App 的版本 $version 对不上：先执行 make desktop-version VERSION=${TAG#desktop-v}（改 desktop/src-tauri 里的 tauri.conf.json、Cargo.toml 和 Cargo.lock），提交以后删掉这个标签重新打"
+              exit 1
+            fi
+            if [[ "$DRY_RUN" != "true" ]]; then publish=true; fi
+          elif [[ "$DRY_RUN" != "true" ]]; then
+            echo "::error::只有 desktop-v 开头的标签能正式发布：在「Use workflow from」里选那个标签，或者勾上 dry_run 只试运行"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          if [[ "$publish" == "true" ]]; then echo "版本 ${version}：打包以后发布"; else echo "版本 ${version}：试运行，只打包、不发布"; fi
+
+      # 更新说明显示在 App 的更新提示和 Release 页面上：推的是带说明的标签（git tag -a desktop-v0.2.0 -m "…"）就用
+      # 标签的说明，不然只写版本号。actions/checkout 取下来的标签不带说明，从 GitHub 的接口读
+      - name: 准备更新说明
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          notes=""
+          if [[ "$REF" == refs/tags/* ]]; then
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')"
+            if [[ "$object" == "tag "* ]]; then
+              # 签了名的标签，说明后面跟着签名，不要（awk 读完全部输入，不提前退出：提前关掉管道，gh 可能因此报错）
+              notes="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/${object#tag }" --jq .message |
+                awk '/^-----BEGIN (PGP|SSH) SIGNATURE-----$/ { stop = 1 } !stop { print }')"
+            fi
+          fi
+          if [[ -z "${notes//[[:space:]]/}" ]]; then notes="zsmeet 桌面版 ${VERSION}。"; fi
+          printf '%s\n' "$notes" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
 
       - name: 安装 pnpm 和依赖
         run: |
@@ -152,41 +255,216 @@ jobs:
           rustup toolchain install
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      # tauri build 会先执行 tauri.conf.json 里的 beforeBuildCommand：构建录音小程序（通用版本）和界面
-      - name: 构建（ad-hoc 签名）
-        if: env.HAS_SIGNING != 'true'
-        run: pnpm -C desktop tauri build --target universal-apple-darwin
+      # 和 check 一样用缓存的 WebRTC 编译结果（只取，不存；为什么不会用错见 check 里的说明）
+      - name: 查编译器版本
+        id: clang
+        run: echo "version=$({ xcrun clang --version; xcrun --sdk macosx --show-sdk-version; } | shasum | cut -c1-12)" >> "$GITHUB_OUTPUT"
 
-      # Tauri 看到 APPLE_CERTIFICATE 会把证书导入一个临时钥匙串来签名，看到 APPLE_ID 这一组会顺带公证
-      - name: 构建（签名并公证）
-        if: env.HAS_SIGNING == 'true'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: pnpm -C desktop tauri build --target universal-apple-darwin
+      - name: 取缓存的 WebRTC 编译结果
+        uses: actions/cache/restore@v6
+        with:
+          path: desktop/recorder/.build/webrtc-*
+          key: desktop-webrtc-${{ runner.os }}-${{ steps.clang.outputs.version }}-${{ hashFiles('desktop/recorder/ThirdParty/webrtc-audio-processing/**', 'desktop/recorder/ThirdParty/abseil-cpp/**', 'desktop/recorder/ThirdParty/webrtc-flags.sh', 'desktop/recorder/ThirdParty/webrtc-sources.txt', 'desktop/scripts/build-recorder.sh') }}
+          restore-keys: desktop-webrtc-${{ runner.os }}-${{ steps.clang.outputs.version }}-
 
-      - name: 发 Release
+      - name: 构建录音小程序（Swift）
+        run: desktop/scripts/build-recorder.sh
+
+      # 编译两种架构、合成 universal 的程序，先不打包。tauri.conf.json 的 beforeBuildCommand（录音小程序、界面）也在这一步跑。
+      # 这一步拿不到更新密钥：依赖包的构建脚本、界面的构建工具都碰不到它
+      - name: 构建（Apple 芯片 + Intel）
+        run: pnpm -C desktop tauri build --target universal-apple-darwin --no-bundle -- --locked
+
+      # 只有这一步拿得到更新密钥：打包成 App 和 DMG（ad-hoc 签名），再把 App 打成更新包 zsmeet.app.tar.gz 并签名（.sig）。
+      # createUpdaterArtifacts 只在这里打开：平时本机构建（make desktop-build）、检查时没有私钥，不打更新包
+      - name: 打包并签名更新包
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+            echo "::error::没有配更新密钥：在仓库的 Settings → Secrets and variables → Actions 里加上 TAURI_SIGNING_PRIVATE_KEY 和 TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+            exit 1
+          fi
+          pnpm -C desktop tauri bundle --target universal-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":true}}'
+
+      - name: 检查打出来的 App
+        env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          src="desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/zsmeet_${VERSION}_universal.dmg"
-          dmg="zsmeet-desktop-${VERSION}-macos-universal.dmg"
-          cp "$src" "$dmg"
-          if [[ "$HAS_SIGNING" == "true" ]]; then
-            notes="zsmeet 桌面版（macOS 14.4 及以上，Apple 芯片和 Intel 都能用）。安装和第一次使用见 README 的「桌面版（macOS）」一节。"
+          bundle=desktop/src-tauri/target/universal-apple-darwin/release/bundle
+          app="$bundle/macos/zsmeet.app"
+          shown="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+          # 预发布版本（0.3.0-rc.1）在 Info.plist 里可能只写 0.3.0
+          if [[ "$shown" != "$VERSION" && "$shown" != "${VERSION%%-*}" ]]; then
+            echo "::error::App 的 Info.plist 里的版本是 ${shown}，不是 $VERSION"
+            exit 1
+          fi
+          for bin in zsmeet zsmeet-recorder; do
+            lipo "$app/Contents/MacOS/$bin" -verify_arch arm64 x86_64 ||
+              { echo "::error::$bin 不是 Apple 芯片和 Intel 通用的"; exit 1; }
+            # 没有这一项，App 开着 hardened runtime，麦克风录到的全是静音（见 entitlements.plist）
+            entitlements="$(codesign -d --entitlements - --xml "$app/Contents/MacOS/$bin" 2>/dev/null || true)"
+            if [[ "$entitlements" != *com.apple.security.device.audio-input* ]]; then
+              echo "::error::$bin 的签名里没有麦克风权限 com.apple.security.device.audio-input"
+              exit 1
+            fi
+          done
+          codesign --verify --deep --strict "$app"
+          # 录音小程序编进了 WebRTC（BSD-3）等第三方代码，它们的许可证要求安装包里带着版权声明：
+          # 仓库根目录的 THIRD_PARTY_NOTICES，由 tauri.conf.json 的 bundle.resources 放进 App
+          notices="$app/Contents/Resources/THIRD_PARTY_NOTICES.txt"
+          if [[ ! -s "$notices" ]] || ! grep -q 'webrtc-audio-processing' "$notices"; then
+            echo "::error::App 里没有第三方代码的许可证声明 Contents/Resources/THIRD_PARTY_NOTICES.txt（见 tauri.conf.json 的 bundle.resources）"
+            exit 1
+          fi
+          # 更新包里要是整个 zsmeet.app：App 更新时把它解开，换掉装着的那个
+          tar -tzf "$bundle/macos/zsmeet.app.tar.gz" > "$RUNNER_TEMP/archive.txt"
+          if [[ "$(sed -n 1p "$RUNNER_TEMP/archive.txt")" != zsmeet.app/* ]] ||
+            ! grep -qx 'zsmeet.app/Contents/MacOS/zsmeet-recorder' "$RUNNER_TEMP/archive.txt"; then
+            echo "::error::更新包 zsmeet.app.tar.gz 里不是完整的 zsmeet.app"
+            exit 1
+          fi
+          hdiutil verify "$bundle/dmg/zsmeet_${VERSION}_universal.dmg"
+
+      - name: 生成更新清单 latest.json
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle=desktop/src-tauri/target/universal-apple-darwin/release/bundle
+          name="zsmeet-desktop-$VERSION-macos-universal"
+          download="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download"
+          mkdir -p dist
+          cp "$bundle/dmg/zsmeet_${VERSION}_universal.dmg" "dist/$name.dmg"
+          cp "$bundle/macos/zsmeet.app.tar.gz" "dist/$name.app.tar.gz"
+          cp "$bundle/macos/zsmeet.app.tar.gz.sig" "dist/$name.app.tar.gz.sig"
+          # 用 App 里的公钥核对签名（私钥配错了就停在这里）、核对 App 查新版本的地址就是 desktop-latest 的，都对了才生成清单
+          node desktop/scripts/update-manifest.mjs \
+            --config desktop/src-tauri/tauri.conf.json \
+            --archive "dist/$name.app.tar.gz" \
+            --signature "dist/$name.app.tar.gz.sig" \
+            --url "$download/desktop-v$VERSION/$name.app.tar.gz" \
+            --endpoint "$download/$UPDATE_TAG/latest.json" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --out dist/latest.json
+          ls -l dist
+          cat dist/latest.json
+
+      # 试运行到这里为止：在这次运行的 Summary 页面最下面的 Artifacts 里下载
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zsmeet-desktop-${{ steps.version.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      - name: 小结
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PUBLISH: ${{ steps.version.outputs.publish }}
+        run: |
+          {
+            echo "### zsmeet 桌面版 $VERSION"
+            echo
+            if [[ "$PUBLISH" == "true" ]]; then
+              echo "打包好了，检查和测试都通过以后由 publish 发布。"
+            else
+              echo "试运行：打包、签名、核对签名都通过了，**什么都没有发布**。打出来的文件在下面 Artifacts 的「zsmeet-desktop-${VERSION}」里（保留 7 天）。"
+            fi
+            echo
+            echo '```'
+            ls -l dist
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: 发布到 GitHub Releases
+    needs: [check, build]
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # 两个版本挨着发布时一个一个来，免得 desktop-latest 上的 latest.json 被旧的那个盖掉
+    concurrency:
+      group: desktop-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: zsmeet-desktop-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: 发这个版本的 Release
+        working-directory: dist
+        run: |
+          name="zsmeet-desktop-$VERSION-macos-universal"
+          files=("$name.dmg" "$name.app.tar.gz" "$name.app.tar.gz.sig" latest.json)
+          for f in "${files[@]}"; do
+            [[ -f "$f" ]] || { echo "::error::打包结果里没有 $f"; exit 1; }
+          done
+          flags=()
+          pre=""
+          # 标签里带「-」的（desktop-v0.3.0-rc.1）是预发布版本
+          if [[ "$VERSION" == *-* ]]; then
+            flags+=(--prerelease)
+            pre="这是预发布版本，App 不会提示更新到它；要试用就下载 DMG 安装。"
+          fi
+          {
+            jq -r .notes latest.json
+            echo
+            echo "---"
+            echo
+            echo "**安装**：下载 \`$name.dmg\`（macOS 14.4 及以上，Apple 芯片和 Intel 都能用），打开后把 zsmeet 拖进「应用程序」。安装包没有签名，第一次打开时 macOS 会拦住：到「系统设置 → 隐私与安全性」最下面点「仍要打开」（macOS 14 也可以在「应用程序」里右键点 zsmeet →「打开」）。详见 README 的「桌面版（macOS）」一节。"
+            echo
+            echo "**已经装了的**：在 App 里更新就行（设置 → 账号 → 版本 →「检查更新」）。\`.app.tar.gz\`、\`.sig\` 和 \`latest.json\` 是给 App 自动更新用的，不用下载。$pre"
+          } > "$RUNNER_TEMP/body.md"
+          # 先建成草稿、传完文件再发出去，Release 页面上不会出现缺文件的版本。重新运行时 Release 已经在了，只换文件
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --verify-tag --title "zsmeet 桌面版 $VERSION" \
+              --notes-file "$RUNNER_TEMP/body.md" --latest=false "${flags[@]}"
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber
+          # 不标成仓库的 Latest：那是服务器版本的
+          gh release edit "$TAG" --draft=false --latest=false
+
+      - name: 更新 desktop-latest 上的 latest.json
+        run: |
+          if [[ "$VERSION" == *-* ]]; then
+            echo "::notice::$VERSION 是预发布版本，不换 $UPDATE_TAG 上的 latest.json：装着正式版的人不会被提示更新到它"
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/update-notes.md" <<EOF
+          zsmeet 桌面版的 App 从这里查有没有新版本（latest.json），这里不放安装包。
+
+          现在的版本是 ${VERSION}，安装包在 [$TAG]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG)。
+
+          这个 Release 由 .github/workflows/desktop.yml 在每次发布桌面版时自动更新。请不要删掉它，也不要改成正式版本或「Latest」。
+          EOF
+          if gh release view "$UPDATE_TAG" >/dev/null 2>&1; then
+            current="$(gh release download "$UPDATE_TAG" --pattern latest.json --output - 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+            # 不换回旧版本：比如已经发了 0.3.0，又重新运行了 0.2.0 的发布
+            if [[ -n "$current" && "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ]]; then
+              echo "::warning::$UPDATE_TAG 上已经是更新的 ${current}，不换成 $VERSION"
+              exit 0
+            fi
+            gh release edit "$UPDATE_TAG" --prerelease --latest=false --title "zsmeet 桌面版自动更新" \
+              --notes-file "$RUNNER_TEMP/update-notes.md"
           else
-            notes="zsmeet 桌面版（macOS 14.4 及以上，Apple 芯片和 Intel 都能用）。这个版本没有签名：第一次打开时在「应用程序」里右键点 zsmeet →「打开」。详见 README 的「桌面版（macOS）」一节。"
+            gh release create "$UPDATE_TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "zsmeet 桌面版自动更新" --notes-file "$RUNNER_TEMP/update-notes.md"
           fi
-          # 重新运行时 Release 已经在了，只替换文件
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            flags=()
-            if [[ "$TAG" == *-*-* ]]; then flags+=(--prerelease); fi
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "zsmeet 桌面版 $VERSION" --notes "$notes" --latest=false "${flags[@]}"
-          fi
-          gh release upload "$TAG" "$dmg" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$UPDATE_TAG" dist/latest.json --clobber
+          echo "App 查新版本的地址：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$UPDATE_TAG/latest.json"
+          {
+            echo "### 发布了 zsmeet 桌面版 $VERSION"
+            echo
+            echo "- Release：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+            echo "- 更新清单：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$UPDATE_TAG/latest.json"
+          } >> "$GITHUB_STEP_SUMMARY"

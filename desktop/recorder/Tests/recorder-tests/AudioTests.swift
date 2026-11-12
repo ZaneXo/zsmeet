@@ -8,6 +8,9 @@ let audioTests: [(String, () throws -> Void)] = [
     ("采样队列：先进先出，大量进出顺序不乱", testSampleFIFO),
     ("环形缓冲：绕圈、满了丢新来的并计数", testRingWrapsAndCountsDrops),
     ("环形缓冲：IOProc 把前两个声道取平均成单声道", testRingDownmix),
+    ("环形缓冲：IOProc 带着主机时间时记下这一批第一个采样的序号和时间", testRingStamps),
+    ("环形缓冲：时间戳攒满了不覆盖旧的、不等，计数；采样照常写", testRingStampOverflow),
+    ("环形缓冲：看一眼最早的时间戳，不取出", testRingPeekStamp),
     ("混音：先攒够缓冲再取", testMixerWaitsForCushion),
     ("混音：来源跟不上时补静音，再重新攒", testMixerPadsWhenSourceFallsBehind),
     ("混音：积压超过上限时丢掉最早的", testMixerDropsBacklog),
@@ -83,8 +86,8 @@ func testRingWrapsAndCountsDrops() {
     expectEqual(zr_ring_total_written(ring), 12)
 }
 
-/// 造一个 AudioBufferList 交给 zr_ring_write_buffer_list（和 IOProc 走同一段代码）
-private func writeBufferList(_ ring: OpaquePointer, _ buffers: [(channels: Int, samples: [Float])]) -> Int {
+/// 造一个 AudioBufferList 交给 zr_ring_write_buffer_list（和 IOProc 走同一段代码），time 是 IOProc 的 input_time
+private func writeBufferList(_ ring: OpaquePointer, _ buffers: [(channels: Int, samples: [Float])], time: AudioTimeStamp? = nil) -> Int {
     let list = AudioBufferList.allocate(maximumBuffers: max(buffers.count, 1))
     list.unsafeMutablePointer.pointee.mNumberBuffers = UInt32(buffers.count)
     var storage: [UnsafeMutableBufferPointer<Float>] = []
@@ -100,7 +103,87 @@ private func writeBufferList(_ ring: OpaquePointer, _ buffers: [(channels: Int, 
                                   mDataByteSize: UInt32(buffer.samples.count * MemoryLayout<Float>.size),
                                   mData: UnsafeMutableRawPointer(data.baseAddress))
     }
-    return zr_ring_write_buffer_list(ring, list.unsafePointer)
+    guard var time else {
+        return zr_ring_write_buffer_list(ring, list.unsafePointer, nil)
+    }
+    return zr_ring_write_buffer_list(ring, list.unsafePointer, &time)
+}
+
+/// 取出全部时间戳
+private func stamps(_ ring: OpaquePointer) -> [zr_stamp] {
+    var out = [zr_stamp](repeating: zr_stamp(), count: Int(ZR_STAMP_CAPACITY))
+    let count = out.withUnsafeMutableBufferPointer { zr_ring_read_stamps(ring, $0.baseAddress!, $0.count) }
+    return Array(out[0..<count])
+}
+
+func testRingStamps() {
+    let ring = zr_ring_create(64, 2)!
+    defer { zr_ring_destroy(ring) }
+    var time = AudioTimeStamp()
+    time.mFlags = [.hostTimeValid, .sampleTimeValid]
+    time.mHostTime = 1_000_000
+    time.mSampleTime = 512
+    expectEqual(writeBufferList(ring, [(2, [1, 1, 1, 1, 1, 1])], time: time), 3)
+    // 没有主机时间的不记
+    var noHost = AudioTimeStamp()
+    noHost.mFlags = .sampleTimeValid
+    expectEqual(writeBufferList(ring, [(1, [2, 2])], time: noHost), 2)
+    expectEqual(writeBufferList(ring, [(1, [2, 2])]), 2)
+    // 只有主机时间：采样计数是 NaN
+    var hostOnly = AudioTimeStamp()
+    hostOnly.mFlags = .hostTimeValid
+    hostOnly.mHostTime = 2_000_000
+    expectEqual(writeBufferList(ring, [(1, [3, 3, 3, 3])], time: hostOnly), 4)
+    // 读文件、测试用的：直接给纳秒
+    expectEqual([Float](repeating: 4, count: 5).withUnsafeBufferPointer { zr_ring_write_stamped(ring, $0.baseAddress!, 5, 123_456_789) }, 5)
+
+    let got = stamps(ring)
+    expectEqual(got.map(\.index), [0, 7, 11], "第一个采样的序号")
+    expectEqual(got.map(\.frames), [3, 4, 5])
+    expectEqual(got.map(\.host_ns), [zr_host_time_to_ns(1_000_000), zr_host_time_to_ns(2_000_000), 123_456_789])
+    expectEqual(got.first?.sample_time, 512)
+    expect(got[1].sample_time.isNaN && got[2].sample_time.isNaN, "没有采样计数时是 NaN")
+    expectEqual(stamps(ring).count, 0, "取过的不会再取到")
+    // 主机时间换算成纳秒：和 DispatchTime 是同一个时钟
+    let now = DispatchTime.now().uptimeNanoseconds
+    let host = zr_host_time_to_ns(mach_absolute_time())
+    expect(host >= now && host - now < 50_000_000, "主机时间 \(host) 和 DispatchTime \(now) 对不上")
+    expectEqual(zr_ring_read_position(ring), 0)
+    _ = read(ring, 4)
+    expectEqual(zr_ring_read_position(ring), 4, "读出过几个采样")
+}
+
+func testRingStampOverflow() {
+    let ring = zr_ring_create(1 << 16, 1)!
+    defer { zr_ring_destroy(ring) }
+    let one: [Float] = [0.5]
+    for index in 0..<(Int(ZR_STAMP_CAPACITY) + 10) {
+        _ = one.withUnsafeBufferPointer { zr_ring_write_stamped(ring, $0.baseAddress!, 1, UInt64(index)) }
+    }
+    expectEqual(zr_ring_stamps_dropped(ring), 10, "满了的 10 个没记")
+    expectEqual(zr_ring_total_written(ring), UInt64(ZR_STAMP_CAPACITY) + 10, "采样照常写")
+    let got = stamps(ring)
+    expectEqual(got.count, Int(ZR_STAMP_CAPACITY))
+    expectEqual(got.last?.host_ns, UInt64(ZR_STAMP_CAPACITY) - 1, "留着的是先来的，没被覆盖")
+    // 取走以后又能记了
+    _ = one.withUnsafeBufferPointer { zr_ring_write_stamped(ring, $0.baseAddress!, 1, 99) }
+    expectEqual(stamps(ring).map(\.host_ns), [99])
+}
+
+func testRingPeekStamp() {
+    let ring = zr_ring_create(64, 1)!
+    defer { zr_ring_destroy(ring) }
+    var stamp = zr_stamp()
+    expect(!zr_ring_peek_stamp(ring, &stamp), "还没有时间戳")
+    let samples: [Float] = [1, 2, 3]
+    _ = samples.withUnsafeBufferPointer { zr_ring_write_stamped(ring, $0.baseAddress!, 3, 100) }
+    _ = samples.withUnsafeBufferPointer { zr_ring_write_stamped(ring, $0.baseAddress!, 3, 200) }
+    expect(zr_ring_peek_stamp(ring, &stamp))
+    expectEqual(stamp.host_ns, 100, "最早的那个")
+    expect(zr_ring_peek_stamp(ring, &stamp))
+    expectEqual(stamp.host_ns, 100, "看了不算取走")
+    expectEqual(stamps(ring).map(\.index), [0, 3], "照样都取得到")
+    expect(!zr_ring_peek_stamp(ring, &stamp), "取完了")
 }
 
 func testRingDownmix() {

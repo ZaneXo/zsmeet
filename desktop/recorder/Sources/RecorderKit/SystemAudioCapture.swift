@@ -9,6 +9,9 @@ import Foundation
 /// 不会把耳机的麦克风也带进来，也不会让蓝牙耳机切到通话模式。
 /// tap 和聚合设备用完一定要拆掉：正常结束、出错、收到信号时都会走到 destroy()（见 AudioCleanup）。
 final class SystemAudioCapture: CaptureSource {
+    /// 我们自己建的聚合设备的 UID 前缀（它在本进程里看得见，有输入流，列麦克风时要去掉）
+    static let aggregateUIDPrefix = "io.github.zanexo.zsmeet.recorder."
+
     let kind = SourceKind.system
     let name = "电脑声音"
     let ring: OpaquePointer
@@ -153,7 +156,7 @@ final class SystemAudioCapture: CaptureSource {
         // 私有的聚合设备只有本进程看得见，进程退出时系统也会收回
         let composition: [String: Any] = [
             kAudioAggregateDeviceNameKey: "zsmeet 电脑声音",
-            kAudioAggregateDeviceUIDKey: "io.github.zanexo.zsmeet.recorder.\(UUID().uuidString)",
+            kAudioAggregateDeviceUIDKey: "\(Self.aggregateUIDPrefix)\(UUID().uuidString)",
             kAudioAggregateDeviceIsPrivateKey: 1,
         ]
         var aggregate = AudioObjectID(kAudioObjectUnknown)

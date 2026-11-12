@@ -10,6 +10,7 @@ import { useTicker } from "../lib/useTicker";
 import { isDesktop, useSigningOut } from "../platform";
 import { logout as desktopLogout } from "../platform/desktop";
 import { DesktopRecorderBanner, DesktopRecordingBadge } from "../platform/DesktopRecordings";
+import { UpdateBanner } from "../platform/DesktopUpdate";
 import { OfflineBanner } from "../platform/OfflineBanner";
 import { recorderState } from "../platform/recorder";
 import { signOutNote } from "../platform/recorderView";
@@ -100,7 +101,15 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
           <OfflineBanner />
         </div>
         <div className="mx-auto w-full max-w-5xl empty:hidden">
-          {isDesktop ? <DesktopRecorderBanner skip={meetingId} /> : <AbandonedRecordingsBanner user={user} skip={meetingId} />}
+          {/* 桌面版：有新版本的提示，正在录音、没传完的录音；网页版：浏览器里没传完的录音 */}
+          {isDesktop ? (
+            <>
+              <UpdateBanner />
+              <DesktopRecorderBanner skip={meetingId} />
+            </>
+          ) : (
+            <AbandonedRecordingsBanner user={user} skip={meetingId} />
+          )}
         </div>
         <div>{children}</div>
       </main>

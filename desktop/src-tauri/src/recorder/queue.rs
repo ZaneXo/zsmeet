@@ -16,7 +16,7 @@ use tokio::time::Instant;
 
 use super::local::{self, Status};
 use super::upload::{self, Outcome};
-use super::{Local, Recorder, NOT_SAVED, RELOGIN};
+use super::{Local, Recorder, NOT_SAVED, PROCESSED_ELSEWHERE, RELOGIN};
 use crate::core::Account;
 
 /// 上传任务下一步做什么。
@@ -218,7 +218,9 @@ impl Recorder {
                 };
                 if let Some(missing) = (0..chunks).find(|seq| !received.contains(seq)) {
                     // 服务器开始处理以后，拼好整段录音就删掉分片：上一次其实已经成功、只是没收到回复的话，
-                    // 这时也查不到分片。先看一眼会议，已经不在上传状态就算成功；还在等上传才是真缺了，重传
+                    // 这时也查不到分片。先看一眼会议：已经不在上传状态、这台电脑又告诉过服务器传完了，就算成功；
+                    // 没告诉过的是在别处开始处理的，服务器用的不一定是这台电脑录的全部（比如有几片的「成功」不是
+                    // 服务器回的），不能当成传完了、删掉录音。还在等上传才是真缺了，重传
                     let outcome = match upload::meeting(
                         &self.client,
                         &account,
@@ -228,18 +230,25 @@ impl Recorder {
                     .await
                     {
                         Ok(meeting) if upload::processing_started(&meeting, &meeting_id) => {
-                            Outcome::Done(meeting)
+                            if self.complete_sent(&meeting_id) {
+                                Outcome::Done(meeting)
+                            } else {
+                                Outcome::Fatal(PROCESSED_ELSEWHERE.into())
+                            }
                         }
                         Ok(_) => return self.resend(&meeting_id, chunks, missing),
                         Err(outcome) => outcome,
                     };
                     return self.complete_done(&meeting_id, &account, outcome);
                 }
+                // 服务器都收到了：先记下要告诉它传完了，再告诉它
+                self.sending_complete(&meeting_id, chunks);
                 let mut outcome =
                     upload::complete(&self.client, &account, &meeting_id, chunks, &marks).await;
                 if let Outcome::Conflict(reason) = &outcome {
                     // 上一次其实已经成功、只是没收到回复的话，再提交会得到 409（「已经在处理了」）：
-                    // 看一眼会议，已经不在上传状态就算成功
+                    // 看一眼会议，已经不在上传状态就算成功。刚核对过服务器收到了全部分片，处理的就是它们
+                    // （服务器收到的分片比声明的多时不肯开始处理，别处没法只用其中一部分）
                     outcome = match upload::meeting(
                         &self.client,
                         &account,
@@ -350,6 +359,30 @@ impl Recorder {
             }
         }
         self.changed();
+    }
+
+    /// 核对过服务器收到了第 0 到 chunks-1 片，马上要告诉它传完了：先记下来（见 Recording::complete_sent）。
+    /// 存不下来也照样告诉服务器：App 没退出就还记得；退出了、回复又没收到的话，下次当成在别处开始处理的，录音留着。
+    fn sending_complete(&self, meeting_id: &str, chunks: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(l) = inner.recordings.get_mut(meeting_id).filter(|l| {
+            l.rec.status == Status::Stopped
+                && l.rec.next_seq == chunks
+                && l.rec.uploaded == chunks
+                && !l.rec.complete_sent
+        }) {
+            l.rec.complete_sent = true;
+            l.save();
+        }
+    }
+
+    /// 这台电脑核对过服务器收到了全部分片、告诉过它传完了（见 Recording::complete_sent）。
+    fn complete_sent(&self, meeting_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .recordings
+            .get(meeting_id)
+            .is_some_and(|l| l.rec.complete_sent)
     }
 
     /// 告诉服务器传完之前发现它缺第 seq 片（之前那次「成功」不是服务器回的）：从这一片起重传。

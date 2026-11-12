@@ -80,6 +80,7 @@ const MAX_REACHED: &str =
     "已经录了将近 6 个小时，达到单场录音的上限，自动结束了。录好的部分会照常上传";
 const RELOGIN: &str = "登录已失效，重新登录这个账号后会自动接着传";
 const NOT_SAVED: &str = "这台电脑上存不下录音的记录了，请检查磁盘空间。空出来以后会自动接着传";
+const PROCESSED_ELSEWHERE: &str = "这场会议已经在别处开始处理了，用的是服务器当时收到的录音，这台电脑上录的可能有一部分不在里面。这台电脑上的录音没有删，确认会议的录音完整以后可以删掉";
 
 /// 发给界面和菜单栏的录音状态（事件 recorder://state，命令的返回值）。
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -570,6 +571,7 @@ impl Recorder {
             status: Status::Recording,
             error: None,
             unverified_from: None,
+            complete_sent: false,
         };
         // 新录的：目录里要是有以前留下的东西（上次没开始成），都不要了
         let _ = std::fs::remove_dir_all(&dir);
@@ -1101,6 +1103,8 @@ impl Recorder {
                         l.drop_lost_marks();
                         l.rec.status = Status::Stopped;
                         l.rec.error = None;
+                        // 从头核对、再告诉服务器传完了：以前告诉过的不算（见 Recording::complete_sent）
+                        l.rec.complete_sent = false;
                         l.fatal = false;
                         l.ready();
                         l.save();
@@ -1237,6 +1241,8 @@ impl Local {
     /// 传成功了也不从头算，免得一直重传。
     fn resend_from(&mut self, seq: u32, waits: &[Duration]) {
         self.rec.uploaded = seq;
+        // 服务器又缺了分片：以前核对过、告诉过服务器传完了也不算了，传完、再核对过才算（见 Recording::complete_sent）
+        self.rec.complete_sent = false;
         self.save();
         let reason = format!(
             "服务器上缺第 {} 片录音，稍后会自动重传。一直这样的话，看看连的网络是不是要先登录，或者请管理员检查服务器的设置",

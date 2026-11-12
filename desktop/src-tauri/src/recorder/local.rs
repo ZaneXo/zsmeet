@@ -66,6 +66,12 @@ pub struct Recording {
     /// 分片用了同样的序号。传其中任何一片、告诉服务器传完之前先核对（见 queue.rs），核对过了才清掉
     #[serde(default)]
     pub unverified_from: Option<u32>,
+    /// 核对过服务器收到了第 0 到 next_seq-1 片、马上要告诉服务器传完了（POST complete）时记下（先存下来再告诉）。
+    /// 之后再核对时服务器上查不到分片、会议已经在处理了：记过这个的，是这台电脑告诉的、只是没收到回复，可以删掉录音；
+    /// 没记过的，是在别处开始处理的（比如在会议页面上用服务器已经收到的部分生成了纪要），用的不一定是这台电脑录的全部，
+    /// 录音留着。从缺的那一片起重传、重新直接结束时清掉
+    #[serde(default)]
+    pub complete_sent: bool,
 }
 
 impl Recording {
@@ -329,6 +335,7 @@ pub mod tests {
             status,
             error: None,
             unverified_from: None,
+            complete_sent: false,
         }
     }
 
@@ -338,6 +345,7 @@ pub mod tests {
         let rec: Recording = serde_json::from_str(json).unwrap();
         assert_eq!((rec.next_seq, rec.uploaded), (3, 1));
         assert_eq!(rec.unverified_from, None);
+        assert!(!rec.complete_sent);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
@@ -19,7 +19,7 @@ import { AccessDialog, VISIBILITY_LABEL } from "./AccessDialog";
 import { AskPanel } from "./Ask";
 import { FeishuShareDialog, LatestFeishuShare } from "./FeishuShare";
 import { LatestWebhookSends, useMeetingWebhooks, WebhookShareDialog } from "./WebhookShare";
-import { meetingChip, recordingLive } from "./Meetings";
+import { chunksFlowing, meetingChip, recordingLive } from "./Meetings";
 import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
 
@@ -386,17 +386,7 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
 
   if (m.status === "uploading" && m.source === "record") return <UnfinishedRecording meeting={m} user={user} />;
 
-  if (m.status === "uploading" && m.source === "desktop") {
-    const elsewhere = (
-      <Notice tone="info">
-        {m.can_manage
-          ? "这场会议是用 zsmeet 桌面版在电脑上录的。录音会从那台电脑自动传上来（断网时等联网以后接着传），传完以后开始处理。"
-          : `${m.owner_name} 正在用 zsmeet 桌面版录这场会议，录音传完以后才会开始处理。`}
-      </Notice>
-    );
-    // 桌面版：这场会议就是在这台电脑上录的话，显示录音、上传的情况
-    return isDesktop ? <ThisComputerRecording meetingId={m.id} elsewhere={elsewhere} /> : elsewhere;
-  }
+  if (m.status === "uploading" && m.source === "desktop") return <UnfinishedDesktopRecording meeting={m} />;
 
   if (m.status === "uploading") {
     return (
@@ -513,6 +503,11 @@ function contiguous(received: number[]): number {
   return n;
 }
 
+/** 服务器最后一次收到录音是什么时候（还没传完的录音用）。 */
+function lastChunk(m: Meeting): string {
+  return m.last_chunk_at ? `最后一次收到录音：${ago(m.last_chunk_at)}` : "服务器还没有收到录音";
+}
+
 /**
  * 网页录音还没传完的会议：可能正在录，也可能录音的网页关掉了、断网了、暂停着。
  * 这台电脑上有没传完的录音时接着传；找不回来的话，可以先用服务器已经收到的部分生成纪要。
@@ -523,22 +518,7 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
   // 定时重画：录音中断以后，即使服务器返回的数据没变，「录音中」也要变成「还没有传完」
   useTicker(10_000);
   const live = recordingLive(m);
-  const last = m.last_chunk_at ? `最后一次收到录音：${ago(m.last_chunk_at)}` : "服务器还没有收到录音";
-
-  const chunks = useQuery({
-    queryKey: ["chunks", m.id],
-    queryFn: () => unwrap(api.GET("/api/meetings/{id}/chunks", { params: { path: { id: m.id } } })),
-    enabled: m.can_manage && !live,
-  });
-  const received = contiguous(chunks.data?.received ?? []);
-  const [confirming, setConfirming] = useState(false);
-  const finish = useMutation({
-    mutationFn: () => unwrap(api.POST("/api/meetings/{id}/complete", { params: { path: { id: m.id } }, body: { chunks: received } })),
-    onSuccess: (updated) => {
-      queryClient.setQueryData(["meeting", m.id], updated);
-      void queryClient.invalidateQueries({ queryKey: ["meetings"] });
-    },
-  });
+  const last = lastChunk(m);
 
   // 就是这个网页在录（或者在传最后几片）
   if (rec.meetingId === m.id && session.busy) {
@@ -567,14 +547,81 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
   }
 
   return (
+    <FinishWithReceived
+      meeting={m}
+      intro={`${last}。录音的网页可能关掉了、断网了，或者正暂停着；它恢复以后会自动接着传。`}
+      offer="如果录音的那台电脑找不回来了，可以先用这一部分生成纪要。"
+      confirm="确定吗？如果录音的网页其实还开着（比如暂停着、断网了），开始处理以后它后面录的部分就传不上来了。"
+    />
+  );
+}
+
+/**
+ * 桌面版录的会议还没传完。这场会议在这台电脑上录、在传时（桌面版里）显示录音、上传的情况。
+ * 录音的电脑一阵子没传上来（可能找不回来了），或者这台电脑上的录音传不上去了（比如断网时接着录的分片和服务器上
+ * 已有的序号重了），能管理这场会议的人可以先用服务器已经收到的部分生成纪要。
+ */
+function UnfinishedDesktopRecording({ meeting: m }: { meeting: Meeting }) {
+  // 定时重画：一阵子没收到新的分片以后，即使服务器返回的数据没变，也要能用已经收到的部分生成纪要
+  useTicker(10_000);
+  let elsewhere: ReactNode = (
+    <Notice tone="info">
+      {m.can_manage
+        ? "这场会议是用 zsmeet 桌面版在电脑上录的。录音会从那台电脑自动传上来（断网时等联网以后接着传），传完以后开始处理。"
+        : `${m.owner_name} 正在用 zsmeet 桌面版录这场会议，录音传完以后才会开始处理。`}
+    </Notice>
+  );
+  // 这台电脑上的录音传不上去了时，显示在它下面
+  let stuck: ReactNode = null;
+  if (m.can_manage && !chunksFlowing(m)) {
+    const last = lastChunk(m);
+    elsewhere = (
+      <FinishWithReceived
+        meeting={m}
+        intro={`${last}。这场会议是用 zsmeet 桌面版在电脑上录的，录音会从那台电脑自动传上来（断网时等联网以后接着传），传完以后开始处理。`}
+        offer="如果录音的那台电脑找不回来了，或者那台电脑上的录音传不上来了，可以先用这一部分生成纪要。"
+        confirm="确定吗？如果那台电脑其实还在录、还在传（比如断网了），开始处理以后它后面录的部分就传不上来了。"
+      />
+    );
+    stuck = (
+      <FinishWithReceived
+        meeting={m}
+        intro={`${last}。`}
+        offer="可以先用这一部分生成纪要。"
+        confirm="确定吗？开始处理以后，这台电脑上没传上去的部分就传不上去了（还留在这台电脑上，不需要的话可以删掉）。"
+      />
+    );
+  }
+  // 桌面版：这场会议就是在这台电脑上录的话，显示录音、上传的情况
+  return isDesktop ? <ThisComputerRecording meetingId={m.id} elsewhere={elsewhere} stuck={stuck} /> : elsewhere;
+}
+
+/**
+ * 录音还没传完的会议（网页录音、桌面版录音）：服务器已经收到了几片（从第 0 片起连续的），可以先用这一部分生成纪要。
+ * intro 是前面的说明，offer 跟在「服务器已经收到几片」后面，confirm 是开始处理之前的提醒。只给能管理这场会议的人看。
+ */
+function FinishWithReceived({ meeting: m, intro, offer, confirm }: { meeting: Meeting; intro: string; offer: string; confirm: string }) {
+  const chunks = useQuery({
+    queryKey: ["chunks", m.id],
+    queryFn: () => unwrap(api.GET("/api/meetings/{id}/chunks", { params: { path: { id: m.id } } })),
+  });
+  const received = contiguous(chunks.data?.received ?? []);
+  const [confirming, setConfirming] = useState(false);
+  const finish = useMutation({
+    mutationFn: () => unwrap(api.POST("/api/meetings/{id}/complete", { params: { path: { id: m.id } }, body: { chunks: received } })),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["meeting", m.id], updated);
+      void queryClient.invalidateQueries({ queryKey: ["meetings"] });
+    },
+  });
+
+  return (
     <Card className="flex flex-col gap-3 p-5">
       <div className="flex flex-col gap-1">
         <b className="text-[15px] font-semibold">录音还没有传完</b>
         <span className="text-sm leading-relaxed text-ink-2">
-          {last}。录音的网页可能关掉了、断网了，或者正暂停着；它恢复以后会自动接着传。
-          {received > 0
-            ? `服务器已经收到 ${received} 片（大约 ${duration((received * SLICE_MS) / 1000)}）。如果录音的那台电脑找不回来了，可以先用这一部分生成纪要。`
-            : ""}
+          {intro}
+          {received > 0 ? `服务器已经收到 ${received} 片（大约 ${duration((received * SLICE_MS) / 1000)}）。${offer}` : ""}
         </span>
       </div>
       {chunks.isError && <Notice tone="bad">{errorMessage(chunks.error)}</Notice>}
@@ -582,7 +629,7 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
       {received > 0 &&
         (confirming ? (
           <div className="flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-sm">
-            <span className="text-ink-2">确定吗？如果录音的网页其实还开着（比如暂停着、断网了），开始处理以后它后面录的部分就传不上来了。</span>
+            <span className="text-ink-2">{confirm}</span>
             <span className="flex gap-2">
               <Button size="sm" variant="primary" disabled={finish.isPending} onClick={() => finish.mutate()}>
                 确定，开始处理

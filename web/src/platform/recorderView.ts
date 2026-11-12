@@ -371,3 +371,13 @@ export function localMeeting(state: RecorderState, meetingId: string): LocalMeet
   const upload = state.uploads.find((u) => u.meetingId === meetingId);
   return upload ? { kind: "upload", upload } : null;
 }
+
+/**
+ * 这台电脑上的这场录音传不上去了（比如断网时接着录的分片和服务器上已有的序号重了）：会议还在等上传的话，
+ * 会议页面上在它下面给出「用服务器已经收到的部分生成纪要」，不然这场会议一直结束不了。
+ * 在录、在传、等网络、中断了等着选接着录还是直接结束的不给：这台电脑自己会传完，先用服务器上的部分生成纪要的话，
+ * 它后面的就传不上去了。
+ */
+export function stuckHere(local: LocalMeeting): boolean {
+  return local.kind === "upload" && local.upload.status === "failed";
+}

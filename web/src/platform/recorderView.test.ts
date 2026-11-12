@@ -28,6 +28,7 @@ import {
   signOutNote,
   sourceLabels,
   sourcesProblem,
+  stuckHere,
   uploadView,
   warningText,
 } from "./recorderView.ts";
@@ -421,4 +422,24 @@ test("会议页面：这台电脑正在录它、在传它，或者跟它没关�
   // 已经结束了：看上传情况
   const after = state({ meetingId: "m1", uploads: [upload({ meetingId: "m1", status: "completing" })] });
   assert.deepEqual(localMeeting(after, "m1"), { kind: "upload", upload: upload({ meetingId: "m1", status: "completing" }) });
+});
+
+const TAKEN =
+  "服务器上已经有这场会议的第 3 片录音，这台电脑上却没有记录；断网时接着录的部分也排到了这里，传上去会把服务器上的录音覆盖掉，所以没有传，录下的都还留在这台电脑上。服务器已经收到的部分可以在会议页面上生成纪要";
+
+test("会议页面：这台电脑上的录音传不上去了，还能用服务器已经收到的部分生成纪要，会议不会一直结束不了", () => {
+  const here = (s: RecorderState) => {
+    const local = localMeeting(s, "m1");
+    assert.ok(local);
+    return stuckHere(local);
+  };
+  // 断网时接着录的分片和服务器上已有的重了：这台电脑上的传不上去，删掉是唯一的按钮，会议页面上要能用服务器上的部分结束
+  assert.equal(here(state({ uploads: [upload({ status: "failed", error: TAKEN })] })), true);
+  assert.deepEqual(uploadView(upload({ status: "failed", error: TAKEN }), { where: "meeting", canStart: true }).actions, ["discard"]);
+  // 在传、等网络、中断了等着选、传完了：这台电脑自己会传完（或者能直接结束），不给
+  for (const status of ["recording", "uploading", "waiting", "completing", "completed", "interrupted"] as const) {
+    assert.equal(here(state({ uploads: [upload({ status })] })), false, status);
+  }
+  // 还在录（录音时就传不上去了的也一样）：先结束录音
+  assert.equal(here(state({ status: "recording", meetingId: "m1", uploads: [upload({ status: "failed" })] })), false);
 });

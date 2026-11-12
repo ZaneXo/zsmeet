@@ -8,7 +8,7 @@ import { Button, buttonClass, Notice, ProgressBar } from "../components/ui";
 import { hms } from "../lib/format";
 import { dismissUpload, recorderDiscard, recorderFinish, useRecorder } from "./recorder";
 import type { RecorderStatus, RecorderUpload } from "./recorder";
-import { bannerUploads, BUSY_LABEL, discardConfirm, isLive, liveMeetingText, localMeeting, uploadView } from "./recorderView";
+import { bannerUploads, BUSY_LABEL, discardConfirm, isLive, liveMeetingText, localMeeting, stuckHere, uploadView } from "./recorderView";
 import type { UploadAction, UploadView, UploadWhere } from "./recorderView";
 
 // 桌面版录音在录音页以外的地方：页面顶部的提示条、导航栏上的时长、会议页面上的说明。
@@ -76,13 +76,23 @@ export function DesktopRecordingBadge() {
 
 /**
  * 会议页面上：这场会议正在这台电脑上录音，或者录音正从这台电脑上传（传不上去、中断了也在这里处理）。
- * 这台电脑上没有这场会议的录音时显示 elsewhere（录音在别的电脑上）。
+ * 这台电脑上没有这场会议的录音时显示 elsewhere（录音在别的电脑上）；这台电脑上的传不上去了时，下面接着显示 stuck
+ * （用服务器已经收到的部分生成纪要）。
  */
-export function ThisComputerRecording({ meetingId, elsewhere }: { meetingId: string; elsewhere: ReactNode }) {
+export function ThisComputerRecording({ meetingId, elsewhere, stuck }: { meetingId: string; elsewhere: ReactNode; stuck?: ReactNode }) {
   const { state } = useRecorder();
   const local = localMeeting(state, meetingId);
   if (!local) return <>{elsewhere}</>;
-  if (local.kind === "upload") return <UploadRow upload={local.upload} where="meeting" canStart={state.status === "idle"} />;
+  if (local.kind === "upload") {
+    const row = <UploadRow upload={local.upload} where="meeting" canStart={state.status === "idle"} />;
+    if (!stuck || !stuckHere(local)) return row;
+    return (
+      <div className="flex flex-col gap-3">
+        {row}
+        {stuck}
+      </div>
+    );
+  }
   // 不用 Notice：它是 role="status"，时长每秒都变，读屏软件会一直念
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-brand-tint px-4 py-3 text-sm leading-relaxed text-brand-ink">

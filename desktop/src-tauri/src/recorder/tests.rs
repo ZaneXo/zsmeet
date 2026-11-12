@@ -539,6 +539,7 @@ fn recording(server: &str, user: &str, meeting: &str, status: Status) -> Recordi
         status,
         error: None,
         unverified_from: None,
+        complete_sent: false,
     }
 }
 
@@ -1770,6 +1771,138 @@ async fn a_completion_whose_answer_was_lost_counts_once_the_server_is_processing
         [json!({ "chunks": 2, "marks": [] })]
     );
     assert!(!r.root.join("m1").exists());
+}
+
+#[tokio::test]
+async fn a_completion_whose_answer_was_lost_still_counts_after_a_restart() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    let mut rec = recording(&r.server, "u1", "m1", Status::Stopped);
+    (rec.next_seq, rec.uploaded) = (2, 2);
+    plant(
+        &r.root,
+        &rec,
+        &[(0, b"audio-0".to_vec()), (1, b"audio-1".to_vec())],
+    );
+    r.mock.holds("m1", 0..2);
+    // 告诉服务器传完了：服务器开始处理了，回复却没收到。过很久才会再试，这期间 App 重启了
+    *r.mock.complete_lost.lock().unwrap() = true;
+    let mut opts = options(&r.root, &r.helper);
+    opts.retry_waits = vec![Duration::from_secs(3600)];
+    r.restart_with(opts);
+    wait_for(&r.recorder, "等着再试", |s| {
+        upload_is(s, "m1", UploadStatus::Waiting)
+    })
+    .await;
+    assert_eq!(r.mock.completes_of("m1").len(), 1);
+    assert!(
+        local::load(&r.root.join("m1")).unwrap().complete_sent,
+        "告诉服务器之前就记下了"
+    );
+
+    // 重启以后再试：服务器上的分片已经拼好、删掉了，会议在处理。记着这台电脑告诉过服务器传完了，算完成
+    r.restart();
+    wait_for(&r.recorder, "传完", |s| {
+        upload_is(s, "m1", UploadStatus::Completed)
+    })
+    .await;
+    assert_eq!(r.mock.completes_of("m1").len(), 1);
+    assert!(!r.root.join("m1").exists());
+}
+
+#[tokio::test]
+async fn a_meeting_processed_elsewhere_keeps_what_the_server_never_got() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 第 0、1 片传上去了，还有第 2 片
+    let mut rec = recording(&r.server, "u1", "m1", Status::Stopped);
+    (rec.next_seq, rec.uploaded, rec.seconds) = (3, 2, 30.0);
+    let chunks: Vec<(u32, Vec<u8>)> = (0..3)
+        .map(|seq| (seq, format!("audio-{seq}").into_bytes()))
+        .collect();
+    plant(&r.root, &rec, &chunks);
+    // 在这之前，有人在会议页面上用服务器收到的第 0、1 片生成了纪要：服务器开始处理、拼好录音，删掉了分片
+    r.mock
+        .completes
+        .lock()
+        .unwrap()
+        .push(("m1".into(), json!({ "chunks": 2 })));
+    r.mock
+        .meeting_status
+        .lock()
+        .unwrap()
+        .insert("m1".into(), "queued".into());
+    // 传第 2 片时，中间的设备冒充服务器回了 200 和一段 JSON：这台电脑以为都传完了
+    r.mock.chunk_fake.lock().unwrap().push(("m1".into(), 2));
+    r.restart();
+
+    // 核对时服务器上一片也查不到、会议已经在处理，这台电脑却没告诉过服务器传完了：是在别处开始处理的，
+    // 第 2 片服务器从来没收到。不能当成传完了、删掉这台电脑上唯一的一份：算传不上去了，说清楚原因
+    let state = wait_for(&r.recorder, "传不上去", |s| {
+        upload_is(s, "m1", UploadStatus::Failed)
+    })
+    .await;
+    assert_eq!(
+        upload(&state, "m1").unwrap().error.as_deref(),
+        Some(PROCESSED_ELSEWHERE)
+    );
+    for seq in 0..3 {
+        assert!(chunk_path(&r.root.join("m1"), seq).exists(), "第 {seq} 片");
+    }
+    assert_eq!(
+        local::load(&r.root.join("m1")).unwrap().status,
+        Status::Failed
+    );
+    assert_eq!(put_seqs(&r.mock, "m1"), [2]);
+    assert_eq!(r.mock.completes_of("m1"), [json!({ "chunks": 2 })]);
+}
+
+#[tokio::test]
+async fn resending_forgets_that_the_server_was_told_it_was_complete() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 上次核对过服务器收到了两片、告诉了它传完了，没收到回复。这次核对时服务器上却缺了第 1 片，会议还在等上传：
+    // 上次的核对不算数了。从第 1 片起重传，传完、再核对过才算告诉过服务器（之后会议在别处开始处理的话，
+    // 不能当成是这台电脑告诉的，删掉服务器没收到的分片）
+    let mut rec = recording(&r.server, "u1", "m1", Status::Stopped);
+    (rec.next_seq, rec.uploaded, rec.complete_sent) = (2, 2, true);
+    plant(
+        &r.root,
+        &rec,
+        &[(0, b"audio-0".to_vec()), (1, b"audio-1".to_vec())],
+    );
+    r.mock.holds("m1", 0..1);
+    // 重传一直传不上去（服务器暂时出错），停在这一步
+    r.mock.chunk_error.lock().unwrap().insert("m1".into(), 503);
+    r.restart();
+
+    until("从第 1 片起重传", || {
+        put_seqs(&r.mock, "m1").contains(&1)
+    })
+    .await;
+    let saved = local::load(&r.root.join("m1")).unwrap();
+    assert_eq!((saved.uploaded, saved.complete_sent), (1, false));
+}
+
+#[tokio::test]
+async fn finishing_again_forgets_that_the_server_was_told_it_was_complete() {
+    let mut r = rig(Script::default()).await;
+    r.run.abort();
+    // 上次核对过、告诉了服务器传完了，服务器却不肯开始处理（比如说收到的分片比声明的多），算传不上去了。
+    // 再直接结束一次：要重新核对、重新告诉服务器
+    let mut rec = recording(&r.server, "u1", "m1", Status::Failed);
+    (rec.next_seq, rec.uploaded, rec.complete_sent) = (1, 1, true);
+    plant(&r.root, &rec, &[(0, b"audio-0".to_vec())]);
+    // 先问不到服务器，停在核对这一步
+    *r.mock.received_page.lock().unwrap() = Some("<html>请先登录</html>");
+    r.restart();
+
+    r.recorder.finish("m1").await.unwrap();
+    let saved = local::load(&r.root.join("m1")).unwrap();
+    assert_eq!(
+        (saved.status, saved.complete_sent),
+        (Status::Stopped, false)
+    );
 }
 
 #[tokio::test]

@@ -19,7 +19,7 @@ import { AskPanel } from "./Ask";
 const RECORDING_STALE_MS = 90_000;
 
 /** 最近一直有新的录音分片传上来。 */
-function chunksFlowing(m: Meeting): boolean {
+export function chunksFlowing(m: Meeting): boolean {
   const last = Date.parse(m.last_chunk_at ?? m.created_at);
   return Date.now() - last < RECORDING_STALE_MS;
 }

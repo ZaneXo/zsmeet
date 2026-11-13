@@ -9,7 +9,7 @@ import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings
 import { Button, buttonClass, Card, Chip, Field, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
-import { waitingForRecording } from "../lib/meetingStatus";
+import { waitingForRecording, writingMinutesOnly } from "../lib/meetingStatus";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { chunksFlowing, contiguous, lastReceived, receivedSeconds } from "../lib/unfinishedRecording";
 import type { RecordingSource } from "../lib/unfinishedRecording";
@@ -223,7 +223,7 @@ export function MeetingDetailPage({
       {posting && <WebhookShareDialog meeting={m} hooks={hooks} onClose={() => setPosting(false)} />}
       {access && <AccessDialog meeting={m} isOwner={m.owner_id === user.id} feishu={feishuReady} groups={hooks.length > 0} onClose={() => setAccess(false)} />}
 
-      {m.status !== "done" && <ProcessingPanel meeting={m} user={user} minutesOnly={hasTranscript} />}
+      {m.status !== "done" && <ProcessingPanel meeting={m} user={user} hasTranscript={hasTranscript} />}
 
       {m.has_audio && (
         <Card className="px-4 py-3">
@@ -381,7 +381,7 @@ const STEP_HINT: Record<(typeof STEPS)[number], string> = {
 };
 
 /** 会议还没处理完时显示：排队、各步骤的进度，或者失败原因和重试按钮。 */
-function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; user: User; minutesOnly: boolean }) {
+function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting; user: User; hasTranscript: boolean }) {
   const retry = useMutation({
     mutationFn: () => unwrap(api.POST("/api/meetings/{id}/retry", { params: { path: { id: m.id } } })),
     onSuccess: (updated) => queryClient.setQueryData(["meeting", m.id], updated),
@@ -422,7 +422,8 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
           <div>
             <Button variant="primary" size="sm" disabled={retry.isPending} onClick={() => retry.mutate()}>
               <Icon name="retry" size={15} />
-              {minutesOnly ? "重新生成纪要" : "重试"}
+              {/* 有转写时重试只重新写纪要（重新转写失败了也是，见 writingMinutesOnly 的说明） */}
+              {hasTranscript ? "重新生成纪要" : "重试"}
             </Button>
           </div>
         ) : (
@@ -441,8 +442,8 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
     );
   }
 
-  // 已经有转写时（重新生成纪要）只有写纪要这一步
-  if (minutesOnly || m.stage === "minutes") {
+  // 重新生成纪要时只有写纪要这一步；重新转写时虽然有旧的转写，也要从接收转码开始一步步显示
+  if (writingMinutesOnly(m, hasTranscript)) {
     return (
       <Card className="flex flex-col gap-2.5 p-5">
         <div className="flex justify-between text-sm">
@@ -463,7 +464,7 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
             <b className="font-semibold">下载识别模型</b>
             <span className="text-[13px] tabular-nums text-muted">{Math.round(m.progress * 100)}%</span>
           </div>
-          <span className="text-[13px] text-muted">只在第一次处理会议时下载，约 280 MB，之后不用再等</span>
+          <span className="text-[13px] text-muted">只在第一次处理会议时下载，约 300 MB，之后不用再等</span>
           <ProgressBar value={m.progress} />
         </div>
       )}

@@ -1779,6 +1779,8 @@ export interface components {
              * @description 当前步骤的进度
              */
             progress: number;
+            /** @description 要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false */
+            retranscribing: boolean;
             /**
              * @description 录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）
              * @enum {string}
@@ -1870,6 +1872,8 @@ export interface components {
              * @description 当前步骤的进度
              */
             progress: number;
+            /** @description 要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false */
+            retranscribing: boolean;
             /**
              * @description 录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）
              * @enum {string}
@@ -2223,6 +2227,8 @@ export interface components {
              * @description 到这个时间会被彻底删除，连同录音
              */
             purge_at: string;
+            /** @description 要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false */
+            retranscribing: boolean;
             /**
              * @description 录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）
              * @enum {string}

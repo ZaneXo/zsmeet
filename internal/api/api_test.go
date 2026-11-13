@@ -941,9 +941,16 @@ func TestRetranscribe(t *testing.T) {
 	}
 
 	other.want(other.do("POST", base+"/retranscribe", nil), 403)
+	if r := c.want(c.do("GET", base, nil), 200); r.Body["retranscribing"] != false {
+		t.Errorf("还没要求重新转写：%s", r.Raw)
+	}
 	r := c.want(c.do("POST", base+"/retranscribe", nil), 200)
 	if r.Body["status"] != "queued" {
 		t.Errorf("应该进入排队：%s", r.Raw)
+	}
+	// 界面据此显示「接收与转码、识别文字……」，而不是只有「正在生成纪要」（旧的转写还在）
+	if r.Body["retranscribing"] != true {
+		t.Errorf("要求了重新转写：%s", r.Raw)
 	}
 	if tr := c.want(c.do("GET", base+"/transcript", nil), 200); len(tr.Body["segments"].([]any)) != 1 {
 		t.Errorf("旧的转写要留到新的存好为止：%s", tr.Raw)

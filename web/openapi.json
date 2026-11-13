@@ -1297,6 +1297,10 @@
             "minimum": 0,
             "type": "number"
           },
+          "retranscribing": {
+            "description": "要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false",
+            "type": "boolean"
+          },
           "source": {
             "description": "录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）",
             "enum": [
@@ -1378,6 +1382,7 @@
           "template",
           "hotwords",
           "speaker_count",
+          "retranscribing",
           "duration_sec",
           "has_audio",
           "minutes_version",
@@ -1509,6 +1514,10 @@
             "minimum": 0,
             "type": "number"
           },
+          "retranscribing": {
+            "description": "要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false",
+            "type": "boolean"
+          },
           "source": {
             "description": "录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）",
             "enum": [
@@ -1591,6 +1600,7 @@
           "template",
           "hotwords",
           "speaker_count",
+          "retranscribing",
           "duration_sec",
           "has_audio",
           "minutes_version",
@@ -2467,6 +2477,10 @@
             "format": "date-time",
             "type": "string"
           },
+          "retranscribing": {
+            "description": "要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false",
+            "type": "boolean"
+          },
           "source": {
             "description": "录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）",
             "enum": [
@@ -2551,6 +2565,7 @@
           "template",
           "hotwords",
           "speaker_count",
+          "retranscribing",
           "duration_sec",
           "has_audio",
           "minutes_version",

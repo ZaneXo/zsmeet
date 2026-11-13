@@ -665,8 +665,11 @@ func testEngineGainWithEcho() throws {
     // 先经过回声消除（假的，出来的是相反数），再调音量（假的，2 倍）
     expect(!fake.frames.isEmpty && fake.frames.allSatisfy { $0.first == -0.01 }, "自动增益收到的是回声消除处理过的")
     // 麦克风那一路的音量是调大了的：0.02 是 -34 dBFS，音量 0.43（不调是 0.01，-40 dBFS，0.33）
+    // 分开写、标上类型：写成一整个式子时，CI 上的 Swift（Xcode 16）在限定的时间里推不出类型，编译不过
     let levels = fixture.micLevels(afterResume: false).filter { $0 > 0 }
-    expect(levels.suffix(10).allSatisfy { abs($0 - (20 * log10(0.02) + 60) / 60) < 0.01 }, "麦克风那一路调大了 2 倍：\(levels.suffix(3))")
+    let expected: Double = (20 * log10(0.02 as Double) + 60) / 60
+    let raised = levels.suffix(10).allSatisfy { (level: Double) -> Bool in abs(level - expected) < 0.01 }
+    expect(raised, "麦克风那一路调大了 2 倍：\(levels.suffix(3))")
     fixture.engine.pause()
     fixture.engine.queue.sync {}
     let beforePause = fixture.pipeline.recordedSamples

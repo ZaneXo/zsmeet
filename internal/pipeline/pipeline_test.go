@@ -68,7 +68,8 @@ func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress f
 	}, nil
 }
 
-func (e *fakeEngine) Diarize(_ []float32, speakers int) ([]transcript.Turn, error) {
+func (e *fakeEngine) Diarize(_ context.Context, _ []float32, speakers int, progress func(float64)) ([]transcript.Turn, error) {
+	progress(1)
 	e.speakers.Store(int32(speakers))
 	return []transcript.Turn{{Start: 0, End: 1, Speaker: 4}, {Start: 1, End: 2, Speaker: 9}}, nil
 }

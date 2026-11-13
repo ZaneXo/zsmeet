@@ -60,9 +60,9 @@ func transcribeFile(ctx context.Context, args []string) error {
 	fs.Var(float32Flag{&params.MinSilence}, "min-silence", "安静多少`秒`算一句话说完了")
 	fs.Var(float32Flag{&params.MinSpeech}, "min-speech", "短于多少`秒`的声音不算说话")
 	fs.Var(float32Flag{&params.MaxSpeech}, "max-speech", "一句话最长多少`秒`，再长就切开")
-	cluster := fs.String("cluster", strconv.FormatFloat(float64(params.ClusterThreshold), 'g', -1, 32),
-		"区分说话人的聚类`阈值`，越小分出的人越多。用逗号隔开写几个时每个都分一次，比较分出几位说话人\n（打印的每一句按第一个算）；none 是不区分说话人")
-	speakerCount := fs.Int("speakers", 0, "有几个人说话：大于 0 时按这个`人数`区分说话人（和会议上填了说话人数一样）：\n先按 -cluster 的阈值自动区分，再按声纹并成这么多人；0 是只按阈值自动区分")
+	diarize := fs.Bool("diarize", true, "区分说话人（-diarize=false 时不区分，快一些）")
+	speakerCount := fs.Int("speakers", 0, "有几个人说话：大于 0 时按这个`人数`区分说话人（和会议上选了说话人数一样），0 是按声音自动估计人数")
+	speakerModel := fs.String("speaker-model", "", "区分说话人用的声纹模型`文件`，比较模型用（默认用模型目录里的）")
 	minHole := fs.Float64("hole", 10, "多少`秒`以上没有字算一个空档")
 	statsOnly := fs.Bool("stats-only", false, "只打印统计，不打印每一句")
 
@@ -78,10 +78,6 @@ func transcribeFile(ctx context.Context, args []string) error {
 	}
 	if params.MinSilence <= 0 || params.MinSpeech <= 0 || params.MaxSpeech <= params.MinSpeech {
 		return errors.New("-min-silence、-min-speech 要大于 0，-max-speech 要大于 -min-speech")
-	}
-	thresholds, err := parseThresholds(*cluster)
-	if err != nil {
-		return err
 	}
 	if *speakerCount < 0 || *speakerCount > service.MaxSpeakerCount {
 		return fmt.Errorf("-speakers 要在 0 到 %d 之间", service.MaxSpeakerCount)
@@ -126,6 +122,9 @@ func transcribeFile(ctx context.Context, args []string) error {
 
 	started = time.Now()
 	engine, err := asr.LoadWith(models.Paths{Dir: cfg.ModelsDir}, cfg.Threads, cfg.Language, params)
+	if err == nil && *speakerModel != "" {
+		err = engine.SetSpeakerModel(*speakerModel)
+	}
 	if err != nil {
 		return err
 	}
@@ -138,34 +137,22 @@ func transcribeFile(ctx context.Context, args []string) error {
 	}
 	transcribeTook := time.Since(started)
 
-	type diarized struct {
-		threshold          float32
-		clusters, speakers int
-		// 区分说话人分出的每个人说话的秒数，从多到少
-		talk []float64
-	}
-	var speakers []diarized
+	// 区分说话人分出的人数、分到句子的人数、每个人说话的秒数（从多到少）
+	var clusters, speakers int
+	var talk []float64
 	started = time.Now()
-	for i, threshold := range thresholds {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		engine.SetClusterThreshold(threshold)
-		turns, err := engine.Diarize(samples, *speakerCount)
+	if *diarize {
+		turns, err := engine.Diarize(ctx, samples, *speakerCount, func(float64) {})
 		if err != nil {
 			return err
 		}
-		assigned := slices.Clone(segs)
-		ids := transcript.AssignSpeakers(assigned, turns)
-		talk := map[int]float64{}
+		speakers = len(transcript.AssignSpeakers(segs, turns))
+		seconds := map[int]float64{}
 		for _, t := range turns {
-			talk[t.Speaker] += t.End - t.Start
+			seconds[t.Speaker] += t.End - t.Start
 		}
-		seconds := slices.SortedFunc(maps.Values(talk), func(a, b float64) int { return cmp.Compare(b, a) })
-		speakers = append(speakers, diarized{threshold, len(talk), len(ids), seconds})
-		if i == 0 {
-			segs = assigned
-		}
+		clusters = len(seconds)
+		talk = slices.SortedFunc(maps.Values(seconds), func(a, b float64) int { return cmp.Compare(b, a) })
 	}
 	diarizeTook := time.Since(started)
 
@@ -196,17 +183,17 @@ func transcribeFile(ctx context.Context, args []string) error {
 	fmt.Fprintf(out, "  句子：%d\n", len(segs))
 	fmt.Fprintf(out, "  有字的时长：%.1f 秒（%.0f%%）\n", c.covered, 100*c.covered/duration)
 	fmt.Fprintf(out, "  超过 %g 秒没有字的空档：%d 个，共 %.1f 秒 %s\n", *minHole, len(c.holes), holeSum, strings.Join(holes, " "))
-	for _, d := range speakers {
+	if *diarize {
+		how := "按声音估计人数"
 		if *speakerCount > 0 {
-			fmt.Fprintf(out, "  说话人（聚类阈值 %g，按 %d 个人分）：%d 位（区分说话人分出 %d 个）\n", d.threshold, *speakerCount, d.speakers, d.clusters)
-		} else {
-			fmt.Fprintf(out, "  说话人（聚类阈值 %g）：%d 位（区分说话人分出 %d 个）\n", d.threshold, d.speakers, d.clusters)
+			how = fmt.Sprintf("按 %d 个人分", *speakerCount)
 		}
-		talk := make([]string, len(d.talk))
-		for i, s := range d.talk {
-			talk[i] = strconv.FormatFloat(s, 'f', 0, 64)
+		fmt.Fprintf(out, "  说话人（%s）：%d 位（区分说话人分出 %d 个）\n", how, speakers, clusters)
+		seconds := make([]string, len(talk))
+		for i, s := range talk {
+			seconds[i] = strconv.FormatFloat(s, 'f', 0, 64)
 		}
-		fmt.Fprintf(out, "    分出的每个人说了几秒：%s\n", strings.Join(talk, " "))
+		fmt.Fprintf(out, "    分出的每个人说了几秒：%s\n", strings.Join(seconds, " "))
 	}
 	a, b := measure(original, segs), measure(samples, segs)
 	fmt.Fprintf(out, "  音量（原来 → 送去识别的，dBFS）：整体 %.1f → %.1f，说话的部分 %.1f → %.1f，底噪 %.1f → %.1f\n",
@@ -244,22 +231,6 @@ func pickFilter(value, production string) string {
 		return ""
 	}
 	return value
-}
-
-// parseThresholds 读 -cluster：逗号隔开的几个阈值，none 是不区分说话人。
-func parseThresholds(s string) ([]float32, error) {
-	if s == "none" {
-		return nil, nil
-	}
-	var out []float32
-	for f := range strings.SplitSeq(s, ",") {
-		v, err := strconv.ParseFloat(strings.TrimSpace(f), 32)
-		if err != nil || v <= 0 {
-			return nil, fmt.Errorf("-cluster 里的 %q 不是大于 0 的数", f)
-		}
-		out = append(out, float32(v))
-	}
-	return out, nil
 }
 
 // float32Flag 让 flag 包能读 float32 的选项（语音检测的参数都是 float32）。

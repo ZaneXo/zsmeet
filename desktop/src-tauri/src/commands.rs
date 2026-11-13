@@ -180,7 +180,8 @@ pub async fn recorder_devices(recorder: RecorderHandle<'_>) -> Result<Devices, S
 
 /// 开始录音（会议要先在服务器上建好，source 是 desktop）。mic：麦克风的 uid 或者 "default"，
 /// null 是不录麦克风；system：录不录电脑的声音；echoCancel：「外放时去掉回声」（实验性，true 是
-/// --echo-cancel auto，false 或者不传是 off）。这场会议在这台电脑上有中断了的录音时接着录。
+/// --echo-cancel auto，false 或者不传是 off）。麦克风自动增益不用界面管：总是 --mic-gain auto（见 RecorderOptions）。
+/// 这场会议在这台电脑上有中断了的录音时接着录。
 #[tauri::command]
 pub async fn recorder_start(
     recorder: RecorderHandle<'_>,

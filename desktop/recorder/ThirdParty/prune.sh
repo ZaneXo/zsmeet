@@ -7,7 +7,7 @@
 # 做的事（都先在这个目录下的一个临时目录里做）：
 #   1. 把源码包里的 webrtc/、absl/ 整个拷贝过来
 #   2. 用 clang -MM（只做预处理：不编译、不运行源码包里的任何脚本）找出 webrtc-sources.txt 里的源文件和
-#      Sources/CRecorder/zr_aec.cc 在 Apple 芯片、Intel 上用到的全部头文件，参数和编译时一样（webrtc-flags.sh）
+#      Sources/CRecorder/zr_aec.cc、zr_agc.cc 在 Apple 芯片、Intel 上用到的全部头文件，参数和编译时一样（webrtc-flags.sh）
 #   3. 只留下这些源文件、头文件和许可证，别的都删掉
 #   4. 都没问题了，才用挑好的换掉这里原来的 webrtc-audio-processing/、abseil-cpp/。中途出错就停下、说明原因，
 #      这里原来的文件一个都不动
@@ -97,8 +97,11 @@ for arch in arm64 x86_64; do
     n=$((n + 1))
     printf '%s\0%s\0%s\0%s\0' "$work/deps-$arch.sh" "$stage/$src" "$work/deps/$n.d" "${extra:--}" >>"$work/jobs"
   done <<<"$sources"
-  n=$((n + 1))
-  printf '%s\0%s\0%s\0%s\0' "$work/deps-$arch.sh" "$recorder/Sources/CRecorder/zr_aec.cc" "$work/deps/$n.d" - >>"$work/jobs"
+  # 回声消除、自动增益的 C 接口（我们自己的代码）用到的头文件也要留下
+  for shim in zr_aec zr_agc; do
+    n=$((n + 1))
+    printf '%s\0%s\0%s\0%s\0' "$work/deps-$arch.sh" "$recorder/Sources/CRecorder/$shim.cc" "$work/deps/$n.d" - >>"$work/jobs"
+  done
 done
 if ! xargs -0 -n 4 -P "$(sysctl -n hw.ncpu)" sh -c '"$0" "$1" "$2" "$3"' <"$work/jobs"; then
   echo "找头文件出错了（clang -MM 没通过，原因见上面的输出），$here 下原来的文件没动" >&2

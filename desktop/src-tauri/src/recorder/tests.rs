@@ -42,6 +42,8 @@ struct Script {
     stop_error: Option<(&'static str, &'static str)>,
     /// started 里报的回声消除模式。None 时照着 --echo-cancel 报（和真的录音程序一样）
     echo_report: Option<&'static str>,
+    /// started 里报的麦克风自动增益模式。None 时照着 --mic-gain 报（和真的录音程序一样）
+    mic_gain_report: Option<&'static str>,
     /// 报 started 之前先报的事件
     before_start: Vec<Value>,
     /// 报完 started（和提醒）以后、录分片之前报的事件
@@ -56,20 +58,22 @@ if [ "$1" = devices ]; then
   exit 0
 fi
 args="$*"
-out=""; seq=0; total=0; echo_mode=""
+out=""; seq=0; total=0; echo_mode=""; gain_mode=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) out="$2"; shift 2 ;;
     --start-seq) seq="$2"; shift 2 ;;
     --echo-cancel) echo_mode="$2"; shift 2 ;;
+    --mic-gain) gain_mode="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 dir="${out%/*}"; dir="${dir%/*}"
 CHUNKS=0; CRASH=0; START_ERROR=""; WARNING=""; HANG_ON_STOP=0; STOP_ERROR=""
-ECHO_REPORT=""; BEFORE_START=""; AFTER_START=""
+ECHO_REPORT=""; GAIN_REPORT=""; BEFORE_START=""; AFTER_START=""
 [ -f "$dir/fake.conf" ] && . "$dir/fake.conf"
 [ -n "$ECHO_REPORT" ] || ECHO_REPORT="$echo_mode"
+[ -n "$GAIN_REPORT" ] || GAIN_REPORT="$gain_mode"
 echo "$args" >> "$dir/helper-args.log"
 chunk() {
   printf 'audio-%s' "$seq" > "$out/$seq.aac.part"
@@ -85,7 +89,7 @@ if [ -n "$START_ERROR" ]; then
   exit 2
 fi
 [ -n "$BEFORE_START" ] && echo "$BEFORE_START"
-echo "{\"event\":\"started\",\"sample_rate\":48000,\"channels\":1,\"mic\":\"MacBook Pro 麦克风\",\"system\":true,\"echo_cancellation\":\"$ECHO_REPORT\"}"
+echo "{\"event\":\"started\",\"sample_rate\":48000,\"channels\":1,\"mic\":\"MacBook Pro 麦克风\",\"system\":true,\"echo_cancellation\":\"$ECHO_REPORT\",\"mic_gain\":\"$GAIN_REPORT\"}"
 if [ -n "$WARNING" ]; then
   echo "$WARNING"
 fi
@@ -176,6 +180,9 @@ fn fake_helper(dir: &Path, script: &Script) -> PathBuf {
     }
     if let Some(mode) = script.echo_report {
         conf.push_str(&format!("ECHO_REPORT='{mode}'\n"));
+    }
+    if let Some(mode) = script.mic_gain_report {
+        conf.push_str(&format!("GAIN_REPORT='{mode}'\n"));
     }
     for (name, events) in [
         ("BEFORE_START", &script.before_start),
@@ -487,6 +494,7 @@ fn options(root: &Path, helper: &Path) -> RecorderOptions {
         stop_timeout: Duration::from_secs(10),
         input_file: None,
         realtime: false,
+        mic_gain: MicGain::Auto,
     }
 }
 
@@ -657,7 +665,7 @@ async fn records_uploads_in_order_and_completes() {
     assert_eq!(
         helper_runs(r.f.dir.path()),
         [format!(
-            "record --out {} --start-seq 0 --chunk-seconds 10 --mic default --echo-cancel off",
+            "record --out {} --start-seq 0 --chunk-seconds 10 --mic default --echo-cancel off --mic-gain auto",
             r.root.join("m1").display()
         )]
     );
@@ -670,6 +678,8 @@ async fn records_uploads_in_order_and_completes() {
             reason: None
         })
     );
+    // 麦克风自动增益默认开着：录音程序报 auto
+    assert_eq!(state.mic_gain, Some(MicGainMode::Auto));
     // 录音只有自己能看
     #[cfg(unix)]
     {
@@ -714,7 +724,10 @@ async fn records_uploads_in_order_and_completes() {
     // 结束：最后一片写完，全部传完以后告诉服务器开始处理
     let state = r.recorder.stop().await.unwrap();
     assert_eq!(state.status, Phase::Idle);
-    assert_eq!((state.meeting_id, state.echo), (None, None));
+    assert_eq!(
+        (state.meeting_id, state.echo, state.mic_gain),
+        (None, None, None)
+    );
     let state = wait_for(&r.recorder, "传完", |s| {
         upload_is(s, "m1", UploadStatus::Completed)
     })
@@ -812,7 +825,8 @@ async fn waits_while_offline_and_uploads_when_back() {
         [json!({ "chunks": 3, "marks": [] })]
     );
     assert!(
-        helper_runs(r.f.dir.path())[0].ends_with("--mic default --no-system --echo-cancel off"),
+        helper_runs(r.f.dir.path())[0]
+            .ends_with("--mic default --no-system --echo-cancel off --mic-gain auto"),
         "{:?}",
         helper_runs(r.f.dir.path())
     );
@@ -1426,6 +1440,7 @@ fn live_session(server: &str, user: &str, meeting: &str) -> Session {
         echo_mode: Some(EchoMode::Auto),
         echo_active: true,
         echo_reason: Some("speakers".into()),
+        mic_gain: Some(MicGainMode::Auto),
         warnings: vec![Warning {
             code: "system_denied".into(),
             message: "没有录电脑声音的权限".into(),
@@ -1474,6 +1489,7 @@ fn only_the_recording_account_sees_what_is_being_recorded() {
                 reason: Some("speakers".into())
             })
         );
+        assert_eq!(state.mic_gain, Some(MicGainMode::Auto));
     }
     // 换了别人登录，上一个人的录音还没结束：只知道这台电脑在录音
     let state = snapshot(&inner, Some(&account("u2")));
@@ -1484,7 +1500,10 @@ fn only_the_recording_account_sees_what_is_being_recorded() {
         (state.meeting_id, state.title, state.seconds, state.level),
         (None, None, 0.0, None)
     );
-    assert_eq!((state.mic, state.system, state.echo), (None, false, None));
+    assert_eq!(
+        (state.mic, state.system, state.echo, state.mic_gain),
+        (None, false, None, None)
+    );
     assert!(state.marks.is_empty() && state.warnings.is_empty() && state.uploads.is_empty());
 }
 
@@ -1722,7 +1741,8 @@ async fn follows_echo_cancellation_and_microphone_changes() {
         .unwrap();
     assert_eq!(state.echo, echo(EchoMode::Auto, true, Some("speakers")));
     assert!(
-        helper_runs(r.f.dir.path())[0].ends_with("--mic default --echo-cancel auto"),
+        helper_runs(r.f.dir.path())[0]
+            .ends_with("--mic default --echo-cancel auto --mic-gain auto"),
         "{:?}",
         helper_runs(r.f.dir.path())
     );
@@ -1781,6 +1801,76 @@ async fn follows_echo_cancellation_and_microphone_changes() {
     r.recorder.stop().await.unwrap();
 }
 
+#[tokio::test]
+async fn asks_for_microphone_gain_and_reports_it() {
+    // 默认让录音程序自动调麦克风的音量（界面上没有开关），它在 started 里报的模式交给界面
+    let mut r = rig(Script::default()).await;
+    let state = r
+        .recorder
+        .start("m1", Some("default".into()), true, EchoCancel::Off)
+        .await
+        .unwrap();
+    assert_eq!(state.mic_gain, Some(MicGainMode::Auto));
+    assert!(
+        helper_runs(r.f.dir.path())[0].ends_with("--echo-cancel off --mic-gain auto"),
+        "{:?}",
+        helper_runs(r.f.dir.path())
+    );
+    assert_eq!(r.recorder.stop().await.unwrap().mic_gain, None);
+
+    // 要调却没能打开（建不起来 WebRTC 的 AGC2）：照原样录麦克风，界面上看得到
+    fake_helper(
+        r.f.dir.path(),
+        &Script {
+            mic_gain_report: Some("unavailable"),
+            ..Script::default()
+        },
+    );
+    let state = r
+        .recorder
+        .start("m2", Some("default".into()), true, EchoCancel::Off)
+        .await
+        .unwrap();
+    assert_eq!(state.mic_gain, Some(MicGainMode::Unavailable));
+    r.recorder.stop().await.unwrap();
+
+    // 选项里关掉（排查时用）：明说 off；不认识的模式当成没报
+    let mut opts = options(&r.root, &r.helper);
+    opts.mic_gain = MicGain::Off;
+    r.restart_with(opts);
+    fake_helper(r.f.dir.path(), &Script::default());
+    let state = r
+        .recorder
+        .start("m3", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
+    assert_eq!(state.mic_gain, Some(MicGainMode::Off));
+    assert!(
+        helper_runs(r.f.dir.path())
+            .last()
+            .unwrap()
+            .ends_with("--no-mic --echo-cancel off --mic-gain off"),
+        "{:?}",
+        helper_runs(r.f.dir.path())
+    );
+    r.recorder.stop().await.unwrap();
+    fake_helper(
+        r.f.dir.path(),
+        &Script {
+            mic_gain_report: Some("loud"),
+            ..Script::default()
+        },
+    );
+    let state = r
+        .recorder
+        .start("m4", None, true, EchoCancel::Off)
+        .await
+        .unwrap();
+    assert_eq!(state.status, Phase::Recording);
+    assert_eq!(state.mic_gain, None);
+    r.recorder.stop().await.unwrap();
+}
+
 #[test]
 fn an_update_never_cuts_a_recording_or_an_upload_short() {
     let state = |status, uploads: &[UploadStatus]| RecorderState {
@@ -1792,6 +1882,7 @@ fn an_update_never_cuts_a_recording_or_an_upload_short() {
         mic: None,
         system: false,
         echo: None,
+        mic_gain: None,
         marks: vec![],
         warnings: vec![],
         error: None,
@@ -2683,6 +2774,7 @@ fn state_uses_the_agreed_field_names() {
             active: false,
             reason: Some("headphones".into()),
         }),
+        mic_gain: Some(MicGainMode::Auto),
         marks: vec![3.0],
         warnings: vec![Warning {
             code: "mic_denied".into(),
@@ -2709,6 +2801,7 @@ fn state_uses_the_agreed_field_names() {
             "mic": "MacBook Pro 麦克风",
             "system": true,
             "echo": {"mode": "auto", "active": false, "reason": "headphones"},
+            "micGain": "auto",
             "marks": [3.0],
             "warnings": [{"code": "mic_denied", "message": "没有麦克风权限"}],
             "error": null,
@@ -2743,12 +2836,21 @@ fn state_uses_the_agreed_field_names() {
     ] {
         assert_eq!(serde_json::to_value(mode).unwrap(), name);
     }
+    for (mode, name) in [
+        (MicGainMode::Off, "off"),
+        (MicGainMode::Auto, "auto"),
+        (MicGainMode::Unavailable, "unavailable"),
+    ] {
+        assert_eq!(serde_json::to_value(mode).unwrap(), name);
+    }
     // 没在录时是 null
     let idle = RecorderState {
         echo: None,
+        mic_gain: None,
         ..state
     };
     assert_eq!(serde_json::to_value(&idle).unwrap()["echo"], Value::Null);
+    assert_eq!(serde_json::to_value(&idle).unwrap()["micGain"], Value::Null);
 }
 
 // ---- 和真的录音程序一起跑 ----
@@ -2878,13 +2980,14 @@ async fn real_helper_records_and_uploads() {
         .await
         .unwrap();
     assert!(state.error.is_none(), "{state:?}");
-    // 没要回声消除：录音程序在 started 里报 off
+    // 没要回声消除：录音程序在 started 里报 off；麦克风自动增益默认开着，报 auto（读文件时文件当成麦克风，照样调）
     assert_eq!(
         state.echo.as_ref().map(|e| e.mode),
         Some(EchoMode::Off),
         "{:?}",
         state.echo
     );
+    assert_eq!(state.mic_gain, Some(MicGainMode::Auto));
     // 文件尽快读完，录音程序自己结束（和点了结束一样）：传完以后告诉服务器开始处理
     wait_for(&recorder, "传完", |s| {
         upload_is(s, "m1", UploadStatus::Completed)

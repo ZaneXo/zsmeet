@@ -59,7 +59,7 @@ private func highPass(_ input: [Float], frequency: Double) -> [Float] {
     return biquad(input, [(1 + c) / 2 / a0, -(1 + c) / a0, (1 + c) / 2 / a0, -2 * c / a0, (1 - alpha) / a0])
 }
 
-private func whiteNoise(_ count: Int, seed: UInt64) -> [Float] {
+func whiteNoise(_ count: Int, seed: UInt64) -> [Float] {
     var random = SplitMix(seed: seed)
     var noise = [Float](repeating: 0, count: count)
     noise.withUnsafeMutableBufferPointer { buffer in
@@ -70,7 +70,7 @@ private func whiteNoise(_ count: Int, seed: UInt64) -> [Float] {
     return noise
 }
 
-private func add(_ a: [Float], _ b: [Float], scale: Float = 1) -> [Float] {
+func add(_ a: [Float], _ b: [Float], scale: Float = 1) -> [Float] {
     var out = a
     var s = scale
     vDSP_vsma(b, 1, &s, a, 1, &out, 1, vDSP_Length(min(a.count, b.count)))
@@ -83,7 +83,7 @@ private func multiply(_ a: [Float], _ b: [Float]) -> [Float] {
     return out
 }
 
-private func scaled(_ a: [Float], _ factor: Float) -> [Float] {
+func scaled(_ a: [Float], _ factor: Float) -> [Float] {
     var out = [Float](repeating: 0, count: a.count)
     var f = factor
     vDSP_vsmul(a, 1, &f, &out, 1, vDSP_Length(a.count))
@@ -102,7 +102,7 @@ func energy(_ a: ArraySlice<Float>) -> Double {
 /// 停 0.3 到 1 秒，只在 active 的时间段里说。浊音是声带的脉冲（音高 pitch 上下浮动、每个音节里滑一点）经过
 /// 两个共振峰，再加一点气声。一直不停的噪声 AEC3 会当成背景噪声；两个人的声音要有不同的音高、共振峰，
 /// 像真的两个人，AEC3 才分得出哪边在说话
-private func speechLike(seconds: Double, seed: UInt64, rms: Float, active: [Range<Double>], formants: (Double, Double),
+func speechLike(seconds: Double, seed: UInt64, rms: Float, active: [Range<Double>], formants: (Double, Double),
                         pitch: Double) -> [Float] {
     let count = Int(seconds * rate)
     var pulses = [Float](repeating: 0, count: count)

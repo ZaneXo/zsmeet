@@ -2,7 +2,7 @@ import Foundation
 
 /// 回声消除这一步。LiveEngine 里，每一路转成 48 kHz 以后、按时间混音（TimeMixer）之前：
 ///
-///     麦克风 → Resampler → EchoStage（AEC3）→ 麦克风那一路 → TimeMixer
+///     麦克风 → Resampler → EchoStage（AEC3）→ MicGainStage（自动增益，开着时）→ 麦克风那一路 → TimeMixer
 ///     电脑声音 → Resampler → 电脑声音那一路（不动）→ TimeMixer
 ///                         └→ 复制一份给 EchoStage 当参考
 ///
@@ -116,6 +116,13 @@ final class EchoStage {
 
     /// 接下来这么多个处理好的采样不要：暂停时已经先交出了原声；继续时是暂停期间采到的
     private(set) var skipOutput = 0
+    /// emit 下一次交的第一个采样是麦克风的第几个采样（从这一路的第一个采样算起，要跳过的也算）。交出去的和送进来的
+    /// 一个对一个、顺序不变（做没做回声消除都一样），所以它一直是 micHead - shadow.count
+    private var emitted: Int64 = 0
+    /// 交给麦克风那一路的采样，最后一个之后是麦克风的第几个采样。暂停期间采到的、点继续时不要的那些（discardHeld）
+    /// 不交，序号在那里跳过去；别的都是接着的，一次调用交出去的是连着的一段。后面的自动增益（MicGainStage）
+    /// 靠它找到换麦克风的地方
+    private(set) var deliveredEnd: Int64 = 0
     /// AEC3 处理过的声音晚 latency 个采样。最近送进去的 latency 个麦克风原声在这里留一份：
     /// 不做回声消除的帧先交出它们，再交这一帧的前 480 - latency 个，自己留下最后 latency 个。
     /// 这样不管做不做，交出去的声音都晚 latency 个采样，开、关切换、出错、结束时不多不少、一个不重
@@ -267,6 +274,7 @@ final class EchoStage {
         }
         // 调试用的录音（--aec-dump）这里不写：之后处理出来、跳过的那一份照样写（见 emit），一个采样对一个采样
         skipOutput = total
+        deliveredEnd = emitted + Int64(total)
     }
 
     /// 继续：现在压着的都是点继续之前采到的（暂停期间的），处理完不要
@@ -516,6 +524,7 @@ final class EchoStage {
     private func emit(_ samples: ArraySlice<Float>, into lane: inout SampleFIFO) {
         guard !samples.isEmpty else { return }
         dump?.writeOutput(samples)
+        emitted += Int64(samples.count)
         var start = samples.startIndex
         if skipOutput > 0 {
             let skipped = min(skipOutput, samples.count)
@@ -524,6 +533,7 @@ final class EchoStage {
         }
         guard start < samples.endIndex else { return }
         lane.append(samples[start...])
+        deliveredEnd = emitted
     }
 
     /// 参考里 end 之前的采样不会再用了（留 20 毫秒，补采样、往回对齐时要用），丢掉

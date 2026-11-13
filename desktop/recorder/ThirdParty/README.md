@@ -1,6 +1,8 @@
-# 第三方代码：WebRTC 音频处理（回声消除用）
+# 第三方代码：WebRTC 音频处理（回声消除、麦克风自动增益用）
 
-录音小程序的回声消除（见 `docs/desktop.md` 的「回声消除」）用的是 WebRTC 的 AEC3。这个目录放着编译它要用到的源码：
+录音小程序的回声消除（见 `docs/desktop.md` 的「回声消除」）用的是 WebRTC 的 AEC3，麦克风自动增益（「麦克风自动增益」）
+用的是 WebRTC 的 AGC2（自适应的数字增益、RNN VAD 和限幅器，在 `modules/audio_processing/agc2/` 下，本来就和 AEC3
+一起编进 `libwebrtc_audio_processing`，不用另外挑文件）。这个目录放着编译它们要用到的源码：
 从官方发布的源码包里原样挑出来，**没有改过任何一个文件（没有本地补丁）**。
 
 | | 版本 | 下载地址 | SHA-256（核对过） | 许可证 |
@@ -40,7 +42,7 @@ WebRTC 用不到哈希容器，那些文件也没挑进来，挑进来的文件�
 
 1. 把源码包里的 `webrtc/`、`absl/` 整个拷过来。
 2. 用 `clang -MM`（只做预处理：不编译，不用 meson，也不运行源码包里的任何脚本）找出 `webrtc-sources.txt` 里的源文件
-   和 `Sources/CRecorder/zr_aec.cc` 在 Apple 芯片、Intel 上用到的全部头文件，参数和编译时一样（`webrtc-flags.sh`）。
+   和 `Sources/CRecorder/zr_aec.cc`、`zr_agc.cc` 在 Apple 芯片、Intel 上用到的全部头文件，参数和编译时一样（`webrtc-flags.sh`）。
 3. 只留下这些源文件、头文件和上面的许可证文件，别的都删掉（挑完约 5 MB）。
 4. 上面这些都在这个目录下的一个临时目录里做，都没问题了才换掉原来的 `webrtc-audio-processing/`、`abseil-cpp/`；
    中途出错（比如 `clang -MM` 没通过）就停下、说明原因，原来的文件一个不动。macOS 自带的 bash 3.2 就能运行它。
@@ -60,6 +62,7 @@ WebRTC 用不到哈希容器，那些文件也没挑进来，挑进来的文件�
 2. 照新版本的 `meson.build` 更新 `webrtc-sources.txt`、`webrtc-flags.sh`。
 3. `desktop/recorder/ThirdParty/prune.sh <解开的 webrtc-audio-processing 目录> <解开的 abseil-cpp 目录>`
 4. 改这个文件里的版本、地址、SHA-256，`THIRD_PARTY_NOTICES` 里的许可证原文也换成新的。
-5. `desktop/recorder/test.sh`：回声消除的测试都要过（消掉了多少 dB、这边说的话保留得怎么样、处理的延迟是不是还是
-   `ZR_AEC_LATENCY` 个采样），把测得的数和 `Tests/recorder-tests/EchoQualityTests.swift` 里记的比一比（门槛是按
-   2.1 量到的定的）。WebRTC 的 C++ 接口没有稳定的承诺，`Sources/CRecorder/zr_aec.cc` 可能要跟着改。
+5. `desktop/recorder/test.sh`：回声消除、自动增益的测试都要过（消掉了多少 dB、这边说的话保留得怎么样、处理的延迟是不是
+   还是 `ZR_AEC_LATENCY` 个采样；小声的说话调到了多大、底噪有没有被调大、会不会碰顶），把测得的数和
+   `Tests/recorder-tests/EchoQualityTests.swift`、`MicGainTests.swift` 里记的比一比（门槛是按 2.1 量到的定的）。
+   WebRTC 的 C++ 接口没有稳定的承诺，`Sources/CRecorder/zr_aec.cc`、`zr_agc.cc` 可能要跟着改。

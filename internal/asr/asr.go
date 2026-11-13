@@ -30,8 +30,36 @@ type Engine struct {
 	extractor *sherpa.SpeakerEmbeddingExtractor
 }
 
+// Params 是语音检测和区分说话人的参数。后台处理用 DefaultParams，zsmeet transcribe 可以换别的值来比较。
+type Params struct {
+	// 语音检测：每一小段（32 毫秒）是人声的概率超过 VADThreshold 算有人在说话；
+	// 安静 MinSilence 秒算这句话说完了，短于 MinSpeech 秒的不要，长于 MaxSpeech 秒的强行切开（单位都是秒）
+	VADThreshold, MinSilence, MinSpeech, MaxSpeech float32
+	// 区分说话人时聚类的阈值：越小分出的人越多
+	ClusterThreshold float32
+}
+
+// DefaultParams 是后台处理用的参数。
+func DefaultParams() Params {
+	return Params{
+		VADThreshold: 0.5,
+		MinSilence:   0.3,
+		MinSpeech:    0.25,
+		// 一句话最长 10 秒，再长就强行切开，识别模型在短句上更准
+		MaxSpeech: 10,
+		// 库的默认值 0.5 会把同一个人拆成两个，0.6 是在测试录音上刚好不拆的值；
+		// 还需要用真实的多人会议再校准（zsmeet transcribe 的 -cluster 可以一次比较几个值）
+		ClusterThreshold: 0.6,
+	}
+}
+
 // Load 加载模型。threads 是识别用的 CPU 线程数，language 是识别的语言（见 config.Config.ASRLanguage）。
 func Load(p models.Paths, threads int, language string) (*Engine, error) {
+	return LoadWith(p, threads, language, DefaultParams())
+}
+
+// LoadWith 和 Load 一样，只是语音检测和区分说话人用指定的参数。
+func LoadWith(p models.Paths, threads int, language string, params Params) (*Engine, error) {
 	e := &Engine{}
 
 	rc := sherpa.OfflineRecognizerConfig{}
@@ -60,9 +88,7 @@ func Load(p models.Paths, threads int, language string) (*Engine, error) {
 	dc.Embedding.Provider = "cpu"
 	// 不知道有几个人，按声音相似度的阈值自动聚类
 	dc.Clustering.NumClusters = -1
-	// 阈值越小分出的人越多。库的默认值 0.5 会把同一个人拆成两个，0.6 是在测试录音上刚好不拆的值；
-	// 还需要用真实的多人会议再校准
-	dc.Clustering.Threshold = 0.6
+	dc.Clustering.Threshold = params.ClusterThreshold
 	dc.MinDurationOn = 0.3
 	dc.MinDurationOff = 0.5
 	if e.diarizer = sherpa.NewOfflineSpeakerDiarization(&dc); e.diarizer == nil {
@@ -75,12 +101,11 @@ func Load(p models.Paths, threads int, language string) (*Engine, error) {
 	e.embedding = sherpa.SpeakerEmbeddingExtractorConfig{Model: p.Embedding(), NumThreads: threads, Provider: "cpu"}
 
 	e.vad.SileroVad.Model = p.VAD()
-	e.vad.SileroVad.Threshold = 0.5
-	e.vad.SileroVad.MinSilenceDuration = 0.3
-	e.vad.SileroVad.MinSpeechDuration = 0.25
+	e.vad.SileroVad.Threshold = params.VADThreshold
+	e.vad.SileroVad.MinSilenceDuration = params.MinSilence
+	e.vad.SileroVad.MinSpeechDuration = params.MinSpeech
 	e.vad.SileroVad.WindowSize = vadWindow
-	// 一句话最长 10 秒，再长就强行切开，识别模型在短句上更准
-	e.vad.SileroVad.MaxSpeechDuration = 10
+	e.vad.SileroVad.MaxSpeechDuration = params.MaxSpeech
 	e.vad.SampleRate = audio.SampleRate
 	e.vad.NumThreads = 1
 	e.vad.Provider = "cpu"
@@ -144,6 +169,15 @@ func (e *Engine) recognize(samples []float32, start, end float64) []transcript.S
 		return []transcript.Segment{{Start: start, End: end, Speaker: -1, Text: text}}
 	}
 	return nil
+}
+
+// SetClusterThreshold 换掉区分说话人的聚类阈值（见 Params.ClusterThreshold），之后的 Diarize 都用它。
+// 不用重新加载模型，用来比较几个阈值分出的人数。
+func (e *Engine) SetClusterThreshold(threshold float32) {
+	cfg := sherpa.OfflineSpeakerDiarizationConfig{}
+	cfg.Clustering.NumClusters = -1
+	cfg.Clustering.Threshold = threshold
+	e.diarizer.SetConfig(&cfg)
 }
 
 // Diarize 找出每个人说话的时间段。这一步是一次不能中断的长计算。

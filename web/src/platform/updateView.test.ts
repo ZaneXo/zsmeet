@@ -36,6 +36,7 @@ function state(patch: Partial<RecorderState> = {}): RecorderState {
     error: null,
     uploads: [],
     echo: null,
+    micGain: null,
     ...patch,
   };
 }

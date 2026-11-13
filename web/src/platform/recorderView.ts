@@ -2,7 +2,7 @@
 // 不依赖 React 和 Tauri，方便单独测试（recorderView.test.ts）。
 // 引用别的文件里的值要带 .ts 后缀：测试用 Node 直接跑，它不会自己补后缀
 import { DESKTOP_CHUNK_MS } from "../lib/unfinishedRecording.ts";
-import type { EchoMode, Microphone, RecorderEcho, RecorderState, RecorderStatus, RecorderUpload, RecorderWarning } from "./recorder";
+import type { EchoMode, MicGainMode, Microphone, RecorderEcho, RecorderState, RecorderStatus, RecorderUpload, RecorderWarning } from "./recorder";
 
 /**
  * 整理 Rust 推过来的状态：缺了的字段用默认值补上。Rust 那边和界面的版本对不上时（比如省掉了空的列表），
@@ -23,7 +23,15 @@ export function normalizeState(raw: Partial<RecorderState> | null | undefined): 
     error: s.error ?? null,
     uploads: s.uploads ?? [],
     echo: normalizeEcho(s.echo),
+    micGain: normalizeMicGain(s.micGain),
   };
+}
+
+const MIC_GAIN_MODES: readonly string[] = ["off", "auto", "unavailable"] satisfies MicGainMode[];
+
+/** 麦克风自动增益的模式：认不出来的（以后的录音程序可能会加）、没报的当成没报（null）。 */
+function normalizeMicGain(raw: unknown): MicGainMode | null {
+  return typeof raw === "string" && MIC_GAIN_MODES.includes(raw) ? (raw as MicGainMode) : null;
 }
 
 const ECHO_MODES: readonly string[] = ["off", "auto", "on", "unavailable"] satisfies EchoMode[];
@@ -191,6 +199,75 @@ export function echoLabel(state: RecorderState): EchoLabel | null {
     default:
       return { text: "回声消除：没开", tone: "mute" };
   }
+}
+
+// ---- 麦克风自动增益（docs/desktop.md 的「麦克风自动增益」） ----
+
+/**
+ * 录音中「麦克风」那一项后面的说明：录音程序要自动调麦克风的音量却没能打开（unavailable）时说一声，录的是原来的声音，
+ * 可能会很小。在调（auto）、不调（off）、不录麦克风、录音程序没报（旧版本）时不显示，是 null。
+ */
+export function micGainLabel(state: RecorderState): string | null {
+  return state.micGain === "unavailable" && state.mic !== null ? "自动调音量没能打开，录的是原来的音量" : null;
+}
+
+/** 看最近多长时间（录到的秒数，不算暂停）的麦克风音量。 */
+export const QUIET_MIC_WINDOW = 20;
+/**
+ * 这段时间里最响的 0.1 秒都比它小（dBFS）就算太小。说话的声音调大以后一般在 -25 到 -15 dBFS（最响的 0.1 秒），
+ * 调大了还不到 -35，说话的人离得太远，或者系统设置里的输入音量太小，服务器的转写会漏掉一些话。
+ */
+export const QUIET_MIC_DB = -35;
+/** 最响的比最轻的大这么多（dB）才算有声音（有人在说话）。一直差不多大（只有底噪、没人说话、戴着耳机在听）时不提示。 */
+export const QUIET_MIC_ACTIVITY_DB = 10;
+
+/** 音量（0 到 1）换成 dBFS：和录音程序算音量的方法一样（LevelMeter），-60 dBFS 以下都是 0，0 dBFS 是 1。 */
+export function levelToDb(level: number): number {
+  return Math.min(1, Math.max(0, level)) * 60 - 60;
+}
+
+/** 最近的麦克风音量（每 0.1 秒一个），记着是哪场录音、哪个麦克风的。 */
+export type MicLevels = Readonly<{ meetingId: string | null; mic: string | null; samples: readonly Readonly<{ at: number; db: number }>[] }>;
+
+export const NO_MIC_LEVELS: MicLevels = { meetingId: null, mic: null, samples: [] };
+
+/**
+ * 收到 Rust 推过来的状态时记下麦克风的音量，只留最近 QUIET_MIC_WINDOW 秒（按录到的秒数算，不算暂停）。
+ * 秒数没往前走的（只是上传情况变了）不记；暂停着的原样留着；换了一场录音、换了麦克风（mic_changed）、
+ * 秒数往回走了时从头记；没在录、不录麦克风、还没有音量时清掉。
+ */
+export function trackMicLevels(prev: MicLevels, s: RecorderState): MicLevels {
+  if (s.status === "paused" && s.meetingId === prev.meetingId && s.mic === prev.mic) return prev;
+  if (s.status !== "recording" || s.meetingId === null || s.mic === null || s.level === null) return NO_MIC_LEVELS;
+  const same = s.meetingId === prev.meetingId && s.mic === prev.mic;
+  const last = same ? prev.samples[prev.samples.length - 1] : undefined;
+  if (last && s.seconds === last.at) return prev;
+  const kept = same && last && s.seconds > last.at ? prev.samples.filter((x) => x.at > s.seconds - QUIET_MIC_WINDOW) : [];
+  return { meetingId: s.meetingId, mic: s.mic, samples: [...kept, { at: s.seconds, db: levelToDb(s.level.mic) }] };
+}
+
+/**
+ * 麦克风的声音一直很小：记满了 QUIET_MIC_WINDOW 秒，这段时间里最响的 0.1 秒也比 QUIET_MIC_DB 小，
+ * 又不是一直一样小（最响的比最轻的大 QUIET_MIC_ACTIVITY_DB 以上，有人在说话）。音量是录音程序调过以后的
+ * （自动增益在混音之前），调大了还这么小才提示；说话声一变大，马上就不提示了。
+ */
+export function micTooQuiet(levels: MicLevels): boolean {
+  const first = levels.samples[0];
+  const last = levels.samples[levels.samples.length - 1];
+  if (!first || !last || last.at - first.at < QUIET_MIC_WINDOW - 1) return false;
+  let loudest = -Infinity;
+  let quietest = Infinity;
+  for (const x of levels.samples) {
+    loudest = Math.max(loudest, x.db);
+    quietest = Math.min(quietest, x.db);
+  }
+  return loudest < QUIET_MIC_DB && loudest - quietest >= QUIET_MIC_ACTIVITY_DB;
+}
+
+/** 麦克风的声音一直很小时，录音页上的提示：怎么办。自动调大过了（auto）的话也说一声，免得以为还能自己变大。 */
+export function quietMicHint(micGain: MicGainMode | null): string {
+  const tried = micGain === "auto" ? "，自动调大了也还不够" : "";
+  return `麦克风录到的声音一直很小${tried}，转写可能会漏掉一些话。把电脑挪到离说话的人近一些的地方，或者在「系统设置 → 声音 → 输入」里把输入音量调大。`;
 }
 
 // ---- 录音中 ----

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -139,6 +140,46 @@ func TestDesktopRecordingSingleChunk(t *testing.T) {
 	e.checkRecognized(audiotest.Seconds(t, stream))
 }
 
+// 没开自动增益的麦克风录的会（人离麦克风远，比正常说话小 20 dB）：交给识别的声音调到了正常说话的音量，
+// 回放用的录音也调响了一些；重新转写时（从存好的回放录音解码）交给识别的声音也一样调好了。
+func TestDesktopQuietRecordingIsRaised(t *testing.T) {
+	e := newEnv(t)
+	ctx := t.Context()
+	stream := audiotest.Speech(t, -20)
+	done := e.processDesktop(audiotest.Split(t, stream, 10))
+	if done.Status != "done" {
+		t.Fatalf("应该处理完成，状态 %s，错误 %q", done.Status, done.Error)
+	}
+	e.checkRecognized(audiotest.Seconds(t, stream))
+
+	in := filepath.Join(t.TempDir(), "quiet.aac")
+	if err := os.WriteFile(in, stream, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	level := func(samples []float32) float64 { return audiotest.SpeechLevel(samples, audio.SampleRate) }
+	original, playback := level(decode(t, in)), level(decode(t, e.w.store.Path(done.AudioKey)))
+	heard := level(*e.engine.heard.Load())
+	t.Logf("说话的音量：录的 %.1f dBFS，交给识别的 %.1f dBFS，回放的 %.1f dBFS", original, heard, playback)
+	if heard < -24 || heard > -12 {
+		t.Errorf("交给识别的声音里说话的音量应该在 -24 到 -12 dBFS 之间，实际 %.1f dBFS（录的是 %.1f）", heard, original)
+	}
+	if playback < original+8 {
+		t.Errorf("回放的录音应该调响至少 8 dB：录的 %.1f dBFS，回放的 %.1f dBFS", original, playback)
+	}
+
+	// 重新转写：从存好的回放录音解出来，照样调到正常说话的音量
+	args := e.enqueue(done.ID, "done")
+	if err := e.q.MarkRetranscribe(ctx, done.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	if again := level(*e.engine.heard.Load()); again < -24 || again > -12 {
+		t.Errorf("重新转写时交给识别的声音里说话的音量应该在 -24 到 -12 dBFS 之间，实际 %.1f dBFS", again)
+	}
+}
+
 // svc 返回和接口用的同一套业务层：上传分片、标记、上传完成都经过它，和 App 调接口时一样。
 func (e *env) svc() *service.Service {
 	return service.New(e.pool, e.w.store, e.w.settings, e.w.queue)
@@ -189,11 +230,11 @@ func (e *env) checkRecognized(want float64) {
 	}
 }
 
-// decode 把回放用的录音解成识别用的 16k PCM。
+// decode 把录音原样（不做送去识别之前的音量处理）解成 16k 单声道的 PCM，用来检查录音本身。
 func decode(t *testing.T, path string) []float32 {
 	t.Helper()
 	pcm := filepath.Join(t.TempDir(), "playback.f32")
-	if err := audio.Decode(t.Context(), path, pcm); err != nil {
+	if err := audio.DecodeWith(t.Context(), path, pcm, ""); err != nil {
 		t.Fatalf("回放用的录音解不开：%v", err)
 	}
 	samples, err := audio.ReadPCM(pcm)

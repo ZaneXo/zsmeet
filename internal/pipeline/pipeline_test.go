@@ -38,6 +38,8 @@ import (
 type fakeEngine struct {
 	transcribed atomic.Int32
 	samples     atomic.Int64
+	// 最后一次转写时收到的声音
+	heard atomic.Pointer[[]float32]
 
 	// 算声纹时每位说话人（转写里的编号）返回的声音特征，没有的不返回
 	voices   map[int][]float32
@@ -53,6 +55,7 @@ type fakeEngine struct {
 func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
 	e.transcribed.Add(1)
 	e.samples.Store(int64(len(samples)))
+	e.heard.Store(&samples)
 	progress(1)
 	if e.segs != nil {
 		return e.segs, nil

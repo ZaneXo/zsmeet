@@ -2,7 +2,7 @@ package asr
 
 import (
 	"context"
-	"errors"
+	"fmt"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
@@ -78,7 +78,7 @@ func (e *Engine) SetSpeakerModel(path string) error {
 	cfg.Model = path
 	x := sherpa.NewSpeakerEmbeddingExtractor(&cfg)
 	if x == nil {
-		return errors.New("区分说话人的模型加载失败：" + path)
+		return fmt.Errorf("区分说话人的模型 %s 加载失败：请确认文件存在、可以读取，而且是 sherpa-onnx 能用的说话人声纹模型（.onnx）", path)
 	}
 	sherpa.DeleteSpeakerEmbeddingExtractor(e.diarizer)
 	e.diarizer, e.diarizerModel = x, cfg

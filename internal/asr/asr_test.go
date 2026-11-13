@@ -185,3 +185,13 @@ func TestPickTurns(t *testing.T) {
 		}
 	}
 }
+
+// 模型加载失败时告诉管理员是哪个文件、怎么恢复（删掉以后重启后台处理会重新下载），不只是「加载失败」。
+func TestModelError(t *testing.T) {
+	msg := modelError("区分说话人的模型", "/models/speaker-diarization.onnx").Error()
+	for _, want := range []string{"区分说话人的模型加载失败", "speaker-diarization.onnx", "删掉", "docker compose restart worker", "重新下载"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("说明里应该有「%s」：%s", want, msg)
+		}
+	}
+}

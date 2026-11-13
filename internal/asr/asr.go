@@ -5,7 +5,8 @@ package asr
 import (
 	"cmp"
 	"context"
-	"errors"
+	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -74,12 +75,12 @@ func LoadWith(p models.Paths, threads int, language string, params Params) (*Eng
 	rc.ModelConfig.Provider = "cpu"
 	rc.DecodingMethod = "greedy_search"
 	if e.recognizer = sherpa.NewOfflineRecognizer(&rc); e.recognizer == nil {
-		return nil, errors.New("识别模型加载失败")
+		return nil, modelError("识别模型", p.SenseVoice())
 	}
 
 	e.diarizerModel = sherpa.SpeakerEmbeddingExtractorConfig{Model: p.Diarization(), NumThreads: threads, Provider: "cpu"}
 	if e.diarizer = sherpa.NewSpeakerEmbeddingExtractor(&e.diarizerModel); e.diarizer == nil {
-		return nil, errors.New("区分说话人的模型加载失败")
+		return nil, modelError("区分说话人的模型", p.Diarization())
 	}
 	e.embedding = sherpa.SpeakerEmbeddingExtractorConfig{Model: p.Embedding(), NumThreads: threads, Provider: "cpu"}
 
@@ -93,6 +94,14 @@ func LoadWith(p models.Paths, threads int, language string, params Params) (*Eng
 	e.vad.NumThreads = 1
 	e.vad.Provider = "cpu"
 	return e, nil
+}
+
+// modelError 是模型加载失败时给用户看的说明。模型下载时校验过，加载失败多半是文件后来坏了；
+// 检查模型时只看文件在不在、大小对不对，所以要删掉它才会重新下载。
+func modelError(what, path string) error {
+	return fmt.Errorf("%s加载失败，模型文件 %s 可能坏了。请管理员删掉模型目录（ZSMEET_MODELS_DIR，"+
+		"docker compose 部署的是 models 数据卷）里的这个文件，再重启后台处理（docker compose restart worker），它会自动重新下载",
+		what, filepath.Base(path))
 }
 
 // Silero VAD 在 16k 采样率下固定每次吃 512 个采样
@@ -116,7 +125,7 @@ func (e *Engine) Transcribe(ctx context.Context, samples []float32, progress fun
 func (e *Engine) detectSpeech(ctx context.Context, samples []float32, progress func(float64), each func(start int, speech []float32)) error {
 	vad := sherpa.NewVoiceActivityDetector(&e.vad, 30)
 	if vad == nil {
-		return errors.New("语音检测模型加载失败")
+		return modelError("语音检测模型", e.vad.SileroVad.Model)
 	}
 	defer sherpa.DeleteVoiceActivityDetector(vad)
 
@@ -180,7 +189,7 @@ func (e *Engine) Embed(samples []float32, turns []transcript.Turn) (map[int]voic
 	}
 	if e.extractor == nil {
 		if e.extractor = sherpa.NewSpeakerEmbeddingExtractor(&e.embedding); e.extractor == nil {
-			return nil, errors.New("声纹模型加载失败")
+			return nil, modelError("声纹模型", e.embedding.Model)
 		}
 	}
 	out := make(map[int]voiceprint.Voice, len(picked))

@@ -2,9 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Middleware } from "openapi-fetch";
 import { useSyncExternalStore } from "react";
-import { noteResponse } from "./offline";
-import { SSEParser } from "./sse";
+// 引用别的文件里的值要带 .ts 后缀：updater.test.ts 用 Node 直接跑 startDesktop，它不会自己补后缀
+import { noteResponse } from "./offline.ts";
+import { SSEParser } from "./sse.ts";
 import type { SSEEvent } from "./sse";
+import { startUpdater } from "./updater.ts";
 
 /**
  * 桌面版和 Rust 那边（desktop/src-tauri）打交道的地方。
@@ -71,9 +73,12 @@ export function onIdentityChange(listener: () => void) {
 
 let started: Promise<void> | undefined;
 
-/** 启动：订阅 Rust 推过来的状态，取一次当前状态，接管站外链接。 */
+/** 启动：订阅 Rust 推过来的状态和自动更新的消息，取一次当前状态，接管站外链接。 */
 export function startDesktop(): Promise<void> {
   started ??= (async () => {
+    // 自动更新的消息最先订阅：App 打开 10 秒左右查到的新版本只推这一次，Tauri 不替还没订阅的界面留着，
+    // 那时可能还没有显示更新的界面（还在「正在启动」、连服务器、出错的画面上）。见 updater.ts
+    await startUpdater();
     await listen<DesktopState>("zsmeet://state", (e) => setState(e.payload));
     await listen<string>("zsmeet://login-error", (e) => setLoginError(e.payload));
     setState(await invoke<DesktopState>("app_state"));

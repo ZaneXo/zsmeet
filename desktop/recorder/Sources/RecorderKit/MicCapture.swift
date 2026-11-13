@@ -12,6 +12,8 @@ final class MicCapture: CaptureSource {
     var onLost: (() -> Void)?
 
     private let device: AudioObjectID
+    /// 录的是哪个设备（回声消除判断输出是不是同一个设备，也就是耳麦）
+    var deviceID: AudioObjectID { device }
     /// 保护 rate（监听线程写、处理线程读）
     private let lock = NSLock()
     private var rate: Double

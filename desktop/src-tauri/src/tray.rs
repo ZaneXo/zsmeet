@@ -228,6 +228,7 @@ mod tests {
             level: None,
             mic: None,
             system: true,
+            echo: None,
             marks: vec![],
             warnings: vec![],
             error: None,

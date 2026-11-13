@@ -17,7 +17,8 @@ enum Harness {
     /// 在测断言本身（countFailures）：没通过的地方不打印
     private static var muted = false
 
-    /// 只跑名字里有这几个字的测试，不设就全跑：ZSMEET_RECORDER_TEST_FILTER=暂停 desktop/recorder/test.sh
+    /// 只跑名字里有这几个字的测试，不设就全跑：ZSMEET_RECORDER_TEST_FILTER=暂停 desktop/recorder/test.sh。
+    /// 用「|」隔开几个，名字里有其中一个就跑
     static let filterVariable = "ZSMEET_RECORDER_TEST_FILTER"
     static let filter = ProcessInfo.processInfo.environment[filterVariable] ?? ""
     /// 设成 1 时，一个测试都没选中也算通过。只给故意一个都不跑的时候用（测试框架自己的测试会这样再启动一次）
@@ -25,7 +26,8 @@ enum Harness {
     private static let allowEmpty = ProcessInfo.processInfo.environment[allowEmptyVariable] == "1"
 
     static func run(_ tests: [(String, () throws -> Void)]) -> Outcome {
-        let selected = tests.filter { filter.isEmpty || $0.0.contains(filter) }
+        let words = filter.split(separator: "|").map(String.init).filter { !$0.isEmpty }
+        let selected = tests.filter { test in words.isEmpty || words.contains { test.0.contains($0) } }
         if selected.isEmpty && !allowEmpty {
             return .nothingSelected
         }

@@ -291,9 +291,9 @@ final class FakeSource: CaptureSource {
     let silenceWarning: String?
     private(set) var stopped = false
 
-    init(kind: SourceKind, sampleRate: Double = 48_000, silenceWarning: String? = nil) {
+    init(kind: SourceKind, sampleRate: Double = 48_000, silenceWarning: String? = nil, name: String? = nil) {
         self.kind = kind
-        name = kind == .mic ? "测试麦克风" : "测试电脑声音"
+        self.name = name ?? (kind == .mic ? "测试麦克风" : "测试电脑声音")
         ring = zr_ring_create(1 << 18, 1)!
         self.sampleRate = sampleRate
         self.silenceWarning = silenceWarning
@@ -312,6 +312,11 @@ final class FakeSource: CaptureSource {
     func push(_ count: Int, value: Float = 0.1) {
         let samples = [Float](repeating: value, count: count)
         _ = samples.withUnsafeBufferPointer { zr_ring_write(ring, $0.baseAddress!, count) }
+    }
+
+    /// 和 IOProc 一样带着时间戳写：这一批第一个采样是在 nanoseconds 采到的
+    func push(_ samples: [Float], at nanoseconds: UInt64) {
+        _ = samples.withUnsafeBufferPointer { zr_ring_write_stamped(ring, $0.baseAddress!, $0.count, nanoseconds) }
     }
 }
 

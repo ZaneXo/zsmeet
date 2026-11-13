@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::Instant;
 
 use crate::core::{Account, Core};
-pub use helper::{locate as locate_helper, Devices};
+pub use helper::{locate as locate_helper, Devices, EchoCancel, EchoMode};
 use helper::{Command, Event, RecordArgs};
 use local::{Recording, Status};
 use upload::Outcome;
@@ -81,6 +81,7 @@ const MAX_REACHED: &str =
 const RELOGIN: &str = "登录已失效，重新登录这个账号后会自动接着传";
 const NOT_SAVED: &str = "这台电脑上存不下录音的记录了，请检查磁盘空间。空出来以后会自动接着传";
 const PROCESSED_ELSEWHERE: &str = "这场会议已经在别处开始处理了，用的是服务器当时收到的录音，这台电脑上录的可能有一部分不在里面。这台电脑上的录音没有删，确认会议的录音完整以后可以删掉";
+const UPDATING: &str = "正在安装 zsmeet 的新版本，装好以后会自动重新打开，请稍等一下再开始录音";
 
 /// 发给界面和菜单栏的录音状态（事件 recorder://state，命令的返回值）。
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -99,6 +100,8 @@ pub struct RecorderState {
     pub mic: Option<String>,
     /// 在录电脑的声音
     pub system: bool,
+    /// 回声消除的情况。没在录、录音程序还没开始录（或者是不报这个的旧版本）时是 null
+    pub echo: Option<Echo>,
     pub marks: Vec<f64>,
     /// 有一路声音录不了的提醒（没有权限、设备不在），另一路照常录。同一个 code 说的事不一样时都留着。
     /// 没能开始录音时是录音程序给的提醒，说明为什么开始不了，下次开始录音时清掉
@@ -107,6 +110,52 @@ pub struct RecorderState {
     pub error: Option<String>,
     /// 当前登录的账号在这台电脑上的录音和上传进度，按开始录音的时间排
     pub uploads: Vec<Upload>,
+}
+
+impl RecorderState {
+    /// 装好新版本要重启 App，现在不行的话返回给用户看的原因：正在录音（包括正在开始、正在结束），或者当前账号
+    /// 还有录音没传完（边录边传、在传、暂时传不上去在等着再试、在告诉服务器传完了）。重启不会丢录音，
+    /// 但会打断录音和上传。中断了、传不上去了的录音要等用户处理，可能一直放着，不算。
+    pub fn update_blocker(&self) -> Option<String> {
+        match self.status {
+            Phase::Idle => {}
+            Phase::Stopping => {
+                return Some("录音正在结束。等录好的都传完以后再更新".into());
+            }
+            Phase::Starting | Phase::Recording | Phase::Paused => {
+                return Some("正在录音。结束录音、等录好的都传完以后再更新".into());
+            }
+        }
+        let pending = self
+            .uploads
+            .iter()
+            .filter(|u| {
+                matches!(
+                    u.status,
+                    UploadStatus::Recording
+                        | UploadStatus::Uploading
+                        | UploadStatus::Waiting
+                        | UploadStatus::Completing
+                )
+            })
+            .count();
+        // 暂时传不上去的（断网、连不上服务器）要人去看一眼网络，不然一直等不到传完。
+        // 说法和界面上的一样（web/src/platform/updateView.ts 的 updateBlocker）
+        let waiting = self
+            .uploads
+            .iter()
+            .filter(|u| u.status == UploadStatus::Waiting)
+            .count();
+        let stuck = match (pending, waiting) {
+            (0, _) => return None,
+            (n, 0) => return Some(format!("还有 {n} 段录音没传完。传完以后再更新")),
+            (n, w) if w == n => format!("还有 {n} 段录音暂时传不上去"),
+            (n, w) => format!("还有 {n} 段录音没传完，其中 {w} 段暂时传不上去"),
+        };
+        Some(format!(
+            "{stuck}，在等着自动再试。请检查网络和服务器，传完以后再更新"
+        ))
+    }
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +174,18 @@ pub enum Phase {
 pub struct Level {
     pub mic: f64,
     pub system: f64,
+}
+
+/// 回声消除：用户选的模式，现在实际开没开、为什么。
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Echo {
+    /// 录音程序开始录时报的模式（off、auto、on；要的模式没能打开是 unavailable）
+    pub mode: EchoMode,
+    /// 现在正在消除回声
+    pub active: bool,
+    /// 录音程序说的原因：speakers（外放）、headphones（耳机）、airplay、no_reference（没在录电脑的声音）、
+    /// forced（要求一直开着）、off。录音程序还没说过时是 null
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -232,6 +293,8 @@ struct Inner {
     start_warnings: Vec<Warning>,
     /// 最近一个没开始录就退出的录音程序：会话编号和原因，开始录音的命令据此报错
     ended: Option<(u64, String)>,
+    /// 正在安装新版本、马上要重启 App（见 Recorder::hold_for_update）：不让开始录音
+    updating: bool,
 }
 
 /// 一场本地的录音，加上上传的情况（只在内存里）。
@@ -267,6 +330,11 @@ struct Session {
     level: Option<Level>,
     mic: Option<String>,
     system: bool,
+    /// 录音程序报的回声消除模式（started 里的），没报过是 None
+    echo_mode: Option<EchoMode>,
+    /// 录音程序最近一次说的回声消除开没开、为什么（echo 事件）
+    echo_active: bool,
+    echo_reason: Option<String>,
     warnings: Vec<Warning>,
     /// 录音程序说的错误，它退出时用
     error: Option<String>,
@@ -332,6 +400,7 @@ impl Recorder {
                 error: None,
                 start_warnings: Vec::new(),
                 ended: None,
+                updating: false,
             }),
             wake: Notify::new(),
             session_changes: watch::channel(0).0,
@@ -369,7 +438,8 @@ impl Recorder {
         helper::devices(helper).await
     }
 
-    /// 开始录音：mic 是麦克风的 uid 或者 "default"，None 是不录麦克风；system：录不录电脑的声音。
+    /// 开始录音：mic 是麦克风的 uid 或者 "default"，None 是不录麦克风；system：录不录电脑的声音；
+    /// echo_cancel：回声消除（两路都在录时才用得上，录音程序自己判断）。
     /// 这台电脑上有这场会议中断了的录音时接着录：序号接着上次的，标记留着。
     /// 等到录音程序真的开始录了才返回，开始不了返回原因。
     pub async fn start(
@@ -377,6 +447,7 @@ impl Recorder {
         meeting_id: &str,
         mic: Option<String>,
         system: bool,
+        echo_cancel: EchoCancel,
     ) -> Result<RecorderState, String> {
         if !local::valid_meeting_id(meeting_id) {
             return Err("会议编号不对，请回到录音页重新开始".into());
@@ -433,6 +504,7 @@ impl Recorder {
             chunk_seconds: self.opts.chunk_seconds,
             mic: mic.as_deref(),
             system,
+            echo_cancel,
             input_file: self.opts.input_file.as_deref(),
             realtime: self.opts.realtime,
         });
@@ -473,6 +545,9 @@ impl Recorder {
         account: &Account,
     ) -> Result<(u64, bool, mpsc::UnboundedReceiver<Command>), String> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.updating {
+            return Err(UPDATING.into());
+        }
         if let Some(s) = &inner.session {
             return Err(if s.phase == Phase::Stopping {
                 "上一场录音还在结束，请稍等几秒再开始".into()
@@ -513,6 +588,9 @@ impl Recorder {
             level: None,
             mic: None,
             system: false,
+            echo_mode: None,
+            echo_active: false,
+            echo_reason: None,
             warnings: Vec::new(),
             error: None,
             stopped: false,
@@ -778,18 +856,30 @@ impl Recorder {
             };
             let l = recordings.get_mut(&s.meeting_id);
             match event {
-                Event::Started { mic, system } => {
+                Event::Started {
+                    mic,
+                    system,
+                    echo_cancellation,
+                } => {
                     if s.phase == Phase::Starting {
                         s.phase = Phase::Recording;
                     }
                     s.mic = mic;
                     s.system = system;
+                    // 开没开、为什么由 echo 事件说（可能比 started 先到，不能清掉）
+                    s.echo_mode = echo_cancellation;
                     // 接着录的：中断的原因用不着了
                     if let Some(l) = l.filter(|l| !l.fatal && l.rec.error.is_some()) {
                         l.rec.error = None;
                         l.save();
                     }
                 }
+                Event::Echo { active, reason } => {
+                    s.echo_active = active;
+                    s.echo_reason = reason;
+                }
+                // 录的是系统默认的麦克风，用户换了默认的麦克风：界面上显示现在在录的这个
+                Event::MicChanged { name } => s.mic = Some(name),
                 Event::Level {
                     seconds,
                     mic,
@@ -1154,6 +1244,28 @@ impl Recorder {
         self.changed();
         Ok(self.state())
     }
+
+    /// 装好新版本以后要重启 App：现在不能重启的原因（见 RecorderState::update_blocker），能的话是 None。
+    pub fn update_blocker(&self) -> Option<String> {
+        self.state().update_blocker()
+    }
+
+    /// 要装新版本了：现在能重启的话，从现在起不让开始录音（免得刚开始录就被重启打断），直到 App 重启或者
+    /// release_update_hold；不能的话返回原因。看能不能和占住是一起做的，中间不会有人开始录音。
+    pub fn hold_for_update(&self) -> Result<(), String> {
+        let account = self.core.account();
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(reason) = snapshot(&inner, account.as_ref()).update_blocker() {
+            return Err(reason);
+        }
+        inner.updating = true;
+        Ok(())
+    }
+
+    /// 新版本没装上：又可以开始录音了。
+    pub fn release_update_hold(&self) {
+        self.inner.lock().unwrap().updating = false;
+    }
 }
 
 impl Local {
@@ -1320,6 +1432,7 @@ fn snapshot(inner: &Inner, account: Option<&Account>) -> RecorderState {
         level: None,
         mic: None,
         system: false,
+        echo: None,
         marks: Vec::new(),
         warnings: inner.start_warnings.clone(),
         error: inner.error.clone(),
@@ -1335,6 +1448,11 @@ fn snapshot(inner: &Inner, account: Option<&Account>) -> RecorderState {
             state.level = s.level;
             state.mic = s.mic.clone();
             state.system = s.system;
+            state.echo = s.echo_mode.map(|mode| Echo {
+                mode,
+                active: s.echo_active,
+                reason: s.echo_reason.clone(),
+            });
             state.warnings = s.warnings.clone();
             if let Some(l) = inner.recordings.get(&s.meeting_id) {
                 state.title = Some(l.rec.title.clone());

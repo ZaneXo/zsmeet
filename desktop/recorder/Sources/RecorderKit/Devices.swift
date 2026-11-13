@@ -22,8 +22,8 @@ public enum Microphones {
             guard AudioProperty.inputChannelCount(id) > 0,
                   (try? AudioProperty.value(id, kAudioDevicePropertyIsHidden, initial: UInt32(0))) != 1,
                   let uid = try? AudioProperty.string(id, kAudioDevicePropertyDeviceUID),
-                  // 系统给某些 App 临时建的聚合设备，不是真的麦克风
-                  !uid.hasPrefix("CADefaultDeviceAggregate")
+                  // 系统给某些 App 临时建的聚合设备、我们自己录电脑声音用的聚合设备，不是真的麦克风
+                  !uid.hasPrefix("CADefaultDeviceAggregate"), !uid.hasPrefix(SystemAudioCapture.aggregateUIDPrefix)
             else { return nil }
             let name = (try? AudioProperty.string(id, kAudioObjectPropertyName)) ?? uid
             return Microphone(id: id, uid: uid, name: name, isDefault: id == defaultID)

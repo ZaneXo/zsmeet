@@ -16,6 +16,10 @@ public struct SampleFIFO {
         storage.append(contentsOf: samples)
     }
 
+    public mutating func append(_ samples: ArraySlice<Float>) {
+        storage.append(contentsOf: samples)
+    }
+
     /// 取出最前面的 n 个，复制到 out
     public mutating func take(_ n: Int, into out: UnsafeMutablePointer<Float>) {
         precondition(n >= 0 && n <= count)
@@ -41,6 +45,22 @@ public struct SampleFIFO {
         }
         advance(n)
         return energy
+    }
+
+    /// 复制从第 offset 个开始的 n 个到 out，不取出
+    public func peek(from offset: Int, count n: Int, into out: UnsafeMutablePointer<Float>) {
+        precondition(offset >= 0 && n >= 0 && offset + n <= count)
+        guard n > 0 else { return }
+        storage.withUnsafeBufferPointer { buffer in
+            out.update(from: buffer.baseAddress! + head + offset, count: n)
+        }
+    }
+
+    /// 读里面全部的采样（不取出）
+    public func withUnsafeSamples<R>(_ body: (UnsafeBufferPointer<Float>) throws -> R) rethrows -> R {
+        try storage.withUnsafeBufferPointer { buffer in
+            try body(UnsafeBufferPointer(rebasing: buffer[head...]))
+        }
     }
 
     /// 丢掉最前面的 n 个

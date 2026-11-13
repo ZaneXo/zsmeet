@@ -3,6 +3,8 @@
 //!
 //! 原生录音（recorder/）：管着 Swift 写的录音程序 zsmeet-recorder，录好的分片存在本地、在后台传到服务器；
 //! 菜单栏（tray.rs）上有录音的时长和控制。关掉窗口录音不停；退出 App 时先结束录音，没传完的下次打开接着传。
+//!
+//! 自动更新（update.rs）：定时查 GitHub Releases 上有没有新版本、告诉界面，用户点了「更新」才装。
 
 mod cache;
 mod commands;
@@ -13,6 +15,7 @@ mod recorder;
 mod server;
 mod token;
 mod tray;
+mod update;
 
 #[cfg(test)]
 mod tests;
@@ -110,6 +113,9 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 公钥、latest.json 的地址在 tauri.conf.json 的 plugins.updater 里。插件的命令不开放给界面
+        // （capabilities 里没有），界面用 update_check、update_install
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 // 不记「窗口是否显示」：关窗口只是藏起来，下次启动还是要显示
@@ -120,6 +126,7 @@ pub fn run() {
                 .build(),
         )
         .manage(LastLink::default())
+        .manage(update::Updates::default())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -188,6 +195,8 @@ pub fn run() {
             tray::build(&handle)?;
             // 菜单栏建好以后再开始上传：一开始的状态（有没有没传完的录音）也要显示在菜单上
             tauri::async_runtime::spawn(recorder.run());
+            // 启动后约 10 秒查一次有没有新版本，之后每 6 小时查一次。只告诉界面，不自动装
+            update::spawn_checks(handle);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -219,6 +228,8 @@ pub fn run() {
             commands::recorder_finish,
             commands::recorder_discard,
             commands::recorder_state,
+            commands::update_check,
+            commands::update_install,
         ])
         .build(tauri::generate_context!())
         .expect("zsmeet 启动失败");

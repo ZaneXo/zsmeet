@@ -54,10 +54,12 @@ public final class AudioFileReader {
     }
 }
 
-/// 测试用的「麦克风」：按文件的实际时长一点一点写进环形缓冲，和真的设备一样走现场录音那一套
-/// （按时间混音、暂停时丢掉采到的声音）。读完了调用 onEnded，读到一半出错调用 onFailed。
+/// 测试用的「麦克风」（或者 --reference-file 时的「电脑声音」）：按文件的实际时长一点一点写进环形缓冲，
+/// 和真的设备一样走现场录音那一套（按时间混音、暂停时丢掉采到的声音、回声消除）。每次写的时候带上时间戳：
+/// 第 n 个采样的时间是开始的时间加上 n / 采样率，两个文件从同一个时间开始（startTime）就是严格对齐的。
+/// 读完了调用 onEnded，读到一半出错调用 onFailed。
 public final class RealtimeFileSource: CaptureSource {
-    public let kind = SourceKind.mic
+    public let kind: SourceKind
     public let name: String
     public let ring: OpaquePointer
     public let sampleRate: Double
@@ -66,19 +68,23 @@ public final class RealtimeFileSource: CaptureSource {
     public var onEnded: (() -> Void)?
     /// 读文件出错了，后面的都读不到（在它自己的线程上调用）。录音要以出错结束，不能当成读完了
     public var onFailed: ((RecorderFailure) -> Void)?
+    /// 第一个采样的时间（纳秒，DispatchTime 的 uptimeNanoseconds）。start 之前设好，几个文件就从同一个时间开始；
+    /// 没设就用 start 的时候
+    public var startTime: UInt64?
 
     private let reader: AudioFileReader
     private let queue = DispatchQueue(label: "io.github.zanexo.zsmeet.recorder.realtime-file")
     private var timer: DispatchSourceTimer?
-    private var startTime: UInt64 = 0
+    private var origin: UInt64 = 0
     private var written: Int64 = 0
 
-    public init(reader: AudioFileReader) throws {
+    public init(reader: AudioFileReader, kind: SourceKind = .mic) throws {
         guard let ring = zr_ring_create(1 << 20, 1) else {
             throw RecorderFailure("internal", "内存不够")
         }
         self.reader = reader
         self.ring = ring
+        self.kind = kind
         sampleRate = reader.sampleRate
         name = reader.name
     }
@@ -90,7 +96,7 @@ public final class RealtimeFileSource: CaptureSource {
 
     public func start() throws {
         queue.sync {
-            startTime = DispatchTime.now().uptimeNanoseconds
+            origin = startTime ?? DispatchTime.now().uptimeNanoseconds
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(2))
             timer.setEventHandler { [weak self] in self?.feed() }
@@ -108,7 +114,9 @@ public final class RealtimeFileSource: CaptureSource {
     }
 
     private func feed() {
-        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startTime) / 1_000_000_000
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now > origin else { return }
+        let elapsed = Double(now - origin) / 1_000_000_000
         let due = Int(elapsed * sampleRate) - Int(written)
         guard due > 0 else { return }
         do {
@@ -119,7 +127,9 @@ public final class RealtimeFileSource: CaptureSource {
                 onEnded?()
                 return
             }
-            samples.withUnsafeBufferPointer { _ = zr_ring_write(ring, $0.baseAddress!, $0.count) }
+            // 这一批第一个采样的时间：按文件里的位置算，不按现在（现在会有定时器的抖动）
+            let time = origin + UInt64((Double(written) / sampleRate * 1_000_000_000).rounded())
+            samples.withUnsafeBufferPointer { _ = zr_ring_write_stamped(ring, $0.baseAddress!, $0.count, time) }
             written += Int64(samples.count)
         } catch {
             timer?.cancel()

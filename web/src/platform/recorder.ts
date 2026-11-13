@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import { onIdentityChange } from "./desktop";
-import { IDLE_STATE, nextEnded, normalizeState, parseSources, sentence, settledMeetings } from "./recorderView";
+import { ECHO_CANCEL_OFF, ECHO_CANCEL_ON, IDLE_STATE, nextEnded, normalizeState, parseEchoCancel, parseSources, sentence, settledMeetings } from "./recorderView";
 import type { Ended, Sources } from "./recorderView";
 
 /**
@@ -35,6 +35,21 @@ export type RecorderUpload = {
   error: string | null;
 };
 
+/**
+ * 回声消除（「外放时去掉回声」，实验功能）的模式，录音程序在 started 事件里报的 echo_cancellation：
+ * off：不处理；auto：外放时才处理（戴耳机、用 AirPlay 时不处理）；on：一直处理；unavailable：要处理但没能打开，录的是原来的声音。
+ */
+export type EchoMode = "off" | "auto" | "on" | "unavailable";
+
+/**
+ * 回声消除现在开没开的原因（录音程序的 echo 事件）：speakers 在用扬声器外放；headphones 戴着耳机；airplay 用 AirPlay 外放；
+ * no_reference 没收到电脑里的声音（要拿它去掉回声）；forced 不管外放还是戴耳机都处理（on）；off 不处理。
+ */
+export type EchoReason = "speakers" | "headphones" | "airplay" | "no_reference" | "forced" | "off";
+
+/** 回声消除的情况。reason 一般是 EchoReason 里的一个；录音程序以后多了别的原因也照样传过来，所以类型是 string。 */
+export type RecorderEcho = { mode: EchoMode; active: boolean; reason: string | null };
+
 /** Rust 那边的录音状态（事件 recorder://state 和各个命令的返回值）。 */
 export type RecorderState = {
   status: RecorderStatus;
@@ -44,7 +59,10 @@ export type RecorderState = {
   seconds: number;
   /** 现在的音量，0 到 1。录音时大约每 100 毫秒更新一次 */
   level: { mic: number; system: number } | null;
-  /** 在录的麦克风的名字，不录麦克风（或者开始时就录不到）时为 null；录到一半断开了还是它的名字，warnings 里有提醒 */
+  /**
+   * 在录的麦克风的名字，不录麦克风（或者开始时就录不到）时为 null；录到一半断开了还是它的名字，warnings 里有提醒。
+   * 选的是「系统默认的麦克风」、录音中系统默认的麦克风换了（比如连上了 AirPods）时，录音程序跟着换（mic_changed），这里也跟着变
+   */
   mic: string | null;
   /** 在录电脑里的声音 */
   system: boolean;
@@ -54,6 +72,8 @@ export type RecorderState = {
   error: string | null;
   /** 这台电脑上没传完（和刚传完）的录音，包括正在录的这一场 */
   uploads: RecorderUpload[];
+  /** 回声消除：模式、现在开没开、为什么。没在录、录音程序没报（旧版本）时是 null */
+  echo: RecorderEcho | null;
 };
 
 export type Microphone = { uid: string; name: string; default: boolean };
@@ -162,9 +182,11 @@ export async function recorderDevices(): Promise<Microphone[]> {
 
 /**
  * 开始录音：服务器上的会议要先建好。mic 是麦克风的 uid 或者 "default"（系统默认的），null 是不录麦克风。
+ * echoCancel：外放时去掉回声（实验功能）。true 时 App 让录音程序按 auto 处理（外放时处理，戴耳机、用 AirPlay 时不处理），
+ * false 时不处理。麦克风和电脑里的声音都录时才有用（见 recorderView.ts 的 echoCancelArg）。
  * 这台电脑上有这场会议中断了的录音时，接着它录。
  */
-export function recorderStart(opts: { meetingId: string; mic: string | null; system: boolean }): Promise<RecorderState> {
+export function recorderStart(opts: { meetingId: string; mic: string | null; system: boolean; echoCancel: boolean }): Promise<RecorderState> {
   return command("recorder_start", opts);
 }
 
@@ -224,5 +246,25 @@ export function saveSources(sources: Sources) {
     localStorage.setItem(SOURCES_KEY, JSON.stringify(sources));
   } catch {
     // 存不下也没关系，下次用默认的
+  }
+}
+
+const ECHO_KEY = "zsmeet.recorder.echoCancel";
+
+/** 「外放时去掉回声（实验）」开没开：每台电脑记自己的，没点过时用默认的（见 recorderView.ts 的 parseEchoCancel）。 */
+export function loadEchoCancel(): boolean {
+  try {
+    return parseEchoCancel(localStorage.getItem(ECHO_KEY));
+  } catch {
+    return parseEchoCancel(null);
+  }
+}
+
+/** 点了这个开关就记下来，不用等开始录音。只记点过的：以后默认值变了，没点过的人跟着新的默认值走。 */
+export function saveEchoCancel(on: boolean) {
+  try {
+    localStorage.setItem(ECHO_KEY, on ? ECHO_CANCEL_ON : ECHO_CANCEL_OFF);
+  } catch {
+    // 存不下也没关系，这次照样按点的来，下次用默认的
   }
 }

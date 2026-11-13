@@ -9,7 +9,23 @@ let formatTests: [(String, () throws -> Void)] = [
     ("命令行参数：默认值和各种写法", testParseCommandLine),
     ("命令行参数：写错时的提示", testParseErrors),
     ("ADTS 帧头：AAC-LC、48 kHz、单声道、帧长", testADTSHeader),
+    ("标准输出：最后一个事件（stopped、error）之后别的线程再发的都不写", testLastEventIsLast),
 ]
+
+func testLastEventIsLast() throws {
+    var fds: [Int32] = [0, 0]
+    expectEqual(pipe(&fds), 0)
+    let events = StdoutEvents(fd: fds[1])
+    events.send(.paused)
+    events.sendLast(.error(RecorderFailure("input_file", "读不下去了")))
+    // 引擎的定时器还在走：之后的音量、再一个结束都不写
+    events.send(.level(seconds: 1, mic: 0.5, system: 0))
+    events.sendLast(.stopped(nextSeq: 1, seconds: 1))
+    close(fds[1])
+    let data = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true).readDataToEndOfFile()
+    expectEqual(String(decoding: data, as: UTF8.self),
+                #"{"event":"paused"}"# + "\n" + #"{"event":"error","code":"input_file","message":"读不下去了"}"# + "\n")
+}
 
 func testJSON() {
     let value = JSON.object([
@@ -30,9 +46,24 @@ func testJSON() {
 func testEventJSON() {
     let cases: [(RecorderEvent, String)] = [
         (.started(sampleRate: 48_000, channels: 1, mic: "MacBook Pro 麦克风", system: true),
-         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true}"#),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true,"echo_cancellation":"off"}"#),
         (.started(sampleRate: 48_000, channels: 1, mic: nil, system: false),
-         #"{"event":"started","sample_rate":48000,"channels":1,"mic":null,"system":false}"#),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":null,"system":false,"echo_cancellation":"off"}"#),
+        (.started(sampleRate: 48_000, channels: 1, mic: "m", system: true, echoCancellation: .auto),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"auto"}"#),
+        (.started(sampleRate: 48_000, channels: 1, mic: "m", system: true, echoCancellation: .on),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"on"}"#),
+        (.started(sampleRate: 48_000, channels: 1, mic: "m", system: true, echoCancellation: .unavailable),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"unavailable"}"#),
+        (.echo(active: true, reason: .speakers), #"{"event":"echo","active":true,"reason":"speakers"}"#),
+        (.echo(active: false, reason: .headphones), #"{"event":"echo","active":false,"reason":"headphones"}"#),
+        (.echo(active: false, reason: .airplay), #"{"event":"echo","active":false,"reason":"airplay"}"#),
+        (.echo(active: false, reason: .noReference), #"{"event":"echo","active":false,"reason":"no_reference"}"#),
+        (.micChanged(name: "AirPods Pro"), #"{"event":"mic_changed","name":"AirPods Pro"}"#),
+        (.warning(.micSilent, "很久没有声音"), #"{"event":"warning","code":"mic_silent","message":"很久没有声音"}"#),
+        (.echo(active: true, reason: .forced), #"{"event":"echo","active":true,"reason":"forced"}"#),
+        (.echo(active: false, reason: .off), #"{"event":"echo","active":false,"reason":"off"}"#),
+        (.warning(.echoUnavailable, "e"), #"{"event":"warning","code":"echo_unavailable","message":"e"}"#),
         (.level(seconds: 12.3456, mic: 0.5, system: 0),
          #"{"event":"level","seconds":12.346,"mic":0.5,"system":0}"#),
         (.chunk(seq: 3, path: "/录音/3.aac", bytes: 80_000, seconds: 10.005333),
@@ -106,6 +137,28 @@ func testParseCommandLine() throws {
     expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--no-mic", "--no-system", "--input-file", "in.wav", "--realtime"]),
                 .record(file))
 
+    // 回声消除，和调它用的参数
+    var echo = RecordOptions()
+    echo.outDir = "d"
+    expectEqual(echo.echoCancel, .off, "默认不做回声消除")
+    echo.echoCancel = .auto
+    expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--echo-cancel", "auto"]), .record(echo))
+    echo.echoCancel = .on
+    echo.aecLeadMilliseconds = 120
+    echo.aecFilters = 8
+    echo.aecDelayHintMilliseconds = 230
+    echo.aecDump = "/tmp/aec"
+    expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--echo-cancel", "on", "--aec-lead-ms", "120", "--aec-filters", "8",
+                                             "--aec-delay-hint-ms", "230", "--aec-dump", "/tmp/aec"]), .record(echo))
+    var reference = RecordOptions()
+    reference.outDir = "d"
+    reference.inputFile = "mic.wav"
+    reference.realtime = true
+    reference.referenceFile = "far.wav"
+    reference.echoCancel = .off
+    expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--input-file", "mic.wav", "--realtime", "--reference-file", "far.wav",
+                                             "--echo-cancel", "off"]), .record(reference))
+
     expectEqual(try CommandLineParser.parse(["devices"]), .devices)
     expectEqual(try CommandLineParser.parse(["--help"]), .help)
 }
@@ -130,6 +183,13 @@ func testParseErrors() {
         (["record", "--out", "d", "--no-mic", "--no-system"], "麦克风和电脑声音至少要录一个：--no-mic 和 --no-system 不能一起用"),
         (["record", "--out", "d", "--realtime"], "--realtime 只能和 --input-file 一起用"),
         (["record", "--out", "d", "--loud"], "不认识的参数：--loud"),
+        (["record", "--out", "d", "--echo-cancel"], "--echo-cancel 后面缺少值"),
+        (["record", "--out", "d", "--echo-cancel", "yes"], "--echo-cancel 只能是 off、auto 或者 on，现在是 yes"),
+        (["record", "--out", "d", "--aec-lead-ms", "401"], "--aec-lead-ms 要是 0 到 400 之间的整数，现在是 401"),
+        (["record", "--out", "d", "--aec-filters", "0"], "--aec-filters 要是 1 到 16 之间的整数，现在是 0"),
+        (["record", "--out", "d", "--aec-delay-hint-ms", "-1"], "--aec-delay-hint-ms 要是 0 到 500 之间的整数，现在是 -1"),
+        (["record", "--out", "d", "--reference-file", "far.wav"], "--reference-file 只能和 --input-file、--realtime 一起用"),
+        (["record", "--out", "d", "--input-file", "a.wav", "--reference-file", "far.wav"], "--reference-file 只能和 --input-file、--realtime 一起用"),
     ]
     for (arguments, message) in cases {
         expectThrows(UsageError(message)) {

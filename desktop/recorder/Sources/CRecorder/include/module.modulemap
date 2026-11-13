@@ -1,4 +1,6 @@
 module CRecorder {
     header "CRecorder.h"
+    // 回声消除（WebRTC AEC3）的 C 接口，实现在 zr_aec.cc（C++）
+    header "zr_aec.h"
     export *
 }

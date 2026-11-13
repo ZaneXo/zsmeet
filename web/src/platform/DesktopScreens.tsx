@@ -18,12 +18,14 @@ import {
   useSigningOut,
 } from "./desktop";
 import type { DesktopState } from "./desktop";
+import { FloatingUpdateNotice } from "./DesktopUpdate";
 import { useRecorder } from "./recorder";
 import { signOutNote } from "./recorderView";
 
 /**
  * 桌面版的入口：还没填服务器地址时填地址，没登录时「在浏览器里登录」，登录了才显示主界面。
  * 主界面按「服务器 + 用户」重新挂载：换了人以后不留上一个人的界面状态。
+ * 有新版本时，登录前在右下角提示，登录以后在页面顶上提示（Shell 里的 UpdateBanner）。
  */
 export function DesktopGate({ children }: { children: ReactNode }) {
   const state = useDesktopState();
@@ -41,8 +43,14 @@ export function DesktopGate({ children }: { children: ReactNode }) {
     );
   }
   if (!state) return <Spinner label="正在启动…" />;
-  if (!state.server) return <ServerSetup />;
-  if (!state.signed_in) return <BrowserLogin state={state} />;
+  if (!state.signed_in) {
+    return (
+      <>
+        {state.server ? <BrowserLogin state={state} /> : <ServerSetup />}
+        <FloatingUpdateNotice />
+      </>
+    );
+  }
   return <div key={currentIdentity()} className="contents">{children}</div>;
 }
 

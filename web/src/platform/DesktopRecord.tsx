@@ -14,6 +14,7 @@ import {
   clearEnded,
   deleteEmptyMeeting,
   dismissUpload,
+  loadEchoCancel,
   loadSources,
   recorderDevices,
   recorderMark,
@@ -22,11 +23,15 @@ import {
   recorderStart,
   recorderState,
   recorderStop,
+  saveEchoCancel,
   saveSources,
   useRecorder,
 } from "./recorder";
 import type { RecorderState, RecorderUpload, RecorderWarning } from "./recorder";
 import {
+  echoCancelArg,
+  echoCancelUsable,
+  echoLabel,
   effectiveMic,
   endedGone,
   endedUpload,
@@ -42,7 +47,9 @@ import {
   sourcesProblem,
   warningText,
 } from "./recorderView";
-import type { Ended, Sources } from "./recorderView";
+import type { EchoLabel, Ended, Sources } from "./recorderView";
+import { useUpdater } from "./updater";
+import { recordUpdateNote } from "./updateView";
 
 /**
  * 桌面版的录音页：录电脑里会议软件的声音和麦克风（docs/desktop.md 的「录音（第三阶段）」）。
@@ -93,11 +100,11 @@ class RecorderStartError extends Error {}
 
 /**
  * 交给 App 开始录音。没能开始的话，刚在服务器上建的会议什么也没有，删掉它，免得留下一场空会议；
- * App 已经记下了这场录音的话（比如开始以后才出错）不删。
+ * App 已经记下了这场录音的话（比如开始以后才出错）不删。echoCancel 是「外放时去掉回声」开没开。
  */
-async function startRecorder(meetingId: string, sources: Sources, fresh: boolean) {
+async function startRecorder(meetingId: string, sources: Sources, echoCancel: boolean, fresh: boolean) {
   try {
-    await recorderStart({ meetingId, mic: micArg(sources.mic), system: sources.system });
+    await recorderStart({ meetingId, mic: micArg(sources.mic), system: sources.system, echoCancel: echoCancelArg(sources, echoCancel) });
   } catch (e) {
     if (fresh && !localMeeting(recorderState(), meetingId)) await deleteEmptyMeeting(meetingId);
     throw new RecorderStartError(errorMessage(e));
@@ -105,30 +112,55 @@ async function startRecorder(meetingId: string, sources: Sources, fresh: boolean
   saveSources(sources);
 }
 
+/** 「外放时去掉回声（实验）」开没开：每台电脑记自己的，点了就记下来。 */
+function useEchoCancel(): [boolean, (on: boolean) => void] {
+  const [on, setOn] = useState(loadEchoCancel);
+  return [
+    on,
+    (next: boolean) => {
+      setOn(next);
+      saveEchoCancel(next);
+    },
+  ];
+}
+
+/**
+ * 正在更新 zsmeet 时录音页上的说明（updateView.ts 的 recordUpdateNote）：还在下载时照样能开始录音，这次就不装了；
+ * 下载完在安装、装好了等重新打开时 App 不让开始录音（会被重启打断），blocks 是 true，开始录音的按钮变灰。
+ * 没在更新时是 null。
+ */
+function useUpdateNote() {
+  const { phase, progress } = useUpdater();
+  return recordUpdateNote(phase, progress);
+}
+
 /** 开始一场新的录音：先在服务器上建好会议，再交给 App 开始录。warnings 是没能开始时录音程序给的提示。 */
 function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWarning[] }) {
   const templates = useTemplates();
   const devices = useMicrophones();
   const offline = useOffline();
+  const update = useUpdateNote();
   const [title, setTitle] = useState("");
   const [template, setTemplate] = useState("general");
   const [hotwords, setHotwords] = useState("");
   const [visibility, setVisibility] = useState<"team" | "private">("team");
   const [chosen, setChosen] = useState(loadSources);
+  const [echoCancel, setEchoCancel] = useEchoCancel();
   const sources = { ...chosen, mic: effectiveMic(chosen.mic, devices.data) };
   const problem = sourcesProblem(sources);
 
   const start = useMutation({
     mutationFn: async () => {
       const meeting = await unwrap(api.POST("/api/meetings", { body: { title, source: "desktop", template, hotwords, visibility } }));
-      await startRecorder(meeting.id, sources, true);
+      await startRecorder(meeting.id, sources, echoCancel, true);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["meetings"] }),
   });
   const busy = starting || start.isPending;
+  const blocked = !!update?.blocks;
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (!busy && !problem) start.mutate();
+    if (!busy && !problem && !blocked) start.mutate();
   };
 
   return (
@@ -138,7 +170,7 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
           <Input id="rec-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} disabled={busy} />
         </Field>
 
-        <SourceFields sources={sources} onChange={setChosen} devices={devices} disabled={busy} />
+        <SourceFields sources={sources} onChange={setChosen} echoCancel={echoCancel} onEchoCancel={setEchoCancel} devices={devices} disabled={busy} />
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="纪要模板" htmlFor="rec-template">
@@ -157,11 +189,12 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
         <VisibilityField id="rec-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 
         {offline && !start.isError && <Notice tone="warn">现在连不上服务器。开始录音要先在服务器上建好这场会议，请连上以后再开始；开始以后断网也能接着录。</Notice>}
+        {update && <Notice tone="info">{update.text}</Notice>}
         {start.isError && <StartFailure error={start.error} warnings={warnings} />}
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <span className="text-xs leading-relaxed text-muted">录音时可以关掉这个窗口，录音不会停：菜单栏的 zsmeet 图标旁边会显示录了多久。</span>
-          <Button type="submit" variant="primary" disabled={busy || !!problem}>
+          <Button type="submit" variant="primary" disabled={busy || !!problem || blocked}>
             <Icon name="mic" />
             {busy ? "正在开始…" : "开始录音"}
           </Button>
@@ -175,18 +208,21 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
 function Resume({ upload, starting, warnings }: { upload: RecorderUpload; starting: boolean; warnings: RecorderWarning[] }) {
   const navigate = useNavigate();
   const devices = useMicrophones();
+  const update = useUpdateNote();
   const [chosen, setChosen] = useState(loadSources);
+  const [echoCancel, setEchoCancel] = useEchoCancel();
   const sources = { ...chosen, mic: effectiveMic(chosen.mic, devices.data) };
   const problem = sourcesProblem(sources);
   const start = useMutation({
-    mutationFn: () => startRecorder(upload.meetingId, sources, false),
+    mutationFn: () => startRecorder(upload.meetingId, sources, echoCancel, false),
     // 开始了就不再需要网址里的 ?continue=
     onSuccess: () => navigate("/record", { replace: true }),
   });
   const busy = starting || start.isPending;
+  const blocked = !!update?.blocks;
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (!busy && !problem) start.mutate();
+    if (!busy && !problem && !blocked) start.mutate();
   };
 
   return (
@@ -198,13 +234,14 @@ function Resume({ upload, starting, warnings }: { upload: RecorderUpload; starti
             这场录音中断前已经录下{recordedLength(upload.recorded)}。接着录的部分会接在后面，标记的重点也都还在。
           </span>
         </div>
-        <SourceFields sources={sources} onChange={setChosen} devices={devices} disabled={busy} />
+        <SourceFields sources={sources} onChange={setChosen} echoCancel={echoCancel} onEchoCancel={setEchoCancel} devices={devices} disabled={busy} />
+        {update && <Notice tone="info">{update.text}</Notice>}
         {start.isError && <StartFailure error={start.error} warnings={warnings} />}
         <div className="flex flex-wrap justify-end gap-2.5">
           <AppLink to="/record" replace className={buttonClass("default")}>
             取消
           </AppLink>
-          <Button type="submit" variant="primary" disabled={busy || !!problem}>
+          <Button type="submit" variant="primary" disabled={busy || !!problem || blocked}>
             <Icon name="mic" />
             {busy ? "正在开始…" : "接着录"}
           </Button>
@@ -216,15 +253,22 @@ function Resume({ upload, starting, warnings }: { upload: RecorderUpload; starti
 
 const choiceClass = (on: boolean) => `flex gap-3 rounded-xl border px-4 py-3 ${on ? "border-brand bg-brand-tint/50" : "border-line"}`;
 
-/** 录什么声音：电脑里的声音（会议软件里其他人的声音）、哪个麦克风（或者不录麦克风）。 */
+/**
+ * 录什么声音：电脑里的声音（会议软件里其他人的声音）、哪个麦克风（或者不录麦克风）；
+ * 两样都录时，外放时去不去掉回声（实验功能）。
+ */
 function SourceFields({
   sources,
   onChange,
+  echoCancel,
+  onEchoCancel,
   devices,
   disabled,
 }: {
   sources: Sources;
   onChange: (next: Sources) => void;
+  echoCancel: boolean;
+  onEchoCancel: (on: boolean) => void;
   devices: ReturnType<typeof useMicrophones>;
   disabled: boolean;
 }) {
@@ -264,12 +308,42 @@ function SourceFields({
           {devices.isError && <span className="text-xs leading-relaxed text-warn">没能列出电脑上的麦克风：{errorMessage(devices.error)}。可以先用系统默认的麦克风。</span>}
         </div>
       </div>
+      <EchoCancelField on={echoCancel} usable={echoCancelUsable(sources)} onChange={onEchoCancel} />
       {problem ? (
         <p className="text-xs leading-relaxed text-warn">{problem}</p>
       ) : (
         <p className="text-xs leading-relaxed text-muted">开线上会议时建议戴耳机，免得对方的声音从扬声器放出来，又被麦克风录一遍。</p>
       )}
     </fieldset>
+  );
+}
+
+/**
+ * 「外放时去掉回声（实验）」：用录到的电脑声音，把外放出来又被麦克风录进去的会议声音去掉（docs/desktop.md 的「回声消除」）。
+ * 实验功能，默认关，每台电脑记自己的。麦克风和电脑里的声音都录时才用得上，不然变灰（记下的选择不动）。
+ */
+function EchoCancelField({ on, usable, onChange }: { on: boolean; usable: boolean; onChange: (on: boolean) => void }) {
+  const checked = on && usable;
+  return (
+    <label className={`${choiceClass(checked)} ${usable ? "cursor-pointer hover:border-line-strong" : "cursor-not-allowed"}`}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={!usable}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-1 shrink-0 self-start accent-brand"
+      />
+      <span className="flex flex-col gap-1">
+        <b className={`text-sm font-semibold ${usable ? "" : "text-muted"}`}>外放时去掉回声（实验）</b>
+        <span className="text-[13px] leading-relaxed text-muted">
+          用扬声器外放开会时，麦克风也会录到会议里其他人的声音，转写里同一句话会出现两次。打开后，zsmeet 会用录到的电脑声音把它从麦克风里去掉，不影响会议软件和别的 App 播放的声音。戴耳机（包括 AirPods）时没有回声，会自动不处理。
+        </span>
+        <span className="text-[13px] leading-relaxed text-muted">
+          这是实验功能，默认关闭，效果还在验证：外放音量开得很大、用蓝牙音箱或电视外放时，回声可能去不干净；用 AirPlay 外放时不处理。你和别人同时说话时，如果转写里你说的话缺了，关掉这个选项、改用耳机。录音时页面上会显示回声消除现在开没开。
+        </span>
+        {!usable && <span className="text-xs leading-relaxed text-warn">要同时录麦克风和电脑里的声音才能用。</span>}
+      </span>
+    </label>
   );
 }
 
@@ -301,11 +375,16 @@ function StartFailure({ error, warnings }: { error: unknown; warnings: RecorderW
 
 // ---- 录音中 ----
 
+/** 「回声消除：…」的颜色：开着是绿色，不可用是黄色，没开（戴着耳机这些）和旁边的字一样。 */
+const ECHO_TONE: Record<EchoLabel["tone"], string> = { ok: "text-ok", mute: "", warn: "text-warn" };
+
 function Live({ state }: { state: RecorderState }) {
   const paused = state.status === "paused";
   const [confirming, setConfirming] = useState(false);
   const act = useMutation({ mutationFn: (run: () => Promise<unknown>) => run() });
+  // 麦克风的名字跟着 App 报的走：选的是系统默认的麦克风、录音中换了（比如连上了 AirPods）时，这里也跟着换
   const labels = sourceLabels(state);
+  const echo = echoLabel(state);
   const upload = liveUpload(state.uploads.find((u) => u.meetingId === state.meetingId));
 
   return (
@@ -316,6 +395,7 @@ function Live({ state }: { state: RecorderState }) {
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-muted">
             <span>麦克风：{labels.mic}</span>
             <span>电脑里的声音：{labels.system}</span>
+            {echo && <span className={ECHO_TONE[echo.tone]}>{echo.text}</span>}
           </div>
         </div>
 

@@ -69,7 +69,7 @@ services:
       retries: 5
       start_period: 20s
 
-  # 后台处理：转写、区分说话人、写纪要。第一次启动会下载约 560 MB 的识别模型
+  # 后台处理：转写、区分说话人、写纪要。第一次启动会下载约 300 MB 的识别模型
   worker:
     <<: *zsmeet
     command: worker

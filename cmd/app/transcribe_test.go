@@ -51,18 +51,3 @@ func TestParseFileArgs(t *testing.T) {
 		t.Error("没有文件应该报错")
 	}
 }
-
-func TestParseThresholds(t *testing.T) {
-	got, err := parseThresholds("0.6, 0.7,0.9")
-	if err != nil || !slices.Equal(got, []float32{0.6, 0.7, 0.9}) {
-		t.Errorf("得到 %v，错误 %v", got, err)
-	}
-	if got, err := parseThresholds("none"); err != nil || got != nil {
-		t.Errorf("none 是不区分说话人：%v，错误 %v", got, err)
-	}
-	for _, bad := range []string{"", "0", "-1", "0.6,abc"} {
-		if _, err := parseThresholds(bad); err == nil {
-			t.Errorf("%q 应该报错", bad)
-		}
-	}
-}

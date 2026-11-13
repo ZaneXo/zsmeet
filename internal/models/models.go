@@ -52,12 +52,14 @@ var files = []file{
 		size:   1_807_522,
 		sha256: "a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28",
 	},
+	// 区分说话人：3D-Speaker 的 CAM++（中英文，20 万人训练的增强版），也是 3D-Speaker 自己区分说话人时用的
 	{
-		name:   "speaker-segmentation.onnx",
-		path:   "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
-		size:   5_992_913,
-		sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+		name:   "speaker-diarization.onnx",
+		path:   "csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+		size:   28_281_164,
+		sha256: "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2",
 	},
+	// 声纹库（按声音认出改过名的人）：3D-Speaker 的 CAM++ 中文版。存下来的声纹是它算的，换模型就对不上了
 	{
 		name:   "speaker-embedding-zh.onnx",
 		path:   "csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
@@ -69,15 +71,16 @@ var files = []file{
 // Paths 给出各个模型文件的位置。
 type Paths struct{ Dir string }
 
-func (p Paths) SenseVoice() string   { return filepath.Join(p.Dir, files[0].name) }
-func (p Paths) Tokens() string       { return filepath.Join(p.Dir, files[1].name) }
-func (p Paths) VAD() string          { return filepath.Join(p.Dir, files[2].name) }
-func (p Paths) Segmentation() string { return filepath.Join(p.Dir, files[3].name) }
-func (p Paths) Embedding() string    { return filepath.Join(p.Dir, files[4].name) }
+func (p Paths) SenseVoice() string  { return filepath.Join(p.Dir, files[0].name) }
+func (p Paths) Tokens() string      { return filepath.Join(p.Dir, files[1].name) }
+func (p Paths) VAD() string         { return filepath.Join(p.Dir, files[2].name) }
+func (p Paths) Diarization() string { return filepath.Join(p.Dir, files[3].name) }
+func (p Paths) Embedding() string   { return filepath.Join(p.Dir, files[4].name) }
 
-// 以前的版本用过、现在不用了的模型文件（识别换成 SenseVoice 以前的 Paraformer 和标点模型）。
+// 以前的版本用过、现在不用了的模型文件（识别换成 SenseVoice 以前的 Paraformer 和标点模型，
+// 区分说话人换成 3D-Speaker 的做法以前的 pyannote 分段模型）。
 // 检查模型时顺手删掉，腾出约 500 MB。只删这几个写死的名字，目录里别的东西不碰
-var obsolete = []string{"paraformer-zh.int8.onnx", "paraformer-zh.tokens.txt", "punct-zh-en.onnx"}
+var obsolete = []string{"paraformer-zh.int8.onnx", "paraformer-zh.tokens.txt", "punct-zh-en.onnx", "speaker-segmentation.onnx"}
 
 const (
 	official = "https://huggingface.co"

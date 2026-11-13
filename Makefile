@@ -30,7 +30,7 @@ dev-api: dev-db ## 启动接口服务，监听 http://127.0.0.1:8080
 	$(DEV_ENV) go run ./cmd/app serve
 
 .PHONY: dev-worker
-dev-worker: dev-db ## 启动后台处理（第一次会下载约 560 MB 的识别模型）
+dev-worker: dev-db ## 启动后台处理（第一次会下载约 300 MB 的识别模型）
 	$(DEV_ENV) go run ./cmd/app worker
 
 .PHONY: dev-web

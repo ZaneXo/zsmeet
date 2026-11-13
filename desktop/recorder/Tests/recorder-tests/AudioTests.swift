@@ -15,7 +15,10 @@ let audioTests: [(String, () throws -> Void)] = [
     ("混音：来源跟不上时补静音，再重新攒", testMixerPadsWhenSourceFallsBehind),
     ("混音：积压超过上限时丢掉最早的", testMixerDropsBacklog),
     ("混音：卡住以后分几次补上，等着补上的声音不算积压", testMixerCatchesUpInSeveralPasses),
-    ("混音：两路相加，超过满幅的削掉", testMixerSumsAndClips),
+    ("混音：两路相加，没超过 -1 dBFS 的原样", testMixerSums),
+    ("混音：两路加起来超过 -1 dBFS 时压下来，不削顶", testMixerLimits),
+    ("混音的限幅器：一直很响时整体压低、波形不变，响完以后回到原样", testLimiterSteadyAndRelease),
+    ("混音的限幅器：峰值在一块的开头也不超过，往下压的速度有上限，NaN 换成 0", testLimiterEdges),
     ("混音：结束时剩下的都混出来", testMixerDrain),
     ("音量：按分贝换算到 0…1", testLevelMeter),
     ("采样率转换：48 kHz 原样通过", testResamplerPassThrough),
@@ -245,14 +248,15 @@ func testMixerPadsWhenSourceFallsBehind() {
 func testMixerDropsBacklog() {
     let mixer = TimeMixer(kinds: [.system], cushion: 100, maxBacklog: 400)
     let lane = mixer.lanes[0]
-    lane.queue.append((0..<1_000).map { Float($0) / 1_000 })
+    // 每个采样的值是它的序号除以 2000（都小于 -1 dBFS，限幅器不动它们），看取出来的是哪几个
+    lane.queue.append((0..<1_000).map { Float($0) / 2_000 })
     let out = mix(mixer, 50)
     // 积压 950 超过 400：丢掉最早的 850，取第 850…899 个，剩下的正好是 cushion
-    expectEqual(out.samples.first, 0.85)
-    expectEqual(out.samples.last, 0.899)
+    expectEqual(out.samples.first, 0.425)
+    expectEqual(out.samples.last, 0.4495)
     expectEqual(lane.droppedSamples, 850)
     expectEqual(lane.queue.count, 100)
-    expectEqual(mix(mixer, 1).samples, [0.9])
+    expectEqual(mix(mixer, 1).samples, [0.45])
 }
 
 func testMixerCatchesUpInSeveralPasses() {
@@ -270,13 +274,109 @@ func testMixerCatchesUpInSeveralPasses() {
     expectEqual(lane.queue.count, 100)
 }
 
-func testMixerSumsAndClips() {
+func testMixerSums() {
+    let mixer = TimeMixer(kinds: [.mic, .system], cushion: 1, maxBacklog: 400)
+    mixer.lanes[0].queue.append([0.25, -0.25, 0.125])
+    mixer.lanes[1].queue.append([0.5, 0.25, 0.25])
+    let out = mix(mixer, 3)
+    expectEqual(out.samples, [0.75, 0, 0.375])
+    expectEqual(out.energy, [0.0625 + 0.0625 + 0.015625, 0.25 + 0.0625 + 0.0625])
+}
+
+func testMixerLimits() {
     let mixer = TimeMixer(kinds: [.mic, .system], cushion: 1, maxBacklog: 400)
     mixer.lanes[0].queue.append([0.75, 0.25, -0.75])
     mixer.lanes[1].queue.append([0.5, 0.25, -0.5])
     let out = mix(mixer, 3)
-    expectEqual(out.samples, [1, 0.5, -1])
+    let ceiling: Float = MixLimiter.threshold
+    // 两个 1.25 的峰压到正好 -1 dBFS（以前削成 1），中间的跟着压低一些，正负号不变。
+    // 分开写、标上类型：CI 上的 Swift（Xcode 16）推不出太长的式子的类型
+    let firstOff: Float = abs(out.samples[0] - ceiling)
+    let lastOff: Float = abs(out.samples[2] + ceiling)
+    expect(firstOff < 1e-6 && lastOff < 1e-6, "峰值应该压到 \(ceiling)：\(out.samples)")
+    let middle: Float = out.samples[1]
+    expect(middle > 0.3 && middle < 0.5, "中间的跟着压低：\(out.samples)")
+    // 音量（能量）按限幅之前的算
     expectEqual(out.energy, [0.5625 + 0.0625 + 0.5625, 0.25 + 0.0625 + 0.25])
+}
+
+private func report(_ text: String) {
+    print("    测得：\(text)")
+}
+
+/// 用限幅器按每块 block 个采样处理 input，返回结果
+private func limit(_ input: [Float], block: Int, limiter: inout MixLimiter) -> [Float] {
+    var output = input
+    output.withUnsafeMutableBufferPointer { buffer in
+        var start = 0
+        while start < buffer.count {
+            let count = min(block, buffer.count - start)
+            limiter.process(buffer.baseAddress! + start, count: count)
+            start += count
+        }
+    }
+    return output
+}
+
+func testLimiterSteadyAndRelease() {
+    let rate = 48_000
+    let loudAmplitude: Float = 1.6
+    // 0.5 秒很响的正弦波（麦克风调大了、电脑声音也很响，加起来 +4 dBFS），接着 3 秒正常的声音
+    let loudStep: Double = 2.0 * Double.pi * 440.0 / Double(rate)
+    let quietStep: Double = 2.0 * Double.pi * 300.0 / Double(rate)
+    var input: [Float] = (0..<(rate / 2)).map { (i: Int) -> Float in loudAmplitude * Float(sin(loudStep * Double(i))) }
+    let loudEnd = input.count
+    input += (0..<(3 * rate)).map { (i: Int) -> Float in Float(0.1 * sin(quietStep * Double(i))) }
+    var limiter = MixLimiter()
+    let output = limit(input, block: 480, limiter: &limiter)
+    let ceiling = MixLimiter.threshold
+
+    let peak: Float = output.map { (x: Float) -> Float in abs(x) }.max() ?? 0
+    let allowed: Float = ceiling * 1.000_001
+    expect(peak <= allowed, "超过了 -1 dBFS：\(peak)")
+    // 压下来以后是整体变小、波形不变（削顶的话峰值附近差 0.7 左右）：和按比例缩小的原波形相比，差不超过 0.02
+    let scale = ceiling / loudAmplitude
+    var worst: Float = 0
+    for index in (rate / 10)..<loudEnd {
+        let off: Float = abs(output[index] - input[index] * scale)
+        worst = max(worst, off)
+    }
+    report("一直很响时和按比例缩小的原波形最多差 \(worst)")
+    expect(worst <= 0.02, "压的时候波形变了：最多差 \(worst)")
+    // 响完 1.5 秒以后回到原样，一个比特都不变
+    let settled = loudEnd + 3 * rate / 2
+    expect(output[settled...].elementsEqual(input[settled...]), "响完以后应该回到原样")
+    expectEqual(limiter.gain, 1)
+}
+
+func testLimiterEdges() {
+    let ceiling = MixLimiter.threshold
+    // 峰值在一块的第一个采样：来不及提前压，也不超过
+    var limiter = MixLimiter()
+    var out = limit([2, 0.1, 0.1], block: 3, limiter: &limiter)
+    let startOff: Float = abs(out[0] - ceiling)
+    expect(startOff < 1e-6, "块开头的峰值应该压到 \(ceiling)：\(out[0])")
+    expect(out[1] < 0.1 && out[2] < 0.1, "后面的跟着压低、慢慢回来：\(out)")
+    limiter.reset()
+    expectEqual(limiter.gain, 1, "reset 以后从 1 重新开始")
+
+    // 峰值在块的中间：提前开始压，往下压每个采样最多 1/96，离峰值远的原样
+    let quiet: Float = 0.05
+    var input = [Float](repeating: quiet, count: 1_000)
+    input[500] = 3
+    out = limit(input, block: 1_000, limiter: &limiter)
+    let peakOff: Float = abs(out[500] - ceiling)
+    expect(peakOff < 1e-6, "峰值应该压到 \(ceiling)：\(out[500])")
+    let gains: [Float] = (0..<500).map { (i: Int) -> Float in out[i] / input[i] }
+    let steepest: Float = zip(gains, gains.dropFirst()).map { (a: Float, b: Float) -> Float in a - b }.max() ?? 0
+    let fastest: Float = 1 / MixLimiter.attackSamples + 1e-6
+    expect(steepest <= fastest, "往下压得太快：每个采样 \(steepest)")
+    expect(out[0..<400].elementsEqual(input[0..<400]), "离峰值远的地方不该动")
+
+    // 不是有限的数换成 0（以前削成 -1 或 1，是一声「咔」）
+    limiter = MixLimiter()
+    out = limit([.nan, 0.5, .infinity, -.infinity], block: 4, limiter: &limiter)
+    expectEqual(out, [0, 0.5, 0, 0])
 }
 
 func testMixerDrain() {

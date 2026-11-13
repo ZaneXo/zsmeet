@@ -195,6 +195,30 @@ func TestClusterMinorAndMerge(t *testing.T) {
 	}
 }
 
+// 录音很短、每个人都只有几个小段时：按人数分的照样分开，自动区分的都算一个人。
+func TestClusterShortWithFewWindows(t *testing.T) {
+	emb, truth := voices(3, 1, 4, 6) // 12 个小段，每人 4 个
+	labels := Cluster(emb, 3)
+	if n := distinct(labels); n != 3 {
+		t.Errorf("选了 3 个人，应该分出 3 个，分出了 %d 个", n)
+	}
+	if a := agree(labels, truth); a < 0.99 {
+		t.Errorf("只分对了 %.0f%%", 100*a)
+	}
+	if n := distinct(Cluster(emb, 0)); n != 1 {
+		t.Errorf("自动区分时都只有几个小段，算一个人：分出了 %d 个", n)
+	}
+}
+
+// 每句话都很短、一个小段都没有：都算一个人。
+func TestTurnsWithoutWindows(t *testing.T) {
+	got := Turns([]Span{{1, 1.5}, {3, 3.6}}, nil, nil)
+	want := []transcript.Turn{{Start: 1, End: 1.5, Speaker: 0}, {Start: 3, End: 3.6, Speaker: 0}}
+	if !slices.Equal(got, want) {
+		t.Errorf("得到 %v，应该是 %v", got, want)
+	}
+}
+
 // 只有一个小段、或者没有：都算一个人。
 func TestClusterTiny(t *testing.T) {
 	if got := Cluster(nil, 0); len(got) != 0 {

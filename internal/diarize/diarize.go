@@ -83,7 +83,7 @@ func Cluster(emb [][]float32, speakers int) []int {
 	} else {
 		labels = spectralSampled(emb, speakers)
 	}
-	labels = filterMinor(emb, labels)
+	labels = filterMinor(emb, labels, speakers > 0)
 	if speakers <= 0 {
 		labels = mergeByCos(emb, labels)
 	}
@@ -351,8 +351,8 @@ func ahc(emb [][]float32, speakers int) []int {
 }
 
 // filterMinor 把不超过 minClusterSize 个小段的类（零碎）里的每个小段归到平均声纹最像的大类。
-// 一个大类都没有时都算一个人。
-func filterMinor(emb [][]float32, labels []int) []int {
+// 一个大类都没有时（录音很短）：按人数分的不动（每个人都只说了几句），自动区分的都算一个人。
+func filterMinor(emb [][]float32, labels []int, fixed bool) []int {
 	size := map[int]int{}
 	for _, l := range labels {
 		size[l]++
@@ -368,7 +368,9 @@ func filterMinor(emb [][]float32, labels []int) []int {
 	}
 	out := slices.Clone(labels)
 	if len(major) == 0 {
-		clear(out)
+		if !fixed {
+			clear(out)
+		}
 		return out
 	}
 	majorOnly := slices.Clone(labels)
@@ -461,12 +463,17 @@ func renumber(labels []int) []int {
 
 // Turns 整理出每个人说话的时间段。windows 是按时间排好的小段，labels 是它们的说话人，speech 是切小段之前
 // 有人说话的片段（也按时间排好）：同一个人相邻（重叠或首尾相接）的小段接起来，换人时两个小段重叠的部分从中间分开；
-// 没有小段的片段（太短，或者声纹没算出来）整段归到时间上最近的小段的说话人，免得这几句话没有说话人。
+// 没有小段的片段（太短，或者声纹没算出来）整段归到时间上最近的小段的说话人，免得这几句话没有说话人；
+// 一个小段都没有时（每句话都很短）都算一个人。
 func Turns(speech, windows []Span, labels []int) []transcript.Turn {
-	out := compress(windows, labels)
 	if len(windows) == 0 {
+		out := make([]transcript.Turn, len(speech))
+		for i, s := range speech {
+			out[i] = transcript.Turn{Start: s.Start, End: s.End}
+		}
 		return out
 	}
+	out := compress(windows, labels)
 	j := 0
 	for _, s := range speech {
 		for j < len(windows) && windows[j].End <= s.Start {

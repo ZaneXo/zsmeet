@@ -210,6 +210,10 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 	if err != nil {
 		return nil, err
 	}
+	// 聚类那一步不能中断：算完以后再看一次是不是取消了
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ids := transcript.AssignSpeakers(segs, turns)
 	voices, err := r.voices(ctx, engine, samples, transcript.RenumberTurns(turns, ids))
 	if err != nil {

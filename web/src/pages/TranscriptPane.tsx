@@ -80,9 +80,11 @@ export function TranscriptPane({
   const speakers = new Set(segments.map((s) => s.speaker).filter((s) => s >= 0)).size;
   const sentence = (seg: Segment, index: number) => {
     const active = canSeek && now >= seg.start && now < seg.end;
+    // 纠错改过的句子画一条浅浅的虚线，鼠标停上去能看到识别出的原文
     const className = `rounded-md px-0.5 transition-colors ${active ? "bg-brand-tint" : index === focused ? "bg-[#fff3c4]" : ""} ${
       canSeek ? "cursor-pointer hover:bg-canvas" : ""
-    }`;
+    } ${seg.orig ? "underline decoration-line decoration-dotted underline-offset-4" : ""}`;
+    const original = seg.orig ? `识别原文：${seg.orig}` : undefined;
     const seek = () => onSeek(seg.start);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -98,7 +100,8 @@ export function TranscriptPane({
           else refs.current.delete(index);
         }}
         className={className}
-        {...(canSeek ? { role: "button", tabIndex: 0, onClick: seek, onKeyDown: onKey, title: `从 ${clock(seg.start)} 开始播放` } : {})}
+        title={canSeek ? [`从 ${clock(seg.start)} 开始播放`, original].filter(Boolean).join("\n") : original}
+        {...(canSeek ? { role: "button", tabIndex: 0, onClick: seek, onKeyDown: onKey } : {})}
       >
         <Highlight text={seg.text} keyword={keyword} />
       </span>

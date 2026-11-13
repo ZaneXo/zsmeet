@@ -370,12 +370,13 @@ function Title({ meeting }: { meeting: Meeting }) {
   );
 }
 
-const STEPS = ["assemble", "transcribe", "diarize", "minutes"] as const;
+const STEPS = ["assemble", "transcribe", "diarize", "correct", "minutes"] as const;
 
 const STEP_HINT: Record<(typeof STEPS)[number], string> = {
   assemble: "把上传的分片拼起来，转成统一的格式",
   transcribe: "语音识别，自动加标点",
   diarize: "按声音区分是谁在说话。这一步不显示进度，长会议要等几分钟",
+  correct: "用大模型改正同音字、人名和专有名词；没有配置大模型时跳过",
   minutes: "把转写交给大模型写成纪要",
 };
 
@@ -440,13 +441,14 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
     );
   }
 
-  // 已经有转写时（重新生成纪要）只有写纪要这一步
+  // 已经有转写时（重新生成纪要）只有写纪要这一步；刚识别完、转写已经出来的时候，可能还在校对
   if (minutesOnly || m.stage === "minutes") {
+    const correcting = m.stage === "correct";
     return (
       <Card className="flex flex-col gap-2.5 p-5">
         <div className="flex justify-between text-sm">
-          <b className="font-semibold">正在生成纪要</b>
-          <span className="text-muted">长会议会分几段处理，可能要几分钟</span>
+          <b className="font-semibold">{correcting ? "正在校对转写" : "正在生成纪要"}</b>
+          <span className="text-muted">{correcting ? "改正认错的字，转写稍后会更新，接着生成纪要" : "长会议会分几段处理，可能要几分钟"}</span>
         </div>
         <ProgressBar value={Math.max(0.05, m.progress)} />
       </Card>

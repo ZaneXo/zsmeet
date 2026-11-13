@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -55,7 +56,8 @@ func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress f
 	e.samples.Store(int64(len(samples)))
 	progress(1)
 	if e.segs != nil {
-		return e.segs, nil
+		// 每次给一份新的，和真的引擎一样：处理流程会直接改返回的句子
+		return slices.Clone(e.segs), nil
 	}
 	return []transcript.Segment{
 		{Start: 0, End: 0.9, Speaker: -1, Text: "一期只做网页端。"},
@@ -89,8 +91,17 @@ type env struct {
 	pool   *pgxpool.Pool
 	engine *fakeEngine
 	user   sqlc.User
-	// 最后一次发给假大模型的请求内容
+	// 最后一次发给假大模型的写纪要请求的内容
 	lastPrompt atomic.Pointer[string]
+	// 假大模型收到了几次校对转写的请求、最后一次的内容，以及它的回答（为空时回答「没有要改的」）
+	corrections   atomic.Int32
+	lastCorrect   atomic.Pointer[string]
+	correctAnswer atomic.Pointer[string]
+}
+
+// isCorrection：发给大模型的是校对转写的请求（不是写纪要）。
+func isCorrection(prompt string) bool {
+	return strings.Contains(prompt, "会议转写的校对员")
 }
 
 func newEnv(t *testing.T) *env {
@@ -195,14 +206,25 @@ func (e *env) meeting(id uuid.UUID) sqlc.Meeting {
 }
 
 // llm 起一个假的大模型接口并保存为团队配置。fail 为 true 时接口返回 401。
+// 返回的 calls 只数写纪要的请求，校对转写的请求数在 e.corrections 里。
 func (e *env) llm(fail *atomic.Bool) (calls *atomic.Int32) {
 	e.t.Helper()
 	calls = new(atomic.Int32)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		prompt := string(body)
-		e.lastPrompt.Store(&prompt)
+		content := "## 摘要\n[00:00] 一期只做网页端。"
+		if isCorrection(prompt) {
+			e.corrections.Add(1)
+			e.lastCorrect.Store(&prompt)
+			content = `{"fixes": []}`
+			if a := e.correctAnswer.Load(); a != nil {
+				content = *a
+			}
+		} else {
+			calls.Add(1)
+			e.lastPrompt.Store(&prompt)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if fail != nil && fail.Load() {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -213,7 +235,7 @@ func (e *env) llm(fail *atomic.Bool) (calls *atomic.Int32) {
 			"id": "x", "object": "chat.completion", "model": "test",
 			"choices": []map[string]any{{
 				"index": 0, "finish_reason": "stop",
-				"message": map[string]any{"role": "assistant", "content": "## 摘要\n[00:00] 一期只做网页端。"},
+				"message": map[string]any{"role": "assistant", "content": content},
 			}},
 		})
 	}))
@@ -690,5 +712,106 @@ func TestCustomTemplateAndFallback(t *testing.T) {
 	}
 	if mv.Template != "general" {
 		t.Errorf("第 2 版记的是通用模板：%q", mv.Template)
+	}
+}
+
+// transcriptOf 读出存好的转写。
+func (e *env) transcriptOf(id uuid.UUID) []transcript.Segment {
+	e.t.Helper()
+	raw, err := e.q.GetTranscript(e.t.Context(), id)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var segs []transcript.Segment
+	if err := json.Unmarshal(raw, &segs); err != nil {
+		e.t.Fatal(err)
+	}
+	return segs
+}
+
+// 识别出的错字：先按热词的读音改（非书 → 飞书），再让大模型校对（录音机 → 录音器）。改过的句子留着原文，
+// 写纪要、搜索用的都是改过的；大模型改得太多的句子不采用。
+func TestCorrectTranscript(t *testing.T) {
+	e := newEnv(t)
+	e.engine.segs = []transcript.Segment{
+		{Start: 0, End: 0.9, Speaker: -1, Text: "纪要发到非书群里。"},
+		{Start: 1.1, End: 1.9, Speaker: -1, Text: "同意，录音机放到二期。"},
+		{Start: 1.9, End: 2, Speaker: -1, Text: "然后呢就是说这个事情我们下周再看一下吧。"},
+	}
+	calls := e.llm(nil)
+	answer := `好的：{"fixes": [{"id": 1, "text": "同意，录音器放到二期。"}, {"id": 2, "text": "这件事下周再讨论。"}]}`
+	e.correctAnswer.Store(&answer)
+	args := e.upload(wav())
+	if _, err := e.pool.Exec(t.Context(), `UPDATE meetings SET hotwords = '飞书, 张敏' WHERE id = $1`, args.MeetingID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	if m := e.meeting(args.MeetingID); m.Status != "done" || m.CurrentVersion != 1 {
+		t.Fatalf("会议应该处理完、生成纪要：%s %q", m.Status, m.Error)
+	}
+	if n := e.corrections.Load(); n != 1 || calls.Load() != 1 {
+		t.Errorf("应该校对一次、写纪要一次，校对了 %d 次，写纪要 %d 次", n, calls.Load())
+	}
+	if p := *e.lastCorrect.Load(); !strings.Contains(p, "飞书、张敏") || !strings.Contains(p, "产品周会") || !strings.Contains(p, "[0] 说话人 1：纪要发到飞书群里。") {
+		t.Errorf("校对的请求里要有热词、标题，转写是按读音改过的：%s", p)
+	}
+
+	segs := e.transcriptOf(args.MeetingID)
+	want := []transcript.Segment{
+		{Start: 0, End: 0.9, Speaker: 0, Text: "纪要发到飞书群里。", Orig: "纪要发到非书群里。"},
+		{Start: 1.1, End: 1.9, Speaker: 1, Text: "同意，录音器放到二期。", Orig: "同意，录音机放到二期。"},
+		{Start: 1.9, End: 2, Speaker: 1, Text: "然后呢就是说这个事情我们下周再看一下吧。"},
+	}
+	if !slices.Equal(segs, want) {
+		t.Errorf("转写：\n got %+v\nwant %+v", segs, want)
+	}
+	if p := *e.lastPrompt.Load(); !strings.Contains(p, "飞书群") || !strings.Contains(p, "录音器") || strings.Contains(p, "录音机") {
+		t.Errorf("写纪要要用改过的转写：%s", p)
+	}
+	for _, word := range []string{"飞书", "录音器"} {
+		query := search.TSQuery([]string{word})
+		if rows, err := e.q.ListMeetings(t.Context(), sqlc.ListMeetingsParams{Query: &query, MaxRows: 10}); err != nil || len(rows) != 1 {
+			t.Errorf("搜「%s」应该找到这场会议：%d %v", word, len(rows), err)
+		}
+	}
+
+	// 重新生成纪要不再校对一遍
+	if err := e.work(e.enqueue(args.MeetingID, "done")); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.corrections.Load(); n != 1 {
+		t.Errorf("重新生成纪要不该再校对，校对了 %d 次", n)
+	}
+}
+
+// 校对失败（回答解析不出来）不影响会议处理完；没配置大模型时只按热词的读音改。
+func TestCorrectionIsBestEffort(t *testing.T) {
+	e := newEnv(t)
+	e.engine.segs = []transcript.Segment{{Start: 0, End: 2, Speaker: -1, Text: "纪要发到非书群里。"}}
+	args := e.upload(wav())
+	if _, err := e.pool.Exec(t.Context(), `UPDATE meetings SET hotwords = '飞书' WHERE id = $1`, args.MeetingID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	if segs := e.transcriptOf(args.MeetingID); segs[0].Text != "纪要发到飞书群里。" || segs[0].Orig != "纪要发到非书群里。" {
+		t.Errorf("没配大模型也要按热词的读音改：%+v", segs)
+	}
+
+	e.llm(nil)
+	answer := "没有要改的"
+	e.correctAnswer.Store(&answer)
+	args = e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	if m := e.meeting(args.MeetingID); m.Status != "done" || m.CurrentVersion != 1 || e.corrections.Load() != 1 {
+		t.Fatalf("校对失败也要接着写纪要：%s %q，校对了 %d 次", m.Status, m.Error, e.corrections.Load())
+	}
+	if segs := e.transcriptOf(args.MeetingID); segs[0].Text != "纪要发到非书群里。" || segs[0].Orig != "" {
+		t.Errorf("这场没有热词，校对又失败了，转写应该原样：%+v", segs)
 	}
 }

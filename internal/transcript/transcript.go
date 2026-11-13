@@ -16,6 +16,8 @@ type Segment struct {
 	// 说话人编号，从 0 开始，按第一次开口的先后排；-1 表示没分出来
 	Speaker int    `json:"speaker"`
 	Text    string `json:"text"`
+	// 识别出的原文。只有文字被纠错改过的句子才有（见 internal/correct），没改过的为空
+	Orig string `json:"orig,omitempty"`
 }
 
 // Turn 是说话人区分的结果：某个人在一段时间里说话。
@@ -124,6 +126,8 @@ func Merge(segs []Segment, maxGap float64, maxChars int, breaks []float64) []Seg
 				continue
 			}
 		}
+		// 合成的段落只用来阅读、交给大模型，不带纠错前的原文（那只对单句有意义）
+		s.Orig = ""
 		out = append(out, s)
 	}
 	return out

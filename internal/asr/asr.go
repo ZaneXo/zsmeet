@@ -21,9 +21,9 @@ import (
 // Engine 持有加载好的模型。加载一次要几秒、占几百 MB 内存，所以整个进程共用一个。
 // 它的方法不能并发调用，由调用方排队。
 type Engine struct {
-	recognizer *sherpa.OfflineRecognizer
-	diarizer   *sherpa.OfflineSpeakerDiarization
-	vad        sherpa.VadModelConfig
+	// 识别文字（SenseVoice）
+	*Transcriber
+	diarizer *sherpa.OfflineSpeakerDiarization
 
 	// 算声纹用的模型和区分说话人的是同一个文件。管理员打开了声纹才用到，第一次用时才加载
 	embedding sherpa.SpeakerEmbeddingExtractorConfig
@@ -33,23 +33,11 @@ type Engine struct {
 // Load 加载模型。threads 是识别用的 CPU 线程数，language 是识别的语言（见 config.Config.ASRLanguage）。
 func Load(p models.Paths, threads int, language string) (*Engine, error) {
 	e := &Engine{}
-
-	rc := sherpa.OfflineRecognizerConfig{}
-	rc.FeatConfig.SampleRate = audio.SampleRate
-	rc.FeatConfig.FeatureDim = 80
-	// SenseVoice 自己会加标点、把数字写成阿拉伯数字（use ITN），并给出每个字的时间，
-	// 所以不再需要单独的标点模型，句子也能按标点切得很准
-	rc.ModelConfig.SenseVoice.Model = p.SenseVoice()
-	// 固定成中文时，夹在中文里的英文照样认得出来；auto 会把很短的「嗯」「哦」认成日文
-	rc.ModelConfig.SenseVoice.Language = language
-	rc.ModelConfig.SenseVoice.UseInverseTextNormalization = 1
-	rc.ModelConfig.Tokens = p.Tokens()
-	rc.ModelConfig.NumThreads = threads
-	rc.ModelConfig.Provider = "cpu"
-	rc.DecodingMethod = "greedy_search"
-	if e.recognizer = sherpa.NewOfflineRecognizer(&rc); e.recognizer == nil {
-		return nil, errors.New("识别模型加载失败")
+	t, err := NewTranscriber(SenseVoice(p, threads, language), p.VAD())
+	if err != nil {
+		return nil, err
 	}
+	e.Transcriber = t
 
 	dc := sherpa.OfflineSpeakerDiarizationConfig{}
 	dc.Segmentation.Pyannote.Model = p.Segmentation()
@@ -73,26 +61,48 @@ func Load(p models.Paths, threads int, language string) (*Engine, error) {
 	}
 
 	e.embedding = sherpa.SpeakerEmbeddingExtractorConfig{Model: p.Embedding(), NumThreads: threads, Provider: "cpu"}
-
-	e.vad.SileroVad.Model = p.VAD()
-	e.vad.SileroVad.Threshold = 0.5
-	e.vad.SileroVad.MinSilenceDuration = 0.3
-	e.vad.SileroVad.MinSpeechDuration = 0.25
-	e.vad.SileroVad.WindowSize = vadWindow
-	// 一句话最长 10 秒，再长就强行切开，识别模型在短句上更准
-	e.vad.SileroVad.MaxSpeechDuration = 10
-	e.vad.SampleRate = audio.SampleRate
-	e.vad.NumThreads = 1
-	e.vad.Provider = "cpu"
 	return e, nil
+}
+
+// Transcriber 是识别文字这一步：Silero VAD 切出有人说话的片段，逐段识别，按标点切成带时间的句子。
+// Engine 用它跑 SenseVoice；评测工具（tools/asreval）用它在同样的切段方式下比较别的识别模型。
+// 它的方法不能并发调用。
+type Transcriber struct {
+	recognizer *sherpa.OfflineRecognizer
+	vad        sherpa.VadModelConfig
+}
+
+// NewTranscriber 加载识别模型 m。vadModel 是 Silero VAD 模型文件的路径。
+func NewTranscriber(m Model, vadModel string) (*Transcriber, error) {
+	t := &Transcriber{}
+	if t.recognizer = sherpa.NewOfflineRecognizer(&m.config); t.recognizer == nil {
+		return nil, errors.New("识别模型加载失败")
+	}
+	t.vad.SileroVad.Model = vadModel
+	t.vad.SileroVad.Threshold = 0.5
+	t.vad.SileroVad.MinSilenceDuration = 0.3
+	t.vad.SileroVad.MinSpeechDuration = 0.25
+	t.vad.SileroVad.WindowSize = vadWindow
+	// 一句话最长 10 秒，再长就强行切开，识别模型在短句上更准
+	t.vad.SileroVad.MaxSpeechDuration = 10
+	t.vad.SampleRate = audio.SampleRate
+	t.vad.NumThreads = 1
+	t.vad.Provider = "cpu"
+	return t, nil
+}
+
+// Close 释放识别模型。进程里一直用着的 Engine 不用调。
+func (t *Transcriber) Close() {
+	sherpa.DeleteOfflineRecognizer(t.recognizer)
+	t.recognizer = nil
 }
 
 // Silero VAD 在 16k 采样率下固定每次吃 512 个采样
 const vadWindow = 512
 
 // Transcribe 把整段录音识别成带时间的句子。progress 的参数是 0 到 1。
-func (e *Engine) Transcribe(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
-	vad := sherpa.NewVoiceActivityDetector(&e.vad, 30)
+func (t *Transcriber) Transcribe(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
+	vad := sherpa.NewVoiceActivityDetector(&t.vad, 30)
 	if vad == nil {
 		return nil, errors.New("语音检测模型加载失败")
 	}
@@ -104,7 +114,7 @@ func (e *Engine) Transcribe(ctx context.Context, samples []float32, progress fun
 			speech := vad.Front()
 			vad.Pop()
 			start := float64(speech.Start) / audio.SampleRate
-			segs = append(segs, e.recognize(speech.Samples, start, start+float64(len(speech.Samples))/audio.SampleRate)...)
+			segs = append(segs, t.recognize(speech.Samples, start, start+float64(len(speech.Samples))/audio.SampleRate)...)
 		}
 	}
 
@@ -127,11 +137,11 @@ func (e *Engine) Transcribe(ctx context.Context, samples []float32, progress fun
 
 // recognize 识别一小段录音（start 到 end 秒），按标点切成句子，每句带开始和结束时间。
 // 模型没给出每个字的时间时（正常不会发生），整段算一句。
-func (e *Engine) recognize(samples []float32, start, end float64) []transcript.Segment {
-	stream := sherpa.NewOfflineStream(e.recognizer)
+func (t *Transcriber) recognize(samples []float32, start, end float64) []transcript.Segment {
+	stream := sherpa.NewOfflineStream(t.recognizer)
 	defer sherpa.DeleteOfflineStream(stream)
 	stream.AcceptWaveform(audio.SampleRate, samples)
-	e.recognizer.Decode(stream)
+	t.recognizer.Decode(stream)
 	result := stream.GetResult()
 	if len(result.Tokens) > 0 && len(result.Timestamps) == len(result.Tokens) {
 		tokens := make([]transcript.Token, len(result.Tokens))

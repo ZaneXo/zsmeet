@@ -31,6 +31,7 @@ require (
 	github.com/k2-fsa/sherpa-onnx-go-macos v1.13.8 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-windows v1.13.8 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
+	github.com/mozillazg/go-pinyin v0.21.0 // indirect
 	github.com/riverqueue/river/riverdriver v0.51.1 // indirect
 	github.com/riverqueue/river/rivershared v0.51.1 // indirect
 	github.com/riverqueue/river/rivertype v0.51.1 // indirect

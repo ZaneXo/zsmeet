@@ -38,6 +38,30 @@ dev-web: ## 启动前端开发服务器，打开 http://127.0.0.1:5173
 	pnpm -C web install
 	pnpm -C web dev
 
+# ---- 比较识别方案 ----
+
+EVAL_MODELS := .dev/models/eval
+FUNASR_NANO := sherpa-onnx-funasr-nano-int8-2025-12-30
+QWEN3_ASR   := sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
+
+.PHONY: asr-eval-models
+asr-eval-models: ## 下载评测用的 Fun-ASR-Nano、Qwen3-ASR 模型到 .dev/models/eval（约 2 GB，只用于评测，线上不用）
+	@mkdir -p $(EVAL_MODELS)
+	@# Fun-ASR-Nano 从 ModelScope 下（国内快），Qwen3-ASR 只在 GitHub 上有。断了重跑会接着下
+	@test -d $(EVAL_MODELS)/$(FUNASR_NANO) || { \
+		curl -fL --http1.1 -C - --retry 5 -o $(EVAL_MODELS)/$(FUNASR_NANO).tar.bz2 https://modelscope.cn/models/csukuangfj/asr-models/resolve/master/$(FUNASR_NANO).tar.bz2 && \
+		tar xjf $(EVAL_MODELS)/$(FUNASR_NANO).tar.bz2 -C $(EVAL_MODELS) && rm $(EVAL_MODELS)/$(FUNASR_NANO).tar.bz2; }
+	@test -d $(EVAL_MODELS)/$(QWEN3_ASR) || { \
+		curl -fL --http1.1 -C - --retry 5 -o $(EVAL_MODELS)/$(QWEN3_ASR).tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$(QWEN3_ASR).tar.bz2 && \
+		tar xjf $(EVAL_MODELS)/$(QWEN3_ASR).tar.bz2 -C $(EVAL_MODELS) && rm $(EVAL_MODELS)/$(QWEN3_ASR).tar.bz2; }
+
+.PHONY: asr-eval
+asr-eval: asr-eval-models ## 比较识别方案：make asr-eval DATA=录音目录 [HOTWORDS="飞书,张敏"] [ARGS="-llm-url ... -llm-model ..."]
+	@test -n "$(DATA)" || { echo "用法：make asr-eval DATA=录音目录（每段录音配一个同名的 .txt 标准文字）"; exit 1; }
+	go run ./tools/asreval -data '$(DATA)' -models .dev/models -hotwords '$(HOTWORDS)' \
+		-funasr-nano $(EVAL_MODELS)/$(FUNASR_NANO) -qwen3-asr $(EVAL_MODELS)/$(QWEN3_ASR) \
+		-out .dev/asreval $(ARGS)
+
 # ---- 生成代码 ----
 
 .PHONY: gen

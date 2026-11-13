@@ -29,7 +29,7 @@ type Meeting struct {
 	Source string `json:"source" enum:"record,upload,feishu,desktop" doc:"录音从哪来：网页录音、上传文件、飞书会议、桌面版录音（电脑录音）"`
 	Status string `json:"status" enum:"uploading,queued,processing,done,failed"`
 	// 只在 status 为 processing 时有意义
-	Stage    string  `json:"stage" enum:",models,assemble,transcribe,diarize,minutes" doc:"正在进行的处理步骤"`
+	Stage    string  `json:"stage" enum:",models,assemble,transcribe,diarize,correct,minutes" doc:"正在进行的处理步骤"`
 	Progress float64 `json:"progress" minimum:"0" maximum:"1" doc:"当前步骤的进度"`
 	Error    string  `json:"error" doc:"status 为 failed 时的失败原因，可以直接展示"`
 
@@ -111,6 +111,7 @@ type Segment struct {
 	End     float64 `json:"end" doc:"结束时间，秒"`
 	Speaker int     `json:"speaker" doc:"说话人编号，从 0 开始；-1 表示没分出来"`
 	Text    string  `json:"text"`
+	Orig    string  `json:"orig,omitempty" doc:"识别出的原文。只有文字被纠错（按热词的读音、大模型校对）改过的句子才有"`
 }
 
 func toSegments(segs []transcript.Segment) []Segment {

@@ -61,6 +61,7 @@ export const STAGE_LABEL: Record<Meeting["stage"], string> = {
   assemble: "接收与转码",
   transcribe: "识别文字",
   diarize: "区分说话人",
+  correct: "校对文字",
   minutes: "生成纪要",
 };
 

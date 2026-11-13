@@ -421,7 +421,7 @@ jobs:
             echo
             echo "---"
             echo
-            echo "**安装**：下载 \`$name.dmg\`（macOS 14.4 及以上，Apple 芯片和 Intel 都能用），打开后把 zsmeet 拖进「应用程序」。安装包没有签名，第一次打开时 macOS 会拦住：到「系统设置 → 隐私与安全性」最下面点「仍要打开」（macOS 14 也可以在「应用程序」里右键点 zsmeet →「打开」）。详见 README 的「桌面版（macOS）」一节。"
+            echo "**安装**：下载 \`$name.dmg\`（macOS 14.4 及以上，Apple 芯片和 Intel 都能用），打开后把 zsmeet 拖进「应用程序」。安装包没有签名，第一次打开时 macOS 会拦住：到「系统设置 → 隐私与安全性」最下面点「仍要打开」（macOS 14 也可以在「应用程序」里右键点 zsmeet →「打开」）。详见 $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/main/docs/desktop-guide.md"
             echo
             echo "**已经装了的**：在 App 里更新就行（设置 → 账号 → 版本 →「检查更新」）。\`.app.tar.gz\`、\`.sig\` 和 \`latest.json\` 是给 App 自动更新用的，不用下载。$pre"
           } > "$RUNNER_TEMP/body.md"

@@ -14,16 +14,20 @@ import (
 func downloadModels(ctx context.Context) error {
 	dir := cmp.Or(os.Getenv("ZSMEET_MODELS_DIR"), "./models")
 	mirror := cmp.Or(os.Getenv("ZSMEET_MODEL_MIRROR"), "https://huggingface.co")
-	lastPct := int64(-1)
-	err := models.Ensure(ctx, dir, mirror, func(done, total int64) {
-		if pct := done * 100 / total; pct >= lastPct+10 {
-			lastPct = pct
-			slog.Info("下载识别模型", "percent", pct, "mb", done>>20, "total_mb", total>>20)
-		}
-	})
-	if err != nil {
+	if err := models.Ensure(ctx, dir, mirror, logDownload()); err != nil {
 		return err
 	}
 	slog.Info("识别模型已就绪", "dir", dir)
 	return nil
+}
+
+// logDownload 是下载模型时的进度回调：每下载 10% 记一行日志。
+func logDownload() func(done, total int64) {
+	lastPct := int64(-1)
+	return func(done, total int64) {
+		if pct := done * 100 / total; pct >= lastPct+10 {
+			lastPct = pct
+			slog.Info("下载识别模型", "percent", pct, "mb", done>>20, "total_mb", total>>20)
+		}
+	}
 }

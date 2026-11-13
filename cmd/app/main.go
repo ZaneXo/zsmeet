@@ -11,6 +11,10 @@
 //	zsmeet reset-link 邮箱   给这个账号生成重置密码的链接
 //	zsmeet make-admin 邮箱   把这个账号设为管理员
 //	zsmeet unlock 邮箱       解开这个账号的登录锁（密码输错太多次被锁住时）
+//
+// 开发者调识别参数用：
+//
+//	zsmeet transcribe 录音文件 [选项]   用和后台处理一样的流程转写一个文件，打印每一句和统计（见 transcribe.go）
 package main
 
 import (
@@ -53,8 +57,10 @@ func main() {
 		err = makeAdmin(ctx, os.Args[2:])
 	case "unlock":
 		err = unlock(ctx, os.Args[2:])
+	case "transcribe":
+		err = transcribeFile(ctx, os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "用法：zsmeet serve | worker | models | openapi | ping | reset-link 邮箱 | make-admin 邮箱 | unlock 邮箱")
+		fmt.Fprintln(os.Stderr, "用法：zsmeet serve | worker | models | openapi | ping | reset-link 邮箱 | make-admin 邮箱 | unlock 邮箱 | transcribe 录音文件")
 		os.Exit(2)
 	}
 	if err != nil {

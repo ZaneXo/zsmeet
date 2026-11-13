@@ -2,5 +2,7 @@ module CRecorder {
     header "CRecorder.h"
     // 回声消除（WebRTC AEC3）的 C 接口，实现在 zr_aec.cc（C++）
     header "zr_aec.h"
+    // 麦克风自动增益（WebRTC AGC2）的 C 接口，实现在 zr_agc.cc（C++）
+    header "zr_agc.h"
     export *
 }

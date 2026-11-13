@@ -33,10 +33,12 @@ type Meeting struct {
 	Progress float64 `json:"progress" minimum:"0" maximum:"1" doc:"当前步骤的进度"`
 	Error    string  `json:"error" doc:"status 为 failed 时的失败原因，可以直接展示"`
 
-	Template    string `json:"template" doc:"纪要模板的 ID"`
-	Hotwords    string `json:"hotwords"`
-	DurationSec int    `json:"duration_sec"`
-	HasAudio    bool   `json:"has_audio" doc:"录音还在不在（过了保留期会被删除）"`
+	Template string `json:"template" doc:"纪要模板的 ID"`
+	Hotwords string `json:"hotwords"`
+	// 0 是按声音自动区分
+	SpeakerCount int  `json:"speaker_count" doc:"有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人"`
+	DurationSec  int  `json:"duration_sec"`
+	HasAudio     bool `json:"has_audio" doc:"录音还在不在（过了保留期会被删除）"`
 	// 录音过了保留期被删除的时间；没删时没有这一项
 	AudioDeletedAt *time.Time `json:"audio_deleted_at,omitempty" doc:"录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项"`
 	// 0 表示还没有纪要
@@ -87,6 +89,7 @@ func toMeeting(m service.Meeting) Meeting {
 		Error:          m.Error,
 		Template:       m.Template,
 		Hotwords:       m.Hotwords,
+		SpeakerCount:   int(m.SpeakerCount),
 		DurationSec:    int(m.DurationSec),
 		HasAudio:       m.AudioKey != "" && m.AudioDeletedAt == nil,
 		AudioDeletedAt: m.AudioDeletedAt,

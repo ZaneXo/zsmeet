@@ -119,6 +119,7 @@ type Meeting struct {
 	Speakers       []byte
 	Retranscribe   bool
 	AutoSpeakers   []int32
+	SpeakerCount   int32
 }
 
 type MeetingMember struct {

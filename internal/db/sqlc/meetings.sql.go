@@ -66,7 +66,7 @@ func (q *Queries) AddMinutesVersion(ctx context.Context, arg AddMinutesVersionPa
 const claimMeeting = `-- name: ClaimMeeting :one
 UPDATE meetings SET status = 'processing', heartbeat_at = now(), updated_at = now()
 WHERE id = $1 AND run_id = $2 AND status IN ('queued', 'processing')
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers, speaker_count
 `
 
 type ClaimMeetingParams struct {
@@ -108,6 +108,7 @@ func (q *Queries) ClaimMeeting(ctx context.Context, arg ClaimMeetingParams) (Mee
 		&i.Speakers,
 		&i.Retranscribe,
 		&i.AutoSpeakers,
+		&i.SpeakerCount,
 	)
 	return i, err
 }
@@ -122,18 +123,19 @@ func (q *Queries) ClearRetranscribe(ctx context.Context, id uuid.UUID) error {
 }
 
 const createMeeting = `-- name: CreateMeeting :one
-INSERT INTO meetings (owner_id, title, source, template, hotwords, visibility)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers
+INSERT INTO meetings (owner_id, title, source, template, hotwords, visibility, speaker_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers, speaker_count
 `
 
 type CreateMeetingParams struct {
-	OwnerID    uuid.UUID
-	Title      string
-	Source     string
-	Template   string
-	Hotwords   string
-	Visibility string
+	OwnerID      uuid.UUID
+	Title        string
+	Source       string
+	Template     string
+	Hotwords     string
+	Visibility   string
+	SpeakerCount int32
 }
 
 func (q *Queries) CreateMeeting(ctx context.Context, arg CreateMeetingParams) (Meeting, error) {
@@ -144,6 +146,7 @@ func (q *Queries) CreateMeeting(ctx context.Context, arg CreateMeetingParams) (M
 		arg.Template,
 		arg.Hotwords,
 		arg.Visibility,
+		arg.SpeakerCount,
 	)
 	var i Meeting
 	err := row.Scan(
@@ -176,6 +179,7 @@ func (q *Queries) CreateMeeting(ctx context.Context, arg CreateMeetingParams) (M
 		&i.Speakers,
 		&i.Retranscribe,
 		&i.AutoSpeakers,
+		&i.SpeakerCount,
 	)
 	return i, err
 }
@@ -343,7 +347,7 @@ func (q *Queries) FinishMeeting(ctx context.Context, arg FinishMeetingParams) (i
 }
 
 const getMeeting = `-- name: GetMeeting :one
-SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, u.name AS owner_name, now()::timestamptz AS read_at
+SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, m.speaker_count, u.name AS owner_name, now()::timestamptz AS read_at
 FROM meetings m JOIN users u ON u.id = m.owner_id
 WHERE m.id = $1
 `
@@ -389,6 +393,7 @@ func (q *Queries) GetMeeting(ctx context.Context, id uuid.UUID) (GetMeetingRow, 
 		&i.Meeting.Speakers,
 		&i.Meeting.Retranscribe,
 		&i.Meeting.AutoSpeakers,
+		&i.Meeting.SpeakerCount,
 		&i.OwnerName,
 		&i.ReadAt,
 	)
@@ -478,7 +483,7 @@ func (q *Queries) ListChunks(ctx context.Context, meetingID uuid.UUID) ([]ListCh
 }
 
 const listMeetings = `-- name: ListMeetings :many
-SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, u.name AS owner_name,
+SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, m.speaker_count, u.name AS owner_name,
        (mm.user_id IS NOT NULL)::bool AS is_member, coalesce(mm.can_edit, false)::bool AS member_can_edit,
        now()::timestamptz AS read_at
 FROM meetings m
@@ -566,6 +571,7 @@ func (q *Queries) ListMeetings(ctx context.Context, arg ListMeetingsParams) ([]L
 			&i.Meeting.Speakers,
 			&i.Meeting.Retranscribe,
 			&i.Meeting.AutoSpeakers,
+			&i.Meeting.SpeakerCount,
 			&i.OwnerName,
 			&i.IsMember,
 			&i.MemberCanEdit,
@@ -623,7 +629,7 @@ func (q *Queries) ListMinutesVersions(ctx context.Context, meetingID uuid.UUID) 
 }
 
 const listTrash = `-- name: ListTrash :many
-SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, u.name AS owner_name, coalesce(d.name, '')::text AS deleted_by_name
+SELECT m.id, m.owner_id, m.title, m.source, m.status, m.stage, m.progress, m.error, m.run_id, m.run_by, m.heartbeat_at, m.requeues, m.template, m.hotwords, m.duration_sec, m.audio_key, m.audio_deleted_at, m.visibility, m.current_version, m.created_at, m.updated_at, m.last_chunk_at, m.marks, m.terms, m.deleted_at, m.deleted_by, m.speakers, m.retranscribe, m.auto_speakers, m.speaker_count, u.name AS owner_name, coalesce(d.name, '')::text AS deleted_by_name
 FROM meetings m
 JOIN users u ON u.id = m.owner_id
 LEFT JOIN users d ON d.id = m.deleted_by
@@ -678,6 +684,7 @@ func (q *Queries) ListTrash(ctx context.Context, owner *uuid.UUID) ([]ListTrashR
 			&i.Meeting.Speakers,
 			&i.Meeting.Retranscribe,
 			&i.Meeting.AutoSpeakers,
+			&i.Meeting.SpeakerCount,
 			&i.OwnerName,
 			&i.DeletedByName,
 		); err != nil {
@@ -692,7 +699,7 @@ func (q *Queries) ListTrash(ctx context.Context, owner *uuid.UUID) ([]ListTrashR
 }
 
 const lockMeeting = `-- name: LockMeeting :one
-SELECT id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers FROM meetings WHERE id = $1 FOR UPDATE
+SELECT id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers, speaker_count FROM meetings WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) LockMeeting(ctx context.Context, id uuid.UUID) (Meeting, error) {
@@ -728,6 +735,7 @@ func (q *Queries) LockMeeting(ctx context.Context, id uuid.UUID) (Meeting, error
 		&i.Speakers,
 		&i.Retranscribe,
 		&i.AutoSpeakers,
+		&i.SpeakerCount,
 	)
 	return i, err
 }
@@ -789,7 +797,7 @@ SET status = 'queued', stage = '', progress = 0, error = '', retranscribe = fals
     template = coalesce($3, template),
     updated_at = now()
 WHERE id = $4 AND status = ANY($5::text[])
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers, speaker_count
 `
 
 type QueueMeetingParams struct {
@@ -842,12 +850,13 @@ func (q *Queries) QueueMeeting(ctx context.Context, arg QueueMeetingParams) (Mee
 		&i.Speakers,
 		&i.Retranscribe,
 		&i.AutoSpeakers,
+		&i.SpeakerCount,
 	)
 	return i, err
 }
 
 const renameMeeting = `-- name: RenameMeeting :one
-UPDATE meetings SET title = $2, updated_at = now() WHERE id = $1 RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers
+UPDATE meetings SET title = $2, updated_at = now() WHERE id = $1 RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers, speaker_count
 `
 
 type RenameMeetingParams struct {
@@ -888,6 +897,7 @@ func (q *Queries) RenameMeeting(ctx context.Context, arg RenameMeetingParams) (M
 		&i.Speakers,
 		&i.Retranscribe,
 		&i.AutoSpeakers,
+		&i.SpeakerCount,
 	)
 	return i, err
 }
@@ -936,7 +946,7 @@ func (q *Queries) RequeueStalled(ctx context.Context, arg RequeueStalledParams) 
 const restoreMeeting = `-- name: RestoreMeeting :one
 UPDATE meetings SET deleted_at = NULL, deleted_by = NULL
 WHERE id = $1 AND deleted_at IS NOT NULL
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers, speaker_count
 `
 
 // 从回收站恢复
@@ -973,6 +983,7 @@ func (q *Queries) RestoreMeeting(ctx context.Context, id uuid.UUID) (Meeting, er
 		&i.Speakers,
 		&i.Retranscribe,
 		&i.AutoSpeakers,
+		&i.SpeakerCount,
 	)
 	return i, err
 }
@@ -1077,6 +1088,21 @@ func (q *Queries) SetMeetingSearch(ctx context.Context, arg SetMeetingSearchPara
 	return err
 }
 
+const setMeetingSpeakerCount = `-- name: SetMeetingSpeakerCount :exec
+UPDATE meetings SET speaker_count = $2 WHERE id = $1
+`
+
+type SetMeetingSpeakerCountParams struct {
+	ID           uuid.UUID
+	SpeakerCount int32
+}
+
+// 改这场会议有几个人说话（0 是自动区分），下次转写时用
+func (q *Queries) SetMeetingSpeakerCount(ctx context.Context, arg SetMeetingSpeakerCountParams) error {
+	_, err := q.db.Exec(ctx, setMeetingSpeakerCount, arg.ID, arg.SpeakerCount)
+	return err
+}
+
 const setMeetingSpeakers = `-- name: SetMeetingSpeakers :exec
 UPDATE meetings SET speakers = $2, updated_at = now() WHERE id = $1
 `
@@ -1107,7 +1133,7 @@ func (q *Queries) SetMeetingTerms(ctx context.Context, arg SetMeetingTermsParams
 }
 
 const shareLockMeeting = `-- name: ShareLockMeeting :one
-SELECT id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers FROM meetings WHERE id = $1 FOR SHARE
+SELECT id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers, speaker_count FROM meetings WHERE id = $1 FOR SHARE
 `
 
 // 共享锁：拿着它时会议这一行（可见范围、版本、删除）改不了，UPDATE、DELETE 和 LockMeeting 都要等它放开；别的读不受影响
@@ -1144,6 +1170,7 @@ func (q *Queries) ShareLockMeeting(ctx context.Context, id uuid.UUID) (Meeting, 
 		&i.Speakers,
 		&i.Retranscribe,
 		&i.AutoSpeakers,
+		&i.SpeakerCount,
 	)
 	return i, err
 }
@@ -1236,7 +1263,7 @@ func (q *Queries) TranscriptsFor(ctx context.Context, ids []uuid.UUID) ([]Transc
 const trashMeeting = `-- name: TrashMeeting :one
 UPDATE meetings SET deleted_at = now(), deleted_by = $2
 WHERE id = $1 AND deleted_at IS NULL
-RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers
+RETURNING id, owner_id, title, source, status, stage, progress, error, run_id, run_by, heartbeat_at, requeues, template, hotwords, duration_sec, audio_key, audio_deleted_at, visibility, current_version, created_at, updated_at, last_chunk_at, marks, terms, deleted_at, deleted_by, speakers, retranscribe, auto_speakers, speaker_count
 `
 
 type TrashMeetingParams struct {
@@ -1278,6 +1305,7 @@ func (q *Queries) TrashMeeting(ctx context.Context, arg TrashMeetingParams) (Mee
 		&i.Speakers,
 		&i.Retranscribe,
 		&i.AutoSpeakers,
+		&i.SpeakerCount,
 	)
 	return i, err
 }

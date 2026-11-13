@@ -3,8 +3,21 @@ import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import { onIdentityChange } from "./desktop";
-import { ECHO_CANCEL_OFF, ECHO_CANCEL_ON, IDLE_STATE, nextEnded, normalizeState, parseEchoCancel, parseSources, sentence, settledMeetings } from "./recorderView";
-import type { Ended, Sources } from "./recorderView";
+import {
+  ECHO_CANCEL_OFF,
+  ECHO_CANCEL_ON,
+  IDLE_STATE,
+  micTooQuiet,
+  nextEnded,
+  NO_MIC_LEVELS,
+  normalizeState,
+  parseEchoCancel,
+  parseSources,
+  sentence,
+  settledMeetings,
+  trackMicLevels,
+} from "./recorderView";
+import type { Ended, MicLevels, Sources } from "./recorderView";
 
 /**
  * 桌面版的原生录音（docs/desktop.md 的「录音（第三阶段）」）。录音、上传都在 Rust 那边
@@ -50,6 +63,13 @@ export type EchoReason = "speakers" | "headphones" | "airplay" | "no_reference" 
 /** 回声消除的情况。reason 一般是 EchoReason 里的一个；录音程序以后多了别的原因也照样传过来，所以类型是 string。 */
 export type RecorderEcho = { mode: EchoMode; active: boolean; reason: string | null };
 
+/**
+ * 麦克风自动增益（docs/desktop.md 的「麦克风自动增益」）的模式，录音程序在 started 事件里报的 mic_gain：
+ * auto：在回声消除之后把麦克风的声音调到正常的说话音量（App 总是要它调，界面上没有开关）；off：不调；
+ * unavailable：要调却没能打开，录的是原来的音量。
+ */
+export type MicGainMode = "off" | "auto" | "unavailable";
+
 /** Rust 那边的录音状态（事件 recorder://state 和各个命令的返回值）。 */
 export type RecorderState = {
   status: RecorderStatus;
@@ -74,6 +94,8 @@ export type RecorderState = {
   uploads: RecorderUpload[];
   /** 回声消除：模式、现在开没开、为什么。没在录、录音程序没报（旧版本）时是 null */
   echo: RecorderEcho | null;
+  /** 麦克风自动增益的模式。没在录、录音程序没报（旧版本）时是 null */
+  micGain: MicGainMode | null;
 };
 
 export type Microphone = { uid: string; name: string; default: boolean };
@@ -86,11 +108,15 @@ export type RecorderSnapshot = Readonly<{
   dismissed: ReadonlySet<string>;
   /** 录音功能没能启动的原因 */
   failure: string;
+  /** 麦克风的声音一直很小（见 recorderView.ts 的 micTooQuiet）：录音页上提示把电脑挪近一些、调大输入音量 */
+  micQuiet: boolean;
 }>;
 
 const EVENT_STATE = "recorder://state";
 
-let snap: RecorderSnapshot = { state: IDLE_STATE, ended: null, dismissed: new Set(), failure: "" };
+let snap: RecorderSnapshot = { state: IDLE_STATE, ended: null, dismissed: new Set(), failure: "", micQuiet: false };
+/** 最近的麦克风音量：在这里记（不在录音页上），离开录音页再回来也接着算 */
+let micLevels: MicLevels = NO_MIC_LEVELS;
 const listeners = new Set<() => void>();
 
 function update(patch: Partial<RecorderSnapshot>) {
@@ -108,7 +134,8 @@ function apply(raw: RecorderState) {
   const ended = nextEnded(prev, next, snap.ended);
   // 刚结束的这一场什么也没录下来：服务器上为它建的会议是空的，删掉
   if (ended && ended !== snap.ended && ended.empty) void deleteEmptyMeeting(ended.meetingId);
-  update({ state: next, ended });
+  micLevels = trackMicLevels(micLevels, next);
+  update({ state: next, ended, micQuiet: micTooQuiet(micLevels) });
 }
 
 /**

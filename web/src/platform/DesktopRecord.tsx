@@ -7,7 +7,7 @@ import { AppLink } from "../components/AppLink";
 import { LevelMeter, RecordingMarks } from "../components/RecordingParts";
 import { Button, buttonClass, Card, Field, Icon, Input, Notice, Select } from "../components/ui";
 import { hms } from "../lib/format";
-import { useTemplates, VisibilityField } from "../pages/UploadDialog";
+import { SpeakerCountField, useTemplates, VisibilityField } from "../pages/UploadDialog";
 import { UploadRow } from "./DesktopRecordings";
 import { useOffline } from "./offline";
 import {
@@ -39,8 +39,10 @@ import {
   liveUpload,
   localMeeting,
   micArg,
+  micGainLabel,
   micOptions,
   NO_MIC,
+  quietMicHint,
   recordedLength,
   sentence,
   sourceLabels,
@@ -56,7 +58,7 @@ import { recordUpdateNote } from "./updateView";
  * 录音和上传都在 App 里（Rust 管着录音程序），这个页面只是控制和显示：离开这个页面、关掉窗口，录音都不停。
  */
 export function DesktopRecordPage() {
-  const { state, ended, failure } = useRecorder();
+  const { state, ended, failure, micQuiet } = useRecorder();
   const [params] = useSearchParams();
   const resumeId = params.get("continue");
   // 从提示条点「接着录」过来：这台电脑上这场会议中断了的录音
@@ -71,7 +73,7 @@ export function DesktopRecordPage() {
       </div>
       {failure && <Notice tone="bad">{failure}</Notice>}
       {isLive(state.status) ? (
-        <Live state={state} />
+        <Live state={state} micQuiet={micQuiet} />
       ) : state.status === "stopping" ? (
         <Card className="flex items-center gap-3 p-6 text-sm text-ink-2">
           <span className="size-4 shrink-0 animate-spin rounded-full border-2 border-line-strong border-t-brand" aria-hidden="true" />
@@ -144,6 +146,7 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
   const [template, setTemplate] = useState("general");
   const [hotwords, setHotwords] = useState("");
   const [visibility, setVisibility] = useState<"team" | "private">("team");
+  const [speakerCount, setSpeakerCount] = useState(0);
   const [chosen, setChosen] = useState(loadSources);
   const [echoCancel, setEchoCancel] = useEchoCancel();
   const sources = { ...chosen, mic: effectiveMic(chosen.mic, devices.data) };
@@ -151,7 +154,9 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
 
   const start = useMutation({
     mutationFn: async () => {
-      const meeting = await unwrap(api.POST("/api/meetings", { body: { title, source: "desktop", template, hotwords, visibility } }));
+      const meeting = await unwrap(
+        api.POST("/api/meetings", { body: { title, source: "desktop", template, hotwords, visibility, speaker_count: speakerCount } }),
+      );
       await startRecorder(meeting.id, sources, echoCancel, true);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["meetings"] }),
@@ -186,6 +191,7 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
             <Input id="rec-hotwords" value={hotwords} onChange={(e) => setHotwords(e.target.value)} maxLength={500} placeholder="人名、产品名，用逗号分开" disabled={busy} />
           </Field>
         </div>
+        <SpeakerCountField id="rec-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={busy} />
         <VisibilityField id="rec-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 
         {offline && !start.isError && <Notice tone="warn">现在连不上服务器。开始录音要先在服务器上建好这场会议，请连上以后再开始；开始以后断网也能接着录。</Notice>}
@@ -378,13 +384,18 @@ function StartFailure({ error, warnings }: { error: unknown; warnings: RecorderW
 /** 「回声消除：…」的颜色：开着是绿色，不可用是黄色，没开（戴着耳机这些）和旁边的字一样。 */
 const ECHO_TONE: Record<EchoLabel["tone"], string> = { ok: "text-ok", mute: "", warn: "text-warn" };
 
-function Live({ state }: { state: RecorderState }) {
+/**
+ * 录音中。micQuiet：麦克风的声音（录音程序自动调大以后的）一直很小，提示把电脑挪近一些、调大输入音量
+ * （recorderView.ts 的 micTooQuiet）。
+ */
+function Live({ state, micQuiet }: { state: RecorderState; micQuiet: boolean }) {
   const paused = state.status === "paused";
   const [confirming, setConfirming] = useState(false);
   const act = useMutation({ mutationFn: (run: () => Promise<unknown>) => run() });
   // 麦克风的名字跟着 App 报的走：选的是系统默认的麦克风、录音中换了（比如连上了 AirPods）时，这里也跟着换
   const labels = sourceLabels(state);
   const echo = echoLabel(state);
+  const gain = micGainLabel(state);
   const upload = liveUpload(state.uploads.find((u) => u.meetingId === state.meetingId));
 
   return (
@@ -396,6 +407,7 @@ function Live({ state }: { state: RecorderState }) {
             <span>麦克风：{labels.mic}</span>
             <span>电脑里的声音：{labels.system}</span>
             {echo && <span className={ECHO_TONE[echo.tone]}>{echo.text}</span>}
+            {gain && <span className="text-warn">{gain}</span>}
           </div>
         </div>
 
@@ -450,6 +462,7 @@ function Live({ state }: { state: RecorderState }) {
             {warningText(w)}
           </Notice>
         ))}
+        {micQuiet && state.mic !== null && <Notice tone="warn">{quietMicHint(state.micGain)}</Notice>}
         {upload.trouble && <Notice tone={upload.tone}>{upload.trouble}</Notice>}
 
         <div className="flex flex-col gap-1 border-t border-line pt-4 text-[13px]">

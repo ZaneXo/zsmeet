@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::Instant;
 
 use crate::core::{Account, Core};
-pub use helper::{locate as locate_helper, Devices, EchoCancel, EchoMode};
+pub use helper::{locate as locate_helper, Devices, EchoCancel, EchoMode, MicGain, MicGainMode};
 use helper::{Command, Event, RecordArgs};
 use local::{Recording, Status};
 use upload::Outcome;
@@ -102,6 +102,9 @@ pub struct RecorderState {
     pub system: bool,
     /// 回声消除的情况。没在录、录音程序还没开始录（或者是不报这个的旧版本）时是 null
     pub echo: Option<Echo>,
+    /// 麦克风自动增益：录音程序开始录时报的模式（auto：在调；off：不调；unavailable：要调却没能打开，录的是原声）。
+    /// 没在录、录音程序还没开始录（或者是不报这个的旧版本）时是 null
+    pub mic_gain: Option<MicGainMode>,
     pub marks: Vec<f64>,
     /// 有一路声音录不了的提醒（没有权限、设备不在），另一路照常录。同一个 code 说的事不一样时都留着。
     /// 没能开始录音时是录音程序给的提醒，说明为什么开始不了，下次开始录音时清掉
@@ -247,6 +250,9 @@ pub struct RecorderOptions {
     pub input_file: Option<PathBuf>,
     /// 测试用：和 input_file 一起，按文件的实际时长读（--realtime），用来测暂停、继续、标记、结束
     pub realtime: bool,
+    /// 麦克风自动增益（--mic-gain）：auto，在回声消除之后把麦克风那一路调到正常的说话音量。界面上没有开关，
+    /// 排查时可以用环境变量 ZSMEET_RECORDER_MIC_GAIN=off 关掉（见 MicGain::from_env）
+    pub mic_gain: MicGain,
 }
 
 impl RecorderOptions {
@@ -262,6 +268,7 @@ impl RecorderOptions {
             stop_timeout: Duration::from_secs(10),
             input_file: None,
             realtime: false,
+            mic_gain: MicGain::from_env(),
         }
     }
 }
@@ -335,6 +342,8 @@ struct Session {
     /// 录音程序最近一次说的回声消除开没开、为什么（echo 事件）
     echo_active: bool,
     echo_reason: Option<String>,
+    /// 录音程序报的麦克风自动增益模式（started 里的），没报过是 None
+    mic_gain: Option<MicGainMode>,
     warnings: Vec<Warning>,
     /// 录音程序说的错误，它退出时用
     error: Option<String>,
@@ -439,7 +448,7 @@ impl Recorder {
     }
 
     /// 开始录音：mic 是麦克风的 uid 或者 "default"，None 是不录麦克风；system：录不录电脑的声音；
-    /// echo_cancel：回声消除（两路都在录时才用得上，录音程序自己判断）。
+    /// echo_cancel：回声消除（两路都在录时才用得上，录音程序自己判断）。麦克风自动增益照 RecorderOptions 的 mic_gain。
     /// 这台电脑上有这场会议中断了的录音时接着录：序号接着上次的，标记留着。
     /// 等到录音程序真的开始录了才返回，开始不了返回原因。
     pub async fn start(
@@ -505,6 +514,7 @@ impl Recorder {
             mic: mic.as_deref(),
             system,
             echo_cancel,
+            mic_gain: self.opts.mic_gain,
             input_file: self.opts.input_file.as_deref(),
             realtime: self.opts.realtime,
         });
@@ -591,6 +601,7 @@ impl Recorder {
             echo_mode: None,
             echo_active: false,
             echo_reason: None,
+            mic_gain: None,
             warnings: Vec::new(),
             error: None,
             stopped: false,
@@ -860,6 +871,7 @@ impl Recorder {
                     mic,
                     system,
                     echo_cancellation,
+                    mic_gain,
                 } => {
                     if s.phase == Phase::Starting {
                         s.phase = Phase::Recording;
@@ -868,6 +880,7 @@ impl Recorder {
                     s.system = system;
                     // 开没开、为什么由 echo 事件说（可能比 started 先到，不能清掉）
                     s.echo_mode = echo_cancellation;
+                    s.mic_gain = mic_gain;
                     // 接着录的：中断的原因用不着了
                     if let Some(l) = l.filter(|l| !l.fatal && l.rec.error.is_some()) {
                         l.rec.error = None;
@@ -1433,6 +1446,7 @@ fn snapshot(inner: &Inner, account: Option<&Account>) -> RecorderState {
         mic: None,
         system: false,
         echo: None,
+        mic_gain: None,
         marks: Vec::new(),
         warnings: inner.start_warnings.clone(),
         error: inner.error.clone(),
@@ -1453,6 +1467,7 @@ fn snapshot(inner: &Inner, account: Option<&Account>) -> RecorderState {
                 active: s.echo_active,
                 reason: s.echo_reason.clone(),
             });
+            state.mic_gain = s.mic_gain;
             state.warnings = s.warnings.clone();
             if let Some(l) = inner.recordings.get(&s.meeting_id) {
                 state.title = Some(l.rec.title.clone());

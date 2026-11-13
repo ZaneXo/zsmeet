@@ -10,7 +10,7 @@
 # 有的机器上残留的旧版本清单接口还会让它读不了 Package.swift。源文件的目录和 Package.swift 里的一致。
 # 源文件没改过时直接跳过（tauri dev、tauri build 每次都会调用它）。
 #
-# 回声消除用的 WebRTC 音频处理（desktop/recorder/ThirdParty/，几百个 C/C++ 文件）每种架构编成一个静态库
+# 回声消除、麦克风自动增益用的 WebRTC 音频处理（desktop/recorder/ThirdParty/，几百个 C/C++ 文件）每种架构编成一个静态库
 # desktop/recorder/.build/webrtc-<架构>/libwebrtc_apm.a。第一次（或者第三方源码、编译参数、编译器、SDK 变了以后）
 # 要编几分钟，之后直接用：按这些东西的内容算一个指纹，对得上就不重编（和文件的修改时间无关，CI 缓存这个目录就行）。
 # 编到一半被打断了，下次接着编没编完的文件。只要 Command Line Tools，不联网，不要 meson、ninja、cmake。
@@ -149,7 +149,7 @@ build_webrtc() {
   echo "$fingerprint" >"$dir/library.fingerprint"
 }
 
-# 回声消除的 C 接口（zr_aec.cc，C++）要用的参数：宏和 WebRTC 一样（不一样的话头文件里的结构体可能对不上），
+# 回声消除、自动增益的 C 接口（zr_aec.cc、zr_agc.cc，C++）要用的参数：宏和 WebRTC 一样（不一样的话头文件里的结构体可能对不上），
 # 第三方的头文件当成系统头文件（-isystem），它们的警告不算，我们自己的代码照样 -Wall -Wextra -Werror
 shim_flags() {
   webrtc_flags "$1" | sed 's/^-I$/-isystem/'
@@ -166,13 +166,15 @@ build_arch() {
   xcrun clang -c -O2 -std=c11 -Wall -Wextra -Werror -target "$target" -isysroot "$sdk" \
     -I "$include" "$recorder/Sources/CRecorder/ring.c" -o "$out/ring.o"
 
-  # 回声消除的 C 接口
+  # 回声消除（zr_aec.cc）和麦克风自动增益（zr_agc.cc）的 C 接口
   local flags=()
-  local flag flag_list
+  local flag flag_list shim
   flag_list="$(shim_flags "$arch")"
   while IFS= read -r flag; do flags+=("$flag"); done <<<"$flag_list"
-  xcrun clang++ -c -std=c++17 -Wall -Wextra -Werror -isysroot "$sdk" "${flags[@]}" \
-    -I "$include" "$recorder/Sources/CRecorder/zr_aec.cc" -o "$out/zr_aec.o"
+  for shim in zr_aec zr_agc; do
+    xcrun clang++ -c -std=c++17 -Wall -Wextra -Werror -isysroot "$sdk" "${flags[@]}" \
+      -I "$include" "$recorder/Sources/CRecorder/$shim.cc" -o "$out/$shim.o"
+  done
 
   # RecorderKit：除了入口以外的 Swift 代码，编成静态库
   xcrun swiftc -O -wmo -swift-version 5 -target "$target" -sdk "$sdk" \
@@ -185,7 +187,7 @@ build_arch() {
   xcrun swiftc -O -swift-version 5 -target "$target" -sdk "$sdk" \
     -module-name zsmeet_recorder \
     -I "$out/modules" -I "$include" -Xcc -fmodule-map-file="$include/module.modulemap" \
-    "$recorder/Sources/zsmeet-recorder/main.swift" "$out/libRecorderKit.a" "$out/ring.o" "$out/zr_aec.o" \
+    "$recorder/Sources/zsmeet-recorder/main.swift" "$out/libRecorderKit.a" "$out/ring.o" "$out/zr_aec.o" "$out/zr_agc.o" \
     "$recorder/.build/webrtc-$arch/libwebrtc_apm.a" -lc++ -framework CoreFoundation \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$recorder/Info.plist" \
     -Xlinker -dead_strip \

@@ -64,7 +64,8 @@ public enum MicSwitchResult: Equatable {
 
 /// 现场录音：每 20 毫秒从各路的环形缓冲里取出新的采样，转成 48 kHz，按经过的时间混成一路
 /// （见 TimeMixer），交给 RecordingPipeline 编码、切分片。
-/// 打开了回声消除、麦克风和电脑声音都在录时，麦克风转好的声音先经过 EchoStage 再进它那一路。
+/// 打开了回声消除、麦克风和电脑声音都在录时，麦克风转好的声音先经过 EchoStage 再进它那一路；
+/// 打开了麦克风自动增益（默认）时，麦克风的声音最后再经过 MicGainStage（在回声消除之后）。
 /// 录系统默认的麦克风时，默认的麦克风换了可以换一个麦克风接着录（switchMic，见 MicFollower）。
 public final class LiveEngine: RecordingEngine {
     static let tickInterval = DispatchTimeInterval.milliseconds(20)
@@ -85,6 +86,12 @@ public final class LiveEngine: RecordingEngine {
     public private(set) var echoStatus = EchoCancelStatus.off
     /// 在做回声消除时（auto、on，两路都在录，建得起来）才有
     private(set) var echoStage: EchoStage?
+    /// 麦克风自动增益：started 事件里报的模式（要调却没能打开是 unavailable）
+    public private(set) var micGainStatus = MicGainStatus.off
+    /// 在调麦克风的音量时（auto，录着麦克风，建得起来）才有
+    private(set) var micGain: MicGainStage?
+    /// 回声消除和自动增益都有时，回声消除交出来的麦克风声音先放这里，再交给自动增益
+    private var echoed = SampleFIFO()
     /// auto、on 模式，录着麦克风却没录电脑声音：开始时报一次 no_reference
     private var echoWithoutReference = false
     private let micIndex: Int?
@@ -122,9 +129,10 @@ public final class LiveEngine: RecordingEngine {
     private var finished = false
 
     /// 每一路配一个转换器。采样率处理不了的那一路停掉、发 warning，只录别的；一路都不剩时抛出 no_source。
-    /// echo 是回声消除的设置（nil：不做）
+    /// echo 是回声消除的设置（nil：不做），micGain 是麦克风自动增益的设置（nil：不调）
     public init(sources: [CaptureSource], pipeline: RecordingPipeline, events: EventSink,
-                clock: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, echo: EchoSetup? = nil) throws {
+                clock: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, echo: EchoSetup? = nil,
+                micGain: MicGainSetup? = nil) throws {
         var usable: [CaptureSource] = []
         var resamplers: [Resampler] = []
         for source in sources {
@@ -158,6 +166,22 @@ public final class LiveEngine: RecordingEngine {
         if let echo, echo.mode != .off {
             setUpEcho(echo)
         }
+        if let micGain {
+            setUpMicGain(micGain)
+        }
+    }
+
+    /// 录着麦克风才调它的音量。建不起来就原样录麦克风，started 里报 unavailable（录音照常，不另外提醒：
+    /// 声音一直很小的话，录音页上会提示把电脑挪近一些、调大输入音量）
+    private func setUpMicGain(_ setup: MicGainSetup) {
+        micGainStatus = .auto
+        guard micIndex != nil else { return }
+        guard let controller = setup.makeController() else {
+            micGainStatus = .unavailable
+            log("麦克风自动增益没能打开，麦克风的声音原样录")
+            return
+        }
+        micGain = MicGainStage(controller: controller, settings: setup.settings)
     }
 
     /// 两路都在录才做回声消除（没有电脑声音就没有参考）。建不起来就原样录麦克风，started 里报 unavailable，
@@ -211,8 +235,11 @@ public final class LiveEngine: RecordingEngine {
             // 再把各路攒着的（约 0.15 秒）也混出来
             self.tick()
             guard !self.finished else { return }
-            if let stage = self.echoStage, let mic = self.micIndex {
-                stage.previewHeld(into: &self.mixer.lanes[mic].queue)
+            if let stage = self.echoStage {
+                self.fromEcho { stage.previewHeld(into: &$0) }
+            }
+            if let gain = self.micGain, let mic = self.micIndex {
+                gain.flush(into: &self.mixer.lanes[mic].queue)
             }
             do {
                 try self.feedQueued()
@@ -232,6 +259,7 @@ public final class LiveEngine: RecordingEngine {
             // 最后一片写不下了的话，tick 已经结束了录音
             guard !self.finished else { return }
             self.echoStage?.discardHeld()
+            self.micGain?.discardHeld()
             self.mixer.reset()
             self.pipeline.resume()
         }
@@ -278,6 +306,7 @@ public final class LiveEngine: RecordingEngine {
         silence[index] = SilenceWatch()
         micSwitchCount += 1
         echoStage?.micDeviceChanged(at: converted48[index])
+        micGain?.micDeviceChanged(at: converted48[index])
         log("麦克风从「\(old.name)」换成了「\(replacement.name)」（\(Resampler.describe(rate))），接着录")
         events.send(.micChanged(name: replacement.name))
         // 新的已经采到的现在就取（先去掉和旧的重叠的那一段）
@@ -301,8 +330,11 @@ public final class LiveEngine: RecordingEngine {
             for index in sources.indices {
                 pull(index, now: now, final: true)
             }
-            if let stage = echoStage, let mic = micIndex {
-                stage.finish(now: now, into: &mixer.lanes[mic].queue)
+            if let stage = echoStage {
+                fromEcho { stage.finish(now: now, into: &$0) }
+            }
+            if let gain = micGain, let mic = micIndex {
+                gain.finish(into: &mixer.lanes[mic].queue)
             }
             try feedQueued()
             let result = try pipeline.finish()
@@ -333,8 +365,8 @@ public final class LiveEngine: RecordingEngine {
         for index in sources.indices {
             pull(index, now: now, final: false)
         }
-        if let stage = echoStage, let mic = micIndex {
-            stage.process(now: now, into: &mixer.lanes[mic].queue)
+        if let stage = echoStage {
+            fromEcho { stage.process(now: now, into: &$0) }
         }
         let elapsed = clock() &- startTime
         let target = Int64(Double(elapsed) * Double(AACEncoder.sampleRate) / 1_000_000_000)
@@ -467,10 +499,13 @@ public final class LiveEngine: RecordingEngine {
         return stamp.time + Double(rawRead[index] - stamp.raw) / resamplers[index].inputRate
     }
 
-    /// 用这一路的转换器转换（body 把结果追加到给它的队列里）。没有回声消除时直接进这一路的混音队列，
-    /// 和没有回声消除这个功能以前一样；有的话先放在 converted 里，再分给 EchoStage 和各自那一路
+    /// 用这一路的转换器转换（body 把结果追加到给它的队列里）。没有回声消除、这一路也不调音量时直接进这一路的
+    /// 混音队列，和没有这两个功能以前一样；不然先放在 converted 里，再分给 EchoStage、自动增益和各自那一路
+    /// （有回声消除时麦克风的声音先交给 EchoStage，它处理好的在 tick 里再交给自动增益）
     private func convert(_ index: Int, now: Double, _ body: (inout SampleFIFO) throws -> Void) {
-        guard let stage = echoStage else {
+        let kind = sources[index].kind
+        let gain = kind == .mic ? micGain : nil
+        guard echoStage != nil || gain != nil else {
             do {
                 try body(&mixer.lanes[index].queue)
             } catch {
@@ -487,16 +522,36 @@ public final class LiveEngine: RecordingEngine {
         guard count > 0 else { return }
         converted48[index] += Int64(count)
         let lane = mixer.lanes[index]
+        let end = converted48[index]
         converted.withUnsafeSamples { samples in
-            switch sources[index].kind {
+            switch kind {
             case .mic:
-                stage.appendMic(samples, now: now)
+                if let stage = echoStage {
+                    stage.appendMic(samples, now: now)
+                } else {
+                    gain?.process(samples, end: end, into: &lane.queue)
+                }
             case .system:
                 lane.queue.append(samples)
-                stage.appendReference(samples, now: now)
+                echoStage?.appendReference(samples, now: now)
             }
         }
         converted.removeAll()
+    }
+
+    /// 回声消除交出来的麦克风声音（body 把它们追加到给它的队列里）：有自动增益时先经过它，再进麦克风那一路。
+    /// EchoStage 一次交出来的是麦克风那一路连着的一段，到 deliveredEnd 为止（自动增益靠它找到换麦克风的地方）
+    private func fromEcho(_ body: (inout SampleFIFO) -> Void) {
+        guard let mic = micIndex, let stage = echoStage else { return }
+        guard let gain = micGain else {
+            body(&mixer.lanes[mic].queue)
+            return
+        }
+        body(&echoed)
+        guard !echoed.isEmpty else { return }
+        let end = stage.deliveredEnd
+        echoed.withUnsafeSamples { gain.process($0, end: end, into: &mixer.lanes[mic].queue) }
+        echoed.removeAll()
     }
 
     /// 取出这一路的时间戳：记下最近的一个（换麦克风时要用），有回声消除时换算成 48 kHz 的序号交给 EchoStage。
@@ -631,6 +686,7 @@ func seconds(_ nanoseconds: UInt64) -> Double {
 }
 
 /// 测试模式：读文件，尽快编完，读完就结束（和收到 stop 一样）。和现场录音用同一个 RecordingPipeline。
+/// 文件当成麦克风：打开了麦克风自动增益时，转好的声音也经过 MicGainStage（和现场录音一样）。
 public final class FileEngine: RecordingEngine {
     public var onFinished: ((Result<RecordingResult, RecorderFailure>) -> Void)?
 
@@ -642,11 +698,27 @@ public final class FileEngine: RecordingEngine {
     private var block = [Float](repeating: 0, count: RecordingPipeline.levelInterval)
     private var stopRequested = false
     private var finished = false
+    /// 麦克风自动增益：started 事件里报的模式（要调却没能打开是 unavailable）
+    public private(set) var micGainStatus = MicGainStatus.off
+    private var micGain: MicGainStage?
+    /// 有自动增益时，转好的先放这里，经过它再进 converted；一共转出过多少个采样
+    private var resampled = SampleFIFO()
+    private var resampledTotal: Int64 = 0
 
-    public init(reader: AudioFileReader, pipeline: RecordingPipeline) throws {
+    /// micGain 是麦克风自动增益的设置（nil：不调）
+    public init(reader: AudioFileReader, pipeline: RecordingPipeline, micGain: MicGainSetup? = nil) throws {
         self.reader = reader
         resampler = try Resampler(inputRate: reader.sampleRate)
         self.pipeline = pipeline
+        if let micGain {
+            micGainStatus = .auto
+            if let controller = micGain.makeController() {
+                self.micGain = MicGainStage(controller: controller, settings: micGain.settings)
+            } else {
+                micGainStatus = .unavailable
+                log("麦克风自动增益没能打开，文件的声音原样录")
+            }
+        }
     }
 
     public func start() {
@@ -683,17 +755,32 @@ public final class FileEngine: RecordingEngine {
             // 收到了 stop，或者服务器能收的最后一片写不下了：和文件读完了一样结束
             let samples = stopRequested || pipeline.isFull ? [] : try reader.read(maxFrames: 48_000)
             if samples.isEmpty {
-                try resampler.finish(into: &converted)
+                try resample { try resampler.finish(into: &$0) }
+                micGain?.finish(into: &converted)
                 try feedConverted(all: true)
                 finish(.success(try pipeline.finish()))
                 return
             }
-            try samples.withUnsafeBufferPointer { try resampler.process($0, into: &converted) }
+            try samples.withUnsafeBufferPointer { buffer in try resample { try resampler.process(buffer, into: &$0) } }
             try feedConverted(all: false)
             queue.async { self.step() }
         } catch {
             fail(error)
         }
+    }
+
+    /// 转换采样率（body 把结果追加到给它的队列里），转好的进 converted：有自动增益时先经过它
+    private func resample(_ body: (inout SampleFIFO) throws -> Void) throws {
+        guard let gain = micGain else {
+            try body(&converted)
+            return
+        }
+        try body(&resampled)
+        guard !resampled.isEmpty else { return }
+        resampledTotal += Int64(resampled.count)
+        let end = resampledTotal
+        resampled.withUnsafeSamples { gain.process($0, end: end, into: &converted) }
+        resampled.removeAll()
     }
 
     /// 每 0.1 秒的声音喂一次，音量事件和现场录音一样每 0.1 秒一个

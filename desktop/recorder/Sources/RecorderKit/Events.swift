@@ -57,7 +57,8 @@ public struct RecorderFailure: Error, Equatable {
 
 /// 写到标准输出的事件，一行一个 JSON。日志不在这里，写在标准错误。
 public enum RecorderEvent {
-    case started(sampleRate: Int, channels: Int, mic: String?, system: Bool, echoCancellation: EchoCancelStatus = .off)
+    case started(sampleRate: Int, channels: Int, mic: String?, system: Bool, echoCancellation: EchoCancelStatus = .off,
+                 micGain: MicGainStatus = .off)
     /// 回声消除实际做没做变了（开始录音时先报一次）。只在 --echo-cancel 是 auto、on 时有
     case echo(active: Bool, reason: EchoReason)
     /// 录的是系统默认的麦克风（--mic default），默认的麦克风换了（或者原来的断开了、系统换了一个），
@@ -75,7 +76,7 @@ public enum RecorderEvent {
 
     public var json: JSON {
         switch self {
-        case let .started(sampleRate, channels, mic, system, echoCancellation):
+        case let .started(sampleRate, channels, mic, system, echoCancellation, micGain):
             return .object([
                 ("event", .string("started")),
                 ("sample_rate", .int(sampleRate)),
@@ -83,6 +84,7 @@ public enum RecorderEvent {
                 ("mic", .optional(mic)),
                 ("system", .bool(system)),
                 ("echo_cancellation", .string(echoCancellation.rawValue)),
+                ("mic_gain", .string(micGain.rawValue)),
             ])
         case let .echo(active, reason):
             return .object([

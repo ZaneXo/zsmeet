@@ -19,16 +19,22 @@ import {
   IDLE_STATE,
   isBusy,
   isLive,
+  levelToDb,
   liveMeetingText,
   liveUpload,
   localMeeting,
   micArg,
+  micGainLabel,
   micOptions,
+  micTooQuiet,
   nextEnded,
   NO_MIC,
+  NO_MIC_LEVELS,
   normalizeState,
   parseEchoCancel,
   parseSources,
+  QUIET_MIC_WINDOW,
+  quietMicHint,
   recordedLength,
   sentence,
   settledMeetings,
@@ -36,9 +42,11 @@ import {
   sourceLabels,
   sourcesProblem,
   stuckHere,
+  trackMicLevels,
   uploadView,
   warningText,
 } from "./recorderView.ts";
+import type { MicLevels } from "./recorderView.ts";
 
 function state(patch: Partial<RecorderState> = {}): RecorderState {
   return {
@@ -54,6 +62,7 @@ function state(patch: Partial<RecorderState> = {}): RecorderState {
     error: null,
     uploads: [],
     echo: null,
+    micGain: null,
     ...patch,
   };
 }
@@ -81,8 +90,19 @@ test("Rust 推过来的状态缺了字段时用默认值补上", () => {
     marks: [1],
     uploads: [upload()],
     echo: { mode: "auto", active: true, reason: "speakers" },
+    micGain: "auto",
   });
   assert.deepEqual(normalizeState(full), full);
+});
+
+test("麦克风自动增益的模式：没报、认不出来的当成没报", () => {
+  assert.equal(normalizeState({ status: "recording" }).micGain, null);
+  for (const mode of ["off", "auto", "unavailable"] as const) {
+    assert.equal(normalizeState({ micGain: mode }).micGain, mode);
+  }
+  for (const raw of ["loud", "", 3, { mode: "auto" }]) {
+    assert.equal(normalizeState({ micGain: raw as never }).micGain, null, String(raw));
+  }
 });
 
 test("回声消除的情况：没报、报得不全时不出错", () => {
@@ -560,4 +580,93 @@ test("会议页面：这台电脑上的录音传不上去了，还能用服务�
   }
   // 还在录（录音时就传不上去了的也一样）：先结束录音
   assert.equal(here(state({ status: "recording", meetingId: "m1", uploads: [upload({ status: "failed" })] })), false);
+});
+
+// ---- 麦克风自动增益、麦克风的声音一直很小 ----
+
+test("录音中：自动调音量没能打开时在麦克风后面说一声，在调、不调、不录麦克风时不说", () => {
+  const live = { status: "recording" as const, mic: "MacBook Pro 麦克风" };
+  assert.equal(micGainLabel(state({ ...live, micGain: "unavailable" })), "自动调音量没能打开，录的是原来的音量");
+  for (const micGain of ["auto", "off", null] as const) {
+    assert.equal(micGainLabel(state({ ...live, micGain })), null, String(micGain));
+  }
+  assert.equal(micGainLabel(state({ ...live, mic: null, micGain: "unavailable" })), null);
+});
+
+test("音量（0 到 1）换成 dBFS：0 是 -60 及以下，1 是 0 dBFS", () => {
+  assert.equal(levelToDb(0), -60);
+  assert.equal(levelToDb(1), 0);
+  assert.equal(levelToDb(0.5), -30);
+  assert.equal(levelToDb(-1), -60);
+  assert.equal(levelToDb(2), 0);
+});
+
+/** 在录的状态：录到第 seconds 秒，麦克风的音量是 db dBFS */
+function recording(seconds: number, db: number, patch: Partial<RecorderState> = {}): RecorderState {
+  return state({ status: "recording", meetingId: "m1", mic: "MacBook Pro 麦克风", seconds, level: { mic: (db + 60) / 60, system: 0 }, ...patch });
+}
+
+/** 从 from 秒到 to 秒，每 0.1 秒一个音量（level(第几秒) 给 dBFS） */
+function feed(levels: MicLevels, from: number, to: number, level: (t: number) => number, patch: Partial<RecorderState> = {}): MicLevels {
+  let current = levels;
+  for (let i = Math.round(from * 10); i <= Math.round(to * 10); i++) {
+    const t = i / 10;
+    current = trackMicLevels(current, recording(t, level(t), patch));
+  }
+  return current;
+}
+
+/** 小声说话：说的时候 -45 dBFS，每秒停 0.4 秒（只有底噪，-62 dBFS） */
+const quietSpeech = (t: number) => (t % 1 < 0.6 ? -45 : -62);
+
+test("麦克风的声音一直很小：有人在说话（时大时小）、20 秒里最响的也不到 -35 dBFS 时提示", () => {
+  const quiet = feed(NO_MIC_LEVELS, 0, 25, quietSpeech);
+  assert.equal(micTooQuiet(quiet), true);
+  // 只留最近 20 秒
+  assert.ok(quiet.samples.length <= QUIET_MIC_WINDOW * 10 + 1, String(quiet.samples.length));
+  assert.ok(quiet.samples[0]!.at > 25 - QUIET_MIC_WINDOW);
+  // 还没记满 20 秒：先不说
+  assert.equal(micTooQuiet(feed(NO_MIC_LEVELS, 0, 15, quietSpeech)), false);
+  // 声音正常（调大以后说话在 -20 dBFS 左右）：不提示
+  assert.equal(micTooQuiet(feed(NO_MIC_LEVELS, 0, 25, (t) => (t % 1 < 0.6 ? -20 : -50))), false);
+  // 一直差不多大（只有底噪、没人说话，或者戴着耳机在听）：不提示
+  assert.equal(micTooQuiet(feed(NO_MIC_LEVELS, 0, 25, (t) => -50 + (t % 1) * 3)), false);
+  // 一点声音都没有（音量一直是 0）：也不提示（全是 0 的另有 mic_silent 提醒）
+  assert.equal(micTooQuiet(feed(NO_MIC_LEVELS, 0, 25, () => -70)), false);
+  // 说话声一变大马上不提示；之后又小了 20 秒才再提示
+  const louder = trackMicLevels(quiet, recording(25.1, -22));
+  assert.equal(micTooQuiet(louder), false);
+  assert.equal(micTooQuiet(feed(louder, 25.2, 44, quietSpeech)), false);
+  assert.equal(micTooQuiet(feed(louder, 25.2, 46, quietSpeech)), true);
+});
+
+test("麦克风的音量：暂停时留着，秒数没变（只是上传情况变了）不重复记；换了录音、换了麦克风、结束了从头记", () => {
+  const quiet = feed(NO_MIC_LEVELS, 0, 25, quietSpeech);
+  assert.equal(trackMicLevels(quiet, recording(25, -10)), quiet, "秒数没往前走：不记");
+  assert.equal(trackMicLevels(quiet, recording(25, -45, { status: "paused" })), quiet, "暂停着：原样留着");
+  assert.equal(micTooQuiet(trackMicLevels(quiet, recording(25, -45, { status: "paused" }))), true);
+  // 换了麦克风（mic_changed）、换了一场录音、秒数往回走了：从头记
+  for (const changed of [{ mic: "AirPods Pro" }, { meetingId: "m2" }]) {
+    const next = trackMicLevels(quiet, recording(25.1, -45, changed));
+    assert.equal(next.samples.length, 1, JSON.stringify(changed));
+    assert.equal(micTooQuiet(next), false);
+  }
+  assert.equal(trackMicLevels(quiet, recording(3, -45)).samples.length, 1, "秒数往回走了");
+  // 没在录、不录麦克风、还没有音量：清掉
+  for (const s of [state(), recording(25.1, -45, { status: "stopping" }), recording(25.1, -45, { mic: null }), recording(25.1, -45, { level: null })]) {
+    assert.equal(trackMicLevels(quiet, s), NO_MIC_LEVELS);
+  }
+  // 暂停以后继续：接着记，暂停的那段时间不算（秒数是录到的秒数，暂停时不走）
+  const resumed = feed(quiet, 25.1, 26, quietSpeech);
+  assert.equal(micTooQuiet(resumed), true);
+});
+
+test("麦克风的声音一直很小时的提示：说怎么办，自动调大过了也说一声", () => {
+  const plain = quietMicHint(null);
+  assert.match(plain, /把电脑挪到离说话的人近一些的地方/);
+  assert.match(plain, /「系统设置 → 声音 → 输入」里把输入音量调大/);
+  assert.doesNotMatch(plain, /自动调大/);
+  assert.equal(quietMicHint("off"), plain);
+  assert.equal(quietMicHint("unavailable"), plain);
+  assert.match(quietMicHint("auto"), /自动调大了也还不够/);
 });

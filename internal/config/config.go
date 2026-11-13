@@ -47,16 +47,17 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	recog, recogErr := LoadASR()
 	c := Config{
 		DatabaseURL:   os.Getenv("ZSMEET_DATABASE_URL"),
 		Listen:        cmp.Or(os.Getenv("ZSMEET_LISTEN"), ":8080"),
 		DataDir:       cmp.Or(os.Getenv("ZSMEET_DATA_DIR"), "./data"),
-		ModelsDir:     cmp.Or(os.Getenv("ZSMEET_MODELS_DIR"), "./models"),
+		ModelsDir:     recog.ModelsDir,
 		SecretKey:     os.Getenv("ZSMEET_SECRET_KEY"),
-		ModelMirror:   cmp.Or(os.Getenv("ZSMEET_MODEL_MIRROR"), "https://huggingface.co"),
+		ModelMirror:   recog.ModelMirror,
 		Concurrency:   envInt("ZSMEET_CONCURRENCY", 2),
-		ASRThreads:    envInt("ZSMEET_ASR_THREADS", min(runtime.NumCPU(), 4)),
-		ASRLanguage:   cmp.Or(os.Getenv("ZSMEET_ASR_LANGUAGE"), "zh"),
+		ASRThreads:    recog.Threads,
+		ASRLanguage:   recog.Language,
 		SecureCookie:  os.Getenv("ZSMEET_SECURE_COOKIE") == "true",
 		FeishuBaseURL: os.Getenv("ZSMEET_FEISHU_BASE_URL"),
 	}
@@ -69,13 +70,36 @@ func Load() (Config, error) {
 	if c.DatabaseURL == "" {
 		errs = append(errs, errors.New("缺少 ZSMEET_DATABASE_URL"))
 	}
-	if !slices.Contains([]string{"zh", "en", "ja", "ko", "yue", "auto"}, c.ASRLanguage) {
-		errs = append(errs, errors.New("ZSMEET_ASR_LANGUAGE 只能是 zh、en、ja、ko、yue 或 auto"))
+	if recogErr != nil {
+		errs = append(errs, recogErr)
 	}
 	if len(c.SecretKey) < 16 {
 		errs = append(errs, errors.New("ZSMEET_SECRET_KEY 至少 16 个字符，可以用 `openssl rand -hex 32` 生成"))
 	}
 	return c, errors.Join(errs...)
+}
+
+// ASR 是语音识别要用的那几项配置（含义见 Config 里的同名字段）。
+type ASR struct {
+	ModelsDir   string
+	ModelMirror string
+	Threads     int
+	Language    string
+}
+
+// LoadASR 只读语音识别要用的那几项，不要求数据库和密钥，给不连数据库的命令用（zsmeet transcribe）。
+// Load 读的也是它，两边的默认值一样。
+func LoadASR() (ASR, error) {
+	a := ASR{
+		ModelsDir:   cmp.Or(os.Getenv("ZSMEET_MODELS_DIR"), "./models"),
+		ModelMirror: cmp.Or(os.Getenv("ZSMEET_MODEL_MIRROR"), "https://huggingface.co"),
+		Threads:     envInt("ZSMEET_ASR_THREADS", min(runtime.NumCPU(), 4)),
+		Language:    cmp.Or(os.Getenv("ZSMEET_ASR_LANGUAGE"), "zh"),
+	}
+	if !slices.Contains([]string{"zh", "en", "ja", "ko", "yue", "auto"}, a.Language) {
+		return a, errors.New("ZSMEET_ASR_LANGUAGE 只能是 zh、en、ja、ko、yue 或 auto")
+	}
+	return a, nil
 }
 
 // ParseTrustedProxies 解析 ZSMEET_TRUSTED_PROXIES：用逗号或空格隔开的网段（172.16.0.0/12）或者单个 IP。

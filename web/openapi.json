@@ -313,6 +313,13 @@
             ],
             "type": "string"
           },
+          "speaker_count": {
+            "description": "有几个人说话：0 或不填是按声音自动区分；1 到 30 是按这个人数区分说话人",
+            "format": "int64",
+            "maximum": 30,
+            "minimum": 0,
+            "type": "integer"
+          },
           "template": {
             "description": "纪要模板的 ID，留空用通用模板",
             "type": "string"
@@ -1300,6 +1307,11 @@
             ],
             "type": "string"
           },
+          "speaker_count": {
+            "description": "有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人",
+            "format": "int64",
+            "type": "integer"
+          },
           "speakers": {
             "additionalProperties": {
               "type": "string"
@@ -1365,6 +1377,7 @@
           "error",
           "template",
           "hotwords",
+          "speaker_count",
           "duration_sec",
           "has_audio",
           "minutes_version",
@@ -1506,6 +1519,11 @@
             ],
             "type": "string"
           },
+          "speaker_count": {
+            "description": "有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人",
+            "format": "int64",
+            "type": "integer"
+          },
           "speakers": {
             "additionalProperties": {
               "type": "string"
@@ -1572,6 +1590,7 @@
           "error",
           "template",
           "hotwords",
+          "speaker_count",
           "duration_sec",
           "has_audio",
           "minutes_version",
@@ -1956,6 +1975,19 @@
         "required": [
           "audio_days"
         ],
+        "type": "object"
+      },
+      "RetranscribeInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "speaker_count": {
+            "description": "这次按几个人区分说话人：0 是按声音自动区分，1 到 30 是按这个人数；不填就照原来的设置",
+            "format": "int64",
+            "maximum": 30,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "SaveMarksInputBody": {
@@ -2445,6 +2477,11 @@
             ],
             "type": "string"
           },
+          "speaker_count": {
+            "description": "有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人",
+            "format": "int64",
+            "type": "integer"
+          },
           "speakers": {
             "additionalProperties": {
               "type": "string"
@@ -2513,6 +2550,7 @@
           "error",
           "template",
           "hotwords",
+          "speaker_count",
           "duration_sec",
           "has_audio",
           "minutes_version",
@@ -4871,6 +4909,15 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetranscribeInputBody"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

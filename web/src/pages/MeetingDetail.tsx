@@ -6,7 +6,7 @@ import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Citation, Meeting, Segment, User } from "../api/client";
 import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings";
-import { Button, buttonClass, Card, Chip, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
+import { Button, buttonClass, Card, Chip, Field, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { waitingForRecording } from "../lib/meetingStatus";
@@ -24,6 +24,7 @@ import { LatestWebhookSends, useMeetingWebhooks, WebhookShareDialog } from "./We
 import { meetingChip } from "./Meetings";
 import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
+import { SpeakerCountSelect } from "./UploadDialog";
 
 const isActive = (m: Meeting | undefined) => m?.status === "queued" || m?.status === "processing";
 
@@ -684,11 +685,16 @@ function MarksCard({ marks, segments, canSeek, onSeek }: { marks: number[]; segm
 }
 
 
-/** 用现在的识别模型重新转写（换模型以前转写的会议，用它得到逐句的时间）。先确认一次。 */
+/**
+ * 用现在的识别模型重新转写：说话人分错了时选上有几个人说话再转；换模型以前转写的会议也用它得到逐句的时间。
+ * 先确认一次，确认时可以改说话人数。
+ */
 function Retranscribe({ meeting: m }: { meeting: Meeting }) {
   const [confirming, setConfirming] = useState(false);
+  const [speakerCount, setSpeakerCount] = useState(m.speaker_count);
   const run = useMutation({
-    mutationFn: () => unwrap(api.POST("/api/meetings/{id}/retranscribe", { params: { path: { id: m.id } } })),
+    mutationFn: () =>
+      unwrap(api.POST("/api/meetings/{id}/retranscribe", { params: { path: { id: m.id } }, body: { speaker_count: speakerCount } })),
     onSuccess: (updated) => {
       setConfirming(false);
       queryClient.setQueryData(["meeting", m.id], updated);
@@ -698,7 +704,15 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
   const busy = m.status !== "done" && m.status !== "failed";
   if (!confirming) {
     return (
-      <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(true)}>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        onClick={() => {
+          setSpeakerCount(m.speaker_count);
+          setConfirming(true);
+        }}
+      >
         <Icon name="retry" size={15} />
         重新转写
       </Button>
@@ -709,6 +723,9 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
       <span className="leading-relaxed text-ink-2">
         用现在的识别模型从录音重新转写，转完会重新生成一版纪要（之前的版本都保留）。长会议要几分钟，转完之前看到的还是原来的转写；重新转写失败时原来的转写和纪要也都还在。
       </span>
+      <Field label="说话人数" htmlFor="retranscribe-speakers" hint="说话人分得不对（分多了或者几个人混在一起）时，选上有几个人说话再转写">
+        <SpeakerCountSelect id="retranscribe-speakers" className="sm:w-48" value={speakerCount} onChange={setSpeakerCount} disabled={run.isPending} />
+      </Field>
       {run.isError && <Notice tone="bad">{errorMessage(run.error)}</Notice>}
       <span className="flex gap-2">
         <Button size="sm" variant="primary" disabled={run.isPending} onClick={() => run.mutate()}>

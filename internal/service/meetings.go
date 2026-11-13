@@ -68,6 +68,19 @@ type NewMeeting struct {
 	Hotwords string
 	// 谁能看：team（默认）或者 private。指定具体的人在建好以后的会议页面上做
 	Visibility string
+	// 有几个人说话：0 是自动区分，1 到 MaxSpeakerCount 是按这个人数区分说话人
+	SpeakerCount int
+}
+
+// MaxSpeakerCount 是「有几个人说话」最多能填多少。
+const MaxSpeakerCount = 30
+
+// checkSpeakerCount 检查用户填的说话人数。
+func checkSpeakerCount(n int) error {
+	if n < 0 || n > MaxSpeakerCount {
+		return invalid("说话人数要在 1 到 %d 之间；不确定有几个人时选「自动区分」", MaxSpeakerCount)
+	}
+	return nil
 }
 
 // CreateMeeting 新建一场等待上传的会议。
@@ -100,12 +113,16 @@ func (s *Service) CreateMeeting(ctx context.Context, user sqlc.User, in NewMeeti
 	default:
 		return Meeting{}, invalid("新建会议时可见范围只能是团队所有人或者只有自己，指定具体的人请建好以后在会议页面上设置")
 	}
+	if err := checkSpeakerCount(in.SpeakerCount); err != nil {
+		return Meeting{}, err
+	}
 
 	var m sqlc.Meeting
 	err = s.tx(ctx, func(_ pgx.Tx, q *sqlc.Queries) error {
 		var err error
 		m, err = q.CreateMeeting(ctx, sqlc.CreateMeetingParams{
 			OwnerID: user.ID, Title: title, Source: in.Source, Template: in.Template, Hotwords: hotwords, Visibility: in.Visibility,
+			SpeakerCount: int32(in.SpeakerCount),
 		})
 		if err != nil {
 			return err
@@ -534,7 +551,13 @@ var errAudioGone = conflict("这场会议的录音已经不在了（可能过了
 
 // Retranscribe 用现在的识别模型重新转写一场会议（换了识别模型，或者转写有问题时用），
 // 转完会重新生成纪要，作为一个新版本，之前的版本都保留。
-func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID) (Meeting, error) {
+// speakerCount 不为 nil 时先改掉这场会议有几个人说话（0 是自动区分），这次转写就按它区分说话人；为 nil 时照旧。
+func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID, speakerCount *int) (Meeting, error) {
+	if speakerCount != nil {
+		if err := checkSpeakerCount(*speakerCount); err != nil {
+			return Meeting{}, err
+		}
+	}
 	m, err := s.editable(ctx, user, id)
 	if err != nil {
 		return Meeting{}, err
@@ -556,6 +579,12 @@ func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID
 		// 上面检查完以后，巡检可能刚好把过了保留期的录音删了（它只删已完成、失败的会议，排上队以后就不会再删）
 		if queued.AudioDeletedAt != nil {
 			return errAudioGone
+		}
+		// 排上队以后才改人数：会议正在处理时不改，免得这次处理到一半换了人数
+		if speakerCount != nil {
+			if err := q.SetMeetingSpeakerCount(ctx, sqlc.SetMeetingSpeakerCountParams{ID: id, SpeakerCount: int32(*speakerCount)}); err != nil {
+				return err
+			}
 		}
 		// 后台看到这个标记就从存好的录音重新识别。旧的转写先留着：重新识别失败时转写和纪要都还在
 		if err := q.MarkRetranscribe(ctx, id); err != nil {

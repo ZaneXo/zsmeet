@@ -10,7 +10,7 @@ import { canRecordTab, microphones, session, SLICE_MS, unsupportedReason, useRec
 import type { Snapshot, Source } from "../lib/recording/session";
 import type { Trouble } from "../lib/recording/upload";
 import { useTicker } from "../lib/useTicker";
-import { useTemplates, VisibilityField } from "./UploadDialog";
+import { SpeakerCountField, useTemplates, VisibilityField } from "./UploadDialog";
 
 const SLICE_SEC = SLICE_MS / 1000;
 
@@ -54,6 +54,7 @@ function Setup({ user, rec }: { user: User; rec: Snapshot }) {
   const [template, setTemplate] = useState("general");
   const [hotwords, setHotwords] = useState("");
   const [visibility, setVisibility] = useState<"team" | "private">("team");
+  const [speakerCount, setSpeakerCount] = useState(0);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState("");
   const [micError, setMicError] = useState("");
@@ -91,7 +92,7 @@ function Setup({ user, rec }: { user: User; rec: Snapshot }) {
   const submit = (e: FormEvent) => {
     e.preventDefault();
     // 直接在提交（点击）里调用：选标签页的窗口只能由用户的点击触发
-    void session.start({ userId: user.id, title, template, hotwords, visibility, source });
+    void session.start({ userId: user.id, title, template, hotwords, visibility, speakerCount, source });
   };
 
   if (unsupported) return <Notice tone="warn">{unsupported}</Notice>;
@@ -175,6 +176,7 @@ function Setup({ user, rec }: { user: User; rec: Snapshot }) {
             <Input id="rec-hotwords" value={hotwords} onChange={(e) => setHotwords(e.target.value)} maxLength={500} placeholder="人名、产品名，用逗号分开" disabled={starting} />
           </Field>
         </div>
+        <SpeakerCountField id="rec-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={starting} />
         <VisibilityField id="rec-visibility" value={visibility} onChange={setVisibility} disabled={starting} />
 
         {rec.error && <Notice tone="bad">{rec.error}</Notice>}

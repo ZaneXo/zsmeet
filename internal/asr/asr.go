@@ -24,8 +24,10 @@ type Engine struct {
 	recognizer *sherpa.OfflineRecognizer
 	diarizer   *sherpa.OfflineSpeakerDiarization
 	vad        sherpa.VadModelConfig
+	// 自动区分说话人时聚类用的阈值（见 Params.ClusterThreshold）
+	clusterThreshold float32
 
-	// 算声纹用的模型和区分说话人的是同一个文件。管理员打开了声纹才用到，第一次用时才加载
+	// 算声纹用的模型和区分说话人的是同一个文件。管理员打开了声纹、或者按人数区分说话人时才用到，第一次用时才加载
 	embedding sherpa.SpeakerEmbeddingExtractorConfig
 	extractor *sherpa.SpeakerEmbeddingExtractor
 }
@@ -60,7 +62,7 @@ func Load(p models.Paths, threads int, language string) (*Engine, error) {
 
 // LoadWith 和 Load 一样，只是语音检测和区分说话人用指定的参数。
 func LoadWith(p models.Paths, threads int, language string, params Params) (*Engine, error) {
-	e := &Engine{}
+	e := &Engine{clusterThreshold: params.ClusterThreshold}
 
 	rc := sherpa.OfflineRecognizerConfig{}
 	rc.FeatConfig.SampleRate = audio.SampleRate
@@ -171,20 +173,49 @@ func (e *Engine) recognize(samples []float32, start, end float64) []transcript.S
 	return nil
 }
 
-// SetClusterThreshold 换掉区分说话人的聚类阈值（见 Params.ClusterThreshold），之后的 Diarize 都用它。
+// SetClusterThreshold 换掉自动区分说话人时的聚类阈值（见 Params.ClusterThreshold），之后的 Diarize 都用它。
 // 不用重新加载模型，用来比较几个阈值分出的人数。
 func (e *Engine) SetClusterThreshold(threshold float32) {
-	cfg := sherpa.OfflineSpeakerDiarizationConfig{}
-	cfg.Clustering.NumClusters = -1
-	cfg.Clustering.Threshold = threshold
-	e.diarizer.SetConfig(&cfg)
+	e.clusterThreshold = threshold
 }
 
 // Diarize 找出每个人说话的时间段。这一步是一次不能中断的长计算。
-func (e *Engine) Diarize(samples []float32) []transcript.Turn {
+// speakers 大于 0 时按这个人数分（用户知道有几个人说话时最准，做法见 mergeSpeakers），0 是按声音的相似度自动区分。
+// 不能同时调用（后台处理时拿着锁）。
+func (e *Engine) Diarize(samples []float32, speakers int) ([]transcript.Turn, error) {
 	if len(samples) == 0 {
-		return nil
+		return nil, nil
 	}
+	turns := e.rawTurns(samples, 0)
+	if speakers <= 0 {
+		return turns, nil
+	}
+	x, err := e.embedder()
+	if err != nil {
+		return nil, err
+	}
+	merged := mergeSpeakers(turns, e.voices(x, samples, pickTurns(turns, len(samples), 0)), speakers)
+	if speakerCount(merged) < speakers {
+		// 并出来的人比要求的少（有几个人的声音比较像，自动区分时被分到了一起）：让库分得细一些再并
+		finer := e.rawTurns(samples, 2*speakers)
+		more := mergeSpeakers(finer, e.voices(x, samples, pickTurns(finer, len(samples), 0)), speakers)
+		if speakerCount(more) > speakerCount(merged) {
+			merged = more
+		}
+	}
+	return merged, nil
+}
+
+// rawTurns 是库直接区分出的说话人：clusters 大于 0 时让库分成这么多类，否则按聚类阈值自动分。
+// 每次都重新设一遍聚类的参数：同一个 Engine 先后处理不同的会议，参数各不相同。
+func (e *Engine) rawTurns(samples []float32, clusters int) []transcript.Turn {
+	cfg := sherpa.OfflineSpeakerDiarizationConfig{}
+	cfg.Clustering.NumClusters = -1
+	cfg.Clustering.Threshold = e.clusterThreshold
+	if clusters > 0 {
+		cfg.Clustering.NumClusters = clusters
+	}
+	e.diarizer.SetConfig(&cfg)
 	result := e.diarizer.Process(samples)
 	turns := make([]transcript.Turn, len(result))
 	for i, r := range result {
@@ -202,18 +233,32 @@ const minVoiceSeconds = 2
 // Embed 给每位说话人算一个声音特征（声纹），turns 的编号就是返回值的键。
 // 说话太少的人没有。算出来的向量已经归一化。
 func (e *Engine) Embed(samples []float32, turns []transcript.Turn) (map[int]voiceprint.Voice, error) {
-	picked := pickTurns(turns, len(samples))
+	picked := pickTurns(turns, len(samples), minVoiceSeconds)
 	if len(picked) == 0 {
 		return nil, nil
 	}
+	x, err := e.embedder()
+	if err != nil {
+		return nil, err
+	}
+	return e.voices(x, samples, picked), nil
+}
+
+// embedder 返回算声纹的模型，第一次用时才加载。
+func (e *Engine) embedder() (*sherpa.SpeakerEmbeddingExtractor, error) {
 	if e.extractor == nil {
 		if e.extractor = sherpa.NewSpeakerEmbeddingExtractor(&e.embedding); e.extractor == nil {
 			return nil, errors.New("声纹模型加载失败")
 		}
 	}
+	return e.extractor, nil
+}
+
+// voices 用每个人挑出的几段录音（pickTurns 的结果）算他的声纹。录音太短、算不出来的人没有。
+func (e *Engine) voices(x *sherpa.SpeakerEmbeddingExtractor, samples []float32, picked map[int][][2]int) map[int]voiceprint.Voice {
 	out := make(map[int]voiceprint.Voice, len(picked))
 	for speaker, spans := range picked {
-		stream := e.extractor.CreateStream()
+		stream := x.CreateStream()
 		used := 0
 		for _, sp := range spans {
 			stream.AcceptWaveform(audio.SampleRate, samples[sp[0]:sp[1]])
@@ -221,21 +266,21 @@ func (e *Engine) Embed(samples []float32, turns []transcript.Turn) (map[int]voic
 		}
 		stream.InputFinished()
 		var v []float32
-		if e.extractor.IsReady(stream) {
-			v = voiceprint.Normalize(e.extractor.Compute(stream))
+		if x.IsReady(stream) {
+			v = voiceprint.Normalize(x.Compute(stream))
 		}
 		sherpa.DeleteOnlineStream(stream)
 		if v != nil {
 			out[speaker] = voiceprint.Voice{Embedding: v, Seconds: float64(used) / audio.SampleRate}
 		}
 	}
-	return out, nil
+	return out
 }
 
 // pickTurns 给每位说话人挑出用来算声纹的几段（采样下标的起止，不含止）：从最长的一段开始挑，
-// 加起来到 maxVoiceSeconds 秒为止，最后一段截短。说话加起来不到 minVoiceSeconds 秒的人不要。
+// 加起来到 maxVoiceSeconds 秒为止，最后一段截短。说话加起来不到 minSeconds 秒的人不要。
 // total 是录音的采样数，超出录音的部分截掉。
-func pickTurns(turns []transcript.Turn, total int) map[int][][2]int {
+func pickTurns(turns []transcript.Turn, total int, minSeconds float64) map[int][][2]int {
 	bySpeaker := map[int][][2]int{}
 	for _, t := range turns {
 		if t.Speaker < 0 {
@@ -253,7 +298,7 @@ func pickTurns(turns []transcript.Turn, total int) map[int][][2]int {
 		for _, sp := range spans {
 			sum += sp[1] - sp[0]
 		}
-		if sum < minVoiceSeconds*audio.SampleRate {
+		if float64(sum) < minSeconds*audio.SampleRate {
 			continue
 		}
 		// 最长的在前；一样长的按时间先后，保证结果稳定

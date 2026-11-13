@@ -278,6 +278,7 @@ var fieldNames = map[string]string{
 	"new_password":     "新密码",
 	"title":            "标题",
 	"hotwords":         "热词",
+	"speaker_count":    "说话人数",
 	"content":          "纪要内容",
 	"question":         "问题",
 	"q":                "搜索词",

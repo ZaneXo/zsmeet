@@ -47,7 +47,8 @@ var errSuperseded = errors.New("会议已被新的任务接手")
 // 测试里用假的替换，不用加载几百 MB 的模型。
 type recognizer interface {
 	Transcribe(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error)
-	Diarize(samples []float32) []transcript.Turn
+	// speakers 大于 0 时按这个人数区分说话人，0 是自动区分
+	Diarize(samples []float32, speakers int) ([]transcript.Turn, error)
 	// Embed 给每位说话人算声音特征（声纹），键是 turns 里的说话人编号。只在管理员打开了声纹时调用
 	Embed(samples []float32, turns []transcript.Turn) (map[int]voiceprint.Voice, error)
 }

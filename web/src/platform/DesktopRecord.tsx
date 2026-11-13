@@ -7,7 +7,7 @@ import { AppLink } from "../components/AppLink";
 import { LevelMeter, RecordingMarks } from "../components/RecordingParts";
 import { Button, buttonClass, Card, Field, Icon, Input, Notice, Select } from "../components/ui";
 import { hms } from "../lib/format";
-import { useTemplates, VisibilityField } from "../pages/UploadDialog";
+import { SpeakerCountField, useTemplates, VisibilityField } from "../pages/UploadDialog";
 import { UploadRow } from "./DesktopRecordings";
 import { useOffline } from "./offline";
 import {
@@ -146,6 +146,7 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
   const [template, setTemplate] = useState("general");
   const [hotwords, setHotwords] = useState("");
   const [visibility, setVisibility] = useState<"team" | "private">("team");
+  const [speakerCount, setSpeakerCount] = useState(0);
   const [chosen, setChosen] = useState(loadSources);
   const [echoCancel, setEchoCancel] = useEchoCancel();
   const sources = { ...chosen, mic: effectiveMic(chosen.mic, devices.data) };
@@ -153,7 +154,9 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
 
   const start = useMutation({
     mutationFn: async () => {
-      const meeting = await unwrap(api.POST("/api/meetings", { body: { title, source: "desktop", template, hotwords, visibility } }));
+      const meeting = await unwrap(
+        api.POST("/api/meetings", { body: { title, source: "desktop", template, hotwords, visibility, speaker_count: speakerCount } }),
+      );
       await startRecorder(meeting.id, sources, echoCancel, true);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["meetings"] }),
@@ -188,6 +191,7 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
             <Input id="rec-hotwords" value={hotwords} onChange={(e) => setHotwords(e.target.value)} maxLength={500} placeholder="人名、产品名，用逗号分开" disabled={busy} />
           </Field>
         </div>
+        <SpeakerCountField id="rec-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={busy} />
         <VisibilityField id="rec-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 
         {offline && !start.isError && <Notice tone="warn">现在连不上服务器。开始录音要先在服务器上建好这场会议，请连上以后再开始；开始以后断网也能接着录。</Notice>}

@@ -1392,6 +1392,11 @@ export interface components {
              * @enum {string}
              */
             source: "upload" | "record" | "desktop";
+            /**
+             * Format: int64
+             * @description 有几个人说话：0 或不填是按声音自动区分；1 到 30 是按这个人数区分说话人
+             */
+            speaker_count?: number;
             /** @description 纪要模板的 ID，留空用通用模板 */
             template?: string;
             /** @description 留空会用当前时间起一个 */
@@ -1779,6 +1784,11 @@ export interface components {
              * @enum {string}
              */
             source: "record" | "upload" | "feishu" | "desktop";
+            /**
+             * Format: int64
+             * @description 有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人
+             */
+            speaker_count: number;
             /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
             speakers: {
                 [key: string]: string;
@@ -1865,6 +1875,11 @@ export interface components {
              * @enum {string}
              */
             source: "record" | "upload" | "feishu" | "desktop";
+            /**
+             * Format: int64
+             * @description 有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人
+             */
+            speaker_count: number;
             /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
             speakers: {
                 [key: string]: string;
@@ -2009,6 +2024,13 @@ export interface components {
              * @description 录音保留多少天，0 表示一直保留。过了保留期只删录音文件，转写和纪要一直留着
              */
             audio_days: number;
+        };
+        RetranscribeInputBody: {
+            /**
+             * Format: int64
+             * @description 这次按几个人区分说话人：0 是按声音自动区分，1 到 30 是按这个人数；不填就照原来的设置
+             */
+            speaker_count?: number;
         };
         SaveMarksInputBody: {
             /** @description 全部标记（整份替换）：录音开始后的秒数，不算暂停的时间 */
@@ -2206,6 +2228,11 @@ export interface components {
              * @enum {string}
              */
             source: "record" | "upload" | "feishu" | "desktop";
+            /**
+             * Format: int64
+             * @description 有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人
+             */
+            speaker_count: number;
             /** @description 给说话人起的名字，键是说话人编号（从 0 开始，写成字符串）。没起名字的说话人不在里面，显示成「说话人 N」 */
             speakers: {
                 [key: string]: string;
@@ -3601,7 +3628,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RetranscribeInputBody"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {

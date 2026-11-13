@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -49,7 +50,10 @@ func TestEngineOnRealAudio(t *testing.T) {
 	}
 
 	// 声纹：每位说话人一个。不同的人之间的相似度应该明显低于 voiceprint.Threshold，调阈值时看
-	turns := engine.Diarize(samples)
+	turns, err := engine.Diarize(samples, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	copied := append([]transcript.Segment(nil), segs...)
 	ids := transcript.AssignSpeakers(copied, turns)
 	voices, err := engine.Embed(samples, transcript.RenumberTurns(turns, ids))
@@ -67,7 +71,10 @@ func TestEngineOnRealAudio(t *testing.T) {
 	// 看聚类阈值对说话人数量的影响，调参时用
 	for _, threshold := range []float32{0.4, 0.5, 0.6, 0.7, 0.8, 0.9} {
 		engine.SetClusterThreshold(threshold)
-		turns := engine.Diarize(samples)
+		turns, err := engine.Diarize(samples, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
 		copied := append([]transcript.Segment(nil), segs...)
 		transcript.AssignSpeakers(copied, turns)
 		var who []string
@@ -77,6 +84,28 @@ func TestEngineOnRealAudio(t *testing.T) {
 			speakers[s.Speaker] = true
 		}
 		t.Logf("阈值 %.1f：%d 个时间段，%d 位说话人，各句依次是%s", threshold, len(turns), len(speakers), strings.Join(who, ""))
+	}
+
+	// 知道有几个人说话时（ZSMEET_TEST_SPEAKERS）按人数分：分出来正好这么多人
+	if n, err := strconv.Atoi(os.Getenv("ZSMEET_TEST_SPEAKERS")); err == nil && n > 0 {
+		turns, err := engine.Diarize(samples, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copied := append([]transcript.Segment(nil), segs...)
+		transcript.AssignSpeakers(copied, turns)
+		clusters := map[int]bool{}
+		for _, turn := range turns {
+			clusters[turn.Speaker] = true
+		}
+		var who []string
+		for _, s := range copied {
+			who = append(who, transcript.SpeakerName(s.Speaker)[len("说话人"):])
+		}
+		t.Logf("按 %d 个人分：分出 %d 个，各句依次是%s", n, len(clusters), strings.Join(who, ""))
+		if len(clusters) != n {
+			t.Errorf("要求按 %d 个人分，实际分出 %d 个", n, len(clusters))
+		}
 	}
 }
 
@@ -150,7 +179,7 @@ func TestPickTurns(t *testing.T) {
 		{Start: 59, End: 70, Speaker: 2}, // 录音只有 60 秒，这段只剩 1 秒；加上前面一共 2 秒，刚好够
 		{Start: 10, End: 20, Speaker: -1},
 	}
-	got := pickTurns(turns, 60*rate)
+	got := pickTurns(turns, 60*rate, minVoiceSeconds)
 	want := map[int][][2]int{
 		0: {{5 * rate, 25 * rate}, {30 * rate, 40 * rate}},
 		2: {{50 * rate, 51 * rate}, {59 * rate, 60 * rate}},

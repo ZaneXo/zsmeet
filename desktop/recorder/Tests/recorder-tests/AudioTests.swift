@@ -373,6 +373,15 @@ func testLimiterEdges() {
     expect(steepest <= fastest, "往下压得太快：每个采样 \(steepest)")
     expect(out[0..<400].elementsEqual(input[0..<400]), "离峰值远的地方不该动")
 
+    // 大得离谱、但是有限的数：压得很低时也不超过（增益算成 1 减去压低的量，Float 的精度不够时会超过）
+    for huge in [Float(2e7), Float(1e30), Float.greatestFiniteMagnitude] {
+        limiter = MixLimiter()
+        out = limit([huge, -huge], block: 2, limiter: &limiter)
+        let worstHuge: Float = max(abs(out[0]), abs(out[1]))
+        let allowedHuge: Float = ceiling * 1.000_01
+        expect(worstHuge <= allowedHuge, "\(huge) 压下来以后是 \(out)，超过了 \(ceiling)")
+    }
+
     // 不是有限的数换成 0（以前削成 -1 或 1，是一声「咔」）
     limiter = MixLimiter()
     out = limit([.nan, 0.5, .infinity, -.infinity], block: 4, limiter: &limiter)

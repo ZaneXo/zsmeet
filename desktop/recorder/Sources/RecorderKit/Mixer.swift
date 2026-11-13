@@ -159,7 +159,9 @@ struct MixLimiter {
                 if cut < 1e-5 && bound[index] >= 1 {
                     cut = 0
                 }
-                samples[index] *= 1 - cut
+                // 照理 1 - cut 不会大于 bound；压得很低时（大得离谱的采样）Float 的 1 - cut 精度不够，
+                // 可能比 bound 大一点而超过 threshold，所以再取一次小的
+                samples[index] *= min(1 - cut, bound[index])
             }
         }
         reduction = cut

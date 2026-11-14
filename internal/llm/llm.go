@@ -44,9 +44,10 @@ func Chat(ctx context.Context, cfg settings.LLM, system, user string) (string, e
 	if err := client.Post(ctx, "chat/completions", params, &res, option.WithJSONSet("stream", true)); err != nil {
 		return "", explain(err)
 	}
+	// 回答读到一半出的错不走 explain：连接被重置不是地址、网络配错了，提示「检查接口地址」会误导
 	text, err := readAnswer(res)
 	if err != nil {
-		return "", explain(err)
+		return "", err
 	}
 	text = stripThinking(text)
 	if text == "" {

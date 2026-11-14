@@ -17,6 +17,8 @@
 //	…+大模型(附拼音)          校对时每句附上拼音（correct.Input.Pinyin），看值不值得多花一倍的请求长度
 //	funasr-nano(+热词)       Fun-ASR-Nano，模型目录是解压出的 sherpa-onnx-funasr-nano-int8-2025-12-30
 //	qwen3-asr(+热词)         Qwen3-ASR 0.6B，模型目录是解压出的 sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
+//	deepseek-asr(按句)       DeepSeek 在线识别（-deepseek-asr），按 SenseVoice 的 VAD 一句一个请求
+//	deepseek-asr(合到N秒)    同上，相邻的句子合到最长 N 秒（-deepseek-chunk）再发，上下文更多
 //
 // 解码（包括响度归一化）和切段方式（Silero VAD，一段最长 10 秒）都和线上一样，只换识别模型，
 // 所以比较的就是识别模型本身。-filter 换掉线上的处理：-filter anull 看不做归一化的效果。
@@ -56,6 +58,10 @@ type flags struct {
 	senseVoice, filter                         string
 	hotwords, language, out, provider          string
 	llmURL, llmModel, llmKey                   string
+	llmConcurrency                             int
+	deepseekURL, deepseekKey                   string
+	deepseekConcurrency                        int
+	deepseekChunk                              float64
 	threads, workers                           int
 	concurrent                                 bool
 }
@@ -78,7 +84,12 @@ func main() {
 	flag.BoolVar(&f.concurrent, "concurrent", false, "几种识别模型同时跑（CPU 够多时用；CPU 不够时互相抢，测出的速度不准）")
 	flag.StringVar(&f.llmURL, "llm-url", "", "大模型接口地址（OpenAI 兼容，一般以 /v1 结尾），给了才比大模型校对")
 	flag.StringVar(&f.llmModel, "llm-model", "", "大模型名")
+	flag.IntVar(&f.llmConcurrency, "llm-concurrency", 3, "最多同时发几个大模型请求（中转服务一般限制每个账号的并发数）")
 	flag.StringVar(&f.llmKey, "llm-key", os.Getenv("ZSMEET_EVAL_LLM_KEY"), "大模型的 API Key，也可以用环境变量 ZSMEET_EVAL_LLM_KEY")
+	flag.StringVar(&f.deepseekURL, "deepseek-asr", "", "DeepSeek 在线识别的接口地址（https://api.deepseek.com/v1/tools/asr），给了才比")
+	flag.StringVar(&f.deepseekKey, "deepseek-key", os.Getenv("ZSMEET_EVAL_DEEPSEEK_KEY"), "DeepSeek 的 API Key，也可以用环境变量 ZSMEET_EVAL_DEEPSEEK_KEY")
+	flag.IntVar(&f.deepseekConcurrency, "deepseek-concurrency", 8, "最多同时发几个 DeepSeek 识别请求（接口限制每个账号 50 个）")
+	flag.Float64Var(&f.deepseekChunk, "deepseek-chunk", 100, "合并识别时一个请求最长几秒（接口最多收 120 秒）")
 	flag.StringVar(&f.out, "out", "", "把每种方案识别出的文字和报告写到这个目录，方便逐句对比")
 	flag.Parse()
 	if f.data == "" {
@@ -161,6 +172,16 @@ func run(ctx context.Context, f flags) error {
 				results = append(results, r)
 			}
 		}
+		if f.deepseekURL != "" {
+			// 接口不返回时间，借 SenseVoice 的 VAD 切出的句子来切录音
+			for _, chunk := range []float64{0, f.deepseekChunk} {
+				r, err := deepseekASR(ctx, f, clips, base, chunk)
+				if err != nil {
+					return nil, err
+				}
+				results = append(results, r)
+			}
+		}
 		return results, nil
 	})
 	if f.funasrNano != "" {
@@ -203,10 +224,18 @@ func run(ctx context.Context, f flags) error {
 }
 
 // llmCorrect 在 from 的结果上让大模型逐句校对，和线上处理会议的步骤一样。
-// withPinyin 时每句附上拼音（correct.Input.Pinyin）。几段录音同时校对，不然推理模型一段要等一两分钟。
+// withPinyin 时每句附上拼音（correct.Input.Pinyin）。所有录音同时校对，不然推理模型一批要等一两分钟。
 func llmCorrect(ctx context.Context, f flags, clips []clip, from result, withPinyin bool) (result, error) {
 	cfg := settings.LLM{BaseURL: f.llmURL, Model: f.llmModel, APIKey: f.llmKey}
+	// 所有录音的请求加起来最多同时发 llmConcurrency 个：中转服务一般限制每个账号的并发数，超了直接报错
+	limit := make(chan struct{}, max(f.llmConcurrency, 1))
 	chat := func(ctx context.Context, system, user string) (string, error) {
+		select {
+		case limit <- struct{}{}:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		defer func() { <-limit }()
 		return llm.Chat(ctx, cfg, system, user)
 	}
 	name := from.name + "+大模型"
@@ -221,11 +250,8 @@ func llmCorrect(ctx context.Context, f flags, clips []clip, from result, withPin
 		batches, failed, fixed int
 		wg                     sync.WaitGroup
 	)
-	sem := make(chan struct{}, 4)
 	for i, c := range clips {
 		wg.Go(func() {
-			sem <- struct{}{}
-			defer func() { <-sem }()
 			stats, err := correct.LLM(ctx, chat, r.segs[i], correct.Input{Hotwords: c.hotwords, Pinyin: withPinyin}, nil)
 			mu.Lock()
 			defer mu.Unlock()

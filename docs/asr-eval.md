@@ -1,11 +1,11 @@
 # 识别方案测评结果
 
-2026 年 11 月用 `tools/asreval` 在公开数据集上量过的结果：识别模型选哪个、响度归一化、按热词读音纠错、大模型校对，以及 DeepSeek 的在线识别。怎么量见 README 的[比较识别方案](development.md#比较识别方案)，换了模型或改了处理步骤，按最后一节的命令再量一遍、更新这里。
+2026 年 11 月用 `tools/asreval` 在公开数据集上量过的结果：识别模型选哪个、送去识别之前的音量处理、按热词读音纠错、大模型校对，以及 DeepSeek 的在线识别。怎么量见[开发 → 比较识别方案](development.md#比较识别方案)，换了模型或改了处理步骤，按最后一节的命令再量一遍、更新这里。
 
 ## 结论
 
-1. **响度归一化是这几项改动里收益最大的**：会议录音的字错误率降了 13～19 个点（AliMeeting 45～49% → 30%，AISHELL-4 34% → 21%），三种本地识别模型都一样。已经上线（`internal/audio`）。
-2. **本地识别模型继续用 SenseVoice**：做了归一化以后，会议录音上 SenseVoice 比 Fun-ASR-Nano、Qwen3-ASR 0.6B 都好，CPU 耗时不到它们的 1/8。Fun-ASR-Nano 只在专有名词多的录音上带热词时更好（5.3% 对 6.5%），但不如 SenseVoice 加纠错（2.7%）。
+1. **送去识别之前把音量调匀是这几项改动里收益最大的**：会议录音的字错误率降了 13～20 个点（AliMeeting 45～49% → 29～30%，AISHELL-4 34% → 21%），三种本地识别模型都一样。线上用的是 `dynaudnorm`（`audio.SpeechFilter`），和 `loudnorm` 效果差不多。
+2. **本地识别模型继续用 SenseVoice**：调匀音量以后，会议录音上 SenseVoice 比 Fun-ASR-Nano、Qwen3-ASR 0.6B 都好，CPU 耗时不到它们的 1/8。Fun-ASR-Nano 只在专有名词多的录音上带热词时更好（5.3% 对 6.5%），但不如 SenseVoice 加纠错（2.7%）。
 3. **按热词读音纠错和大模型校对对专有名词很有用，对普通会议几乎没用**：ContextASR 上 8.2% → 6.5% → 2.7%，热词认对的从 361 次到 940 次（共 966 次）；会议录音上大模型校对只降了 0.2 个点。会议录音的错大多是漏识别（识别出的字比标准文字少两成多），校对补不回来。校对时附上拼音没有用，线上保持关闭。
 4. **DeepSeek 在线识别比 SenseVoice 好，整段送比按句送好得多**：把相邻的句子合到 100 秒一个请求，会议录音上比 SenseVoice 低 4～5 个点（AISHELL-4 20.6% → 15.7%）；专有名词多的录音上不传热词就到 3.1%。代价是录音要发给 DeepSeek，而且接口不返回每句的时间，线上还没有接入。
 5. **GPU 不改变准确率**，SenseVoice 快 3 倍左右。CPU 上 SenseVoice 已经只要录音时长的 0.02～0.03 倍，部署不需要显卡。
@@ -26,26 +26,29 @@
 
 字错误率按「一个汉字算一个、一个英文单词算一个」算编辑距离。耗时是识别用的时间和录音时长之比，CPU 是 Xeon Platinum 8582C 上每份模型 4 个线程。
 
-### 响度归一化
+### 音量处理
 
-线上转码时给识别用的音频加 ffmpeg `loudnorm=I=-20`。离麦克风远的人声音很小，不做的话 VAD 把小声的话当成静音扔掉。
+离麦克风远的人声音很小，不处理的话 VAD 把小声的话当成静音扔掉，根本到不了识别模型。比较了两种处理：
 
-| 数据集 | 模型 | 不做 | 做了 |
-|---|---|---|---|
-| AliMeeting Eval | SenseVoice | 49.25% | **30.02%** |
-| | Fun-ASR-Nano | 53.51% | 36.72% |
-| | Qwen3-ASR | 51.21% | 32.64% |
-| AliMeeting Test | SenseVoice | 45.18% | **29.63%** |
-| | Fun-ASR-Nano | 50.19% | 34.14% |
-| | Qwen3-ASR | 47.37% | 31.39% |
-| AISHELL-4 Test | SenseVoice | 33.99% | **20.64%** |
-| | Fun-ASR-Nano | 37.91% | 21.25% |
-| | Qwen3-ASR | 36.20% | 20.84% |
-| ContextASR | SenseVoice | 8.24% | 8.20% |
+- `loudnorm=I=-20`：按整段录音的响度（EBU R128）调到 -20 LUFS。
+- `dynaudnorm=f=250:g=15:p=0.9:m=20`：线上现在用的（`audio.SpeechFilter`），每 0.25 秒看一次峰值、按前后几秒平滑地调增益，最多放大 20 倍。它是在一场真实站会的录音上选出来的，那场会上比 `loudnorm` 好（见 `internal/audio`）。
 
-AISHELL-4 做了归一化以后：小会议室 8～19%，中、大会议室 18～36%。
+| 数据集 | 模型 | 不处理 | loudnorm | dynaudnorm（线上） |
+|---|---|---|---|---|
+| AliMeeting Eval | SenseVoice | 49.25% | 30.02% | **29.12%** |
+| | Fun-ASR-Nano | 53.51% | 36.72% | |
+| | Qwen3-ASR | 51.21% | 32.64% | |
+| AliMeeting Test | SenseVoice | 45.18% | 29.63% | **29.59%** |
+| | Fun-ASR-Nano | 50.19% | 34.14% | |
+| | Qwen3-ASR | 47.37% | 31.39% | |
+| AISHELL-4 Test | SenseVoice | 33.99% | **20.64%** | 21.19% |
+| | Fun-ASR-Nano | 37.91% | 21.25% | |
+| | Qwen3-ASR | 36.20% | 20.84% | |
+| ContextASR | SenseVoice | 8.24% | 8.20% | 8.27% |
 
-### 本地识别模型（做了归一化）
+两种处理在公开数据集上差不到 1 个点，所以下面各节在 `loudnorm` 下量的结论（选哪个模型、纠错和 DeepSeek 有没有用）在线上的处理下照样成立，具体的数会差零点几个点。AISHELL-4 用 `loudnorm` 时：小会议室 8～19%，中、大会议室 18～36%。
+
+### 本地识别模型（loudnorm）
 
 | 方案 | AliMeeting Eval | AliMeeting Test | AISHELL-4 Test | ContextASR | 热词认对（ContextASR） | CPU 耗时 |
 |---|---|---|---|---|---|---|
@@ -58,7 +61,7 @@ AISHELL-4 做了归一化以后：小会议室 8～19%，中、大会议室 18�
 - Fun-ASR-Nano 是 sherpa-onnx-funasr-nano-int8-2025-12-30，Qwen3-ASR 是 sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25。
 - Qwen3-ASR 带热词时，遇到很短或开头不清楚的片段，会把热词列表原样当成识别结果吐出来，所以热词认对的多、字错误率反而升了。
 
-### GPU（RTX 5090，没做归一化）
+### GPU（RTX 5090，不处理音量）
 
 | 方案 | AliMeeting Eval | AISHELL-4 Test | ContextASR | 耗时（CPU → GPU） |
 |---|---|---|---|---|
@@ -66,9 +69,9 @@ AISHELL-4 做了归一化以后：小会议室 8～19%，中、大会议室 18�
 | Fun-ASR-Nano | 53.56% | 38.43% | 5.82% | 0.11～0.25 → 0.05～0.07 |
 | Fun-ASR-Nano 带热词 | | | 4.71%（788/966） | 0.31 → 0.08 |
 
-GPU 上用的是没有量化的模型（fp32），一份模型、一路录音。和 CPU 上的 int8 模型（没做归一化时 SenseVoice 49.25%、33.99%、8.24%，Fun-ASR-Nano 53.51%、37.91%、5.96%）基本一样，只有 Fun-ASR-Nano 带热词好一些（CPU 5.34%）。Qwen3-ASR 只有 int8 版，没在 GPU 上测。
+GPU 上用的是没有量化的模型（fp32），一份模型、一路录音。和 CPU 上的 int8 模型（不处理音量时 SenseVoice 49.25%、33.99%、8.24%，Fun-ASR-Nano 53.51%、37.91%、5.96%）基本一样，只有 Fun-ASR-Nano 带热词好一些（CPU 5.34%）。Qwen3-ASR 只有 int8 版，没在 GPU 上测。
 
-### 纠错（在 SenseVoice 的结果上，做了归一化）
+### 纠错（在 SenseVoice 的结果上，loudnorm）
 
 | 方案 | ContextASR | 热词认对 | AliMeeting Eval |
 |---|---|---|---|
@@ -81,7 +84,7 @@ GPU 上用的是没有量化的模型（fp32），一份模型、一路录音。
 - 在两种都成功的 51 段 ContextASR 上：不附拼音 2.41%，附拼音 2.45%；附拼音好的 21 段、差的 20 段。大模型校对没有让任何一段变差。
 - 附拼音的请求长一倍，不值得。
 
-### DeepSeek 在线识别（做了归一化）
+### DeepSeek 在线识别（loudnorm）
 
 [接口](https://api-docs.deepseek.com/zh-cn/guides/asr)一次最多收 120 秒、不返回时间、没有热词参数。按 SenseVoice 的 VAD 切出的句子切录音，比较两种送法：一句一个请求（和线上的切法一样），相邻的句子连同中间的停顿合到最长 100 秒一个请求。同时最多 16 个请求。
 
@@ -116,5 +119,5 @@ go run ./tools/asreval -data data/alimeeting-eval -workers 8 \
   -llm-url https://.../v1 -llm-model 模型名 \            # 比较大模型校对，Key 放在 ZSMEET_EVAL_LLM_KEY
   -deepseek-asr https://api.deepseek.com/v1/tools/asr \  # 比较 DeepSeek 在线识别，Key 放在 ZSMEET_EVAL_DEEPSEEK_KEY
   -out 结果目录
-# -filter anull：不做响度归一化；-provider cuda：在 GPU 上跑（要 CUDA 版的 sherpa-onnx 库）
+# 不给 -filter 是线上的音量处理；-filter none：不处理，-filter loudnorm=I=-20：换成别的 ffmpeg 滤镜；-provider cuda：在 GPU 上跑（要 CUDA 版的 sherpa-onnx 库）
 ```

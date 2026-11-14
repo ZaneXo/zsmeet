@@ -351,7 +351,7 @@ make api NAME=DeleteMeeting METHOD=DELETE ROUTE=/api/meetings/{id}
 
 ### 比较识别方案
 
-想知道在自己的录音上转写错多少、热词纠错和大模型校对有多大用、换一个识别模型值不值，用 `tools/asreval` 量一量：
+想知道在自己的录音上转写错多少、热词纠错和大模型校对有多大用、换一个识别模型值不值，用 `tools/asreval` 量一量（在 AliMeeting、AISHELL-4 等公开数据集上量过的结果见 [docs/asr-eval.md](docs/asr-eval.md)）：
 
 ```bash
 make asr-eval DATA=录音目录 HOTWORDS="飞书,张敏"

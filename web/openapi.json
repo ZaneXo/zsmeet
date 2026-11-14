@@ -1331,6 +1331,7 @@
               "assemble",
               "transcribe",
               "diarize",
+              "correct",
               "minutes"
             ],
             "type": "string"
@@ -1548,6 +1549,7 @@
               "assemble",
               "transcribe",
               "diarize",
+              "correct",
               "minutes"
             ],
             "type": "string"
@@ -2076,6 +2078,10 @@
             "format": "double",
             "type": "number"
           },
+          "orig": {
+            "description": "识别出的原文。只有文字被纠错（按热词的读音、大模型校对）改过的句子才有",
+            "type": "string"
+          },
           "speaker": {
             "description": "说话人编号，从 0 开始；-1 表示没分出来",
             "format": "int64",
@@ -2511,6 +2517,7 @@
               "assemble",
               "transcribe",
               "diarize",
+              "correct",
               "minutes"
             ],
             "type": "string"

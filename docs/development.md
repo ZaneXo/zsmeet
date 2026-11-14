@@ -8,7 +8,8 @@
    │                                                          ▼
    └──── 进度推送 ◀──── 读数据库里的进度 ◀──── worker（zsmeet worker）
                                               拼接分片 → ffmpeg 转码 → 识别文字
-                                              → 区分说话人 → 大模型写纪要
+                                              → 区分说话人 → 按热词纠错 → 大模型校对
+                                              → 大模型写纪要
 ```
 
 - `api` 和 `worker` 是同一个程序的两种启动方式，镜像也是同一个。
@@ -36,6 +37,28 @@ make help         # 看所有命令
 
 调识别参数（音量处理、语音检测的阈值、区分说话人用的模型）时，用 `zsmeet transcribe 录音文件` 把一个文件按后台处理完全一样的流程转写一遍，打印每一句和统计（几句、有字的时长、超过 10 秒没有字的空档、分出几位说话人），不连数据库。选项可以换各项参数来比较（`-speakers 8` 是按 8 个人分，和会议上选了说话人数一样），`-h` 看说明；用 docker compose 部署的服务器上，在 `deploy` 目录下执行 `docker compose run --rm --no-deps worker transcribe /data/audio/<会议 ID>.m4a`。服务器上存的录音是回放用的那一份：加了音量处理以后才处理的会议，它已经按回放的处理调过音量，拿它比较「不处理」（`-filter none`）时送去识别的也不是原来的音量。
 
+## 比较识别方案
+
+想知道在自己的录音上转写错多少、热词纠错和大模型校对有多大用、换一个识别模型值不值，用 `tools/asreval` 量一量（在 AliMeeting、AISHELL-4 等公开数据集上量过的结果见[识别方案测评](asr-eval.md)）：
+
+```bash
+make asr-eval DATA=录音目录 HOTWORDS="飞书,张敏"
+# 也比较大模型校对：
+make asr-eval DATA=录音目录 ARGS="-llm-url https://.../v1 -llm-model 模型名"   # API Key 放在环境变量 ZSMEET_EVAL_LLM_KEY
+```
+
+- 录音目录里每段录音（wav、m4a、mp3 等）配一个同名的 `.txt`，是人工校对过的标准文字；可以再配一个同名的 `.hotwords.txt`（这段录音的热词）。标点、空格、换行不影响结果，数字请写成阿拉伯数字（识别结果是这么写的）。挑几段真实的会议、每段几分钟、人工改好文字，就够看出差别。
+- 比较的方案：现在用的 SenseVoice；再按热词读音改；再让大模型校对；以及 [Fun-ASR-Nano](https://k2-fsa.github.io/sherpa/onnx/funasr-nano/index.html) 和 [Qwen3-ASR 0.6B](https://k2-fsa.github.io/sherpa/onnx/qwen3-asr/index.html) 两个更大的识别模型（带热词和不带热词各一遍）。第一次会下载这两个模型（约 2 GB，只用于评测）。解码（包括音量处理）和切段方式都和线上一样，只换识别模型；`ARGS="-filter none"` 看不处理音量的效果，也可以给别的 ffmpeg 滤镜。
+- 也能比较 DeepSeek 的[在线识别](https://api-docs.deepseek.com/zh-cn/guides/asr)：`ARGS="-deepseek-asr https://api.deepseek.com/v1/tools/asr"`，API Key 放在环境变量 `ZSMEET_EVAL_DEEPSEEK_KEY`。**录音会发给 DeepSeek**，只拿公开数据集或允许外发的录音来比。接口一次最多收 120 秒、不返回时间，所以按 SenseVoice 的 VAD 切出的句子切录音，一句一个请求、相邻的句子合到最长 100 秒（`-deepseek-chunk`）一个请求，各比一遍。
+- 输出每种方案的字错误率（一个汉字、一个英文单词各算一个）、热词认对了几次、识别耗时和录音时长之比；每种方案识别出的文字写在 `.dev/asreval/` 下，可以逐句对比。
+- 没有自己的录音时，可以先用公开的数据集，`tools/asrdata` 把它们整理成上面的样子：
+  - [AliMeeting](https://openslr.org/119/)、[AISHELL-4](https://www.openslr.org/111)：真实的中文会议，麦克风阵列录的。`asrdata textgrid` 取阵列里的一路声道（和用一个麦克风录会议一样），所有人的话按时间排好当标准文字。
+  - [ContextASR-Bench](https://huggingface.co/datasets/MrSupW/ContextASR-Bench) 的中文对话：每条带一份专有名词列表，`asrdata contextasr` 把它写成热词，用来量热词纠错的效果。录音是语音合成的。
+  - 这些数据集的标准文字按读音写数字（「十八到三十五岁」），评分前两边的阿拉伯数字都会换成汉字读法再比。
+- 看结果时留意：Fun-ASR-Nano、Qwen3-ASR 识别时要几倍于 SenseVoice 的 CPU 时间（在 Apple Silicon 上耗时约为录音时长的 0.07～0.1 倍，SenseVoice 约 0.015 倍）；Qwen3-ASR 带热词时，遇到很短或开头不清楚的片段，偶尔会把热词列表原样当成识别结果吐出来。
+
+`zsmeet transcribe`（上一节）看的是一段录音按线上流程转出来的样子；`asreval` 是拿标准文字算错字率，比较不同的方案。
+
 ## 目录
 
 ```
@@ -45,6 +68,7 @@ internal/
   service/          业务逻辑：账号、成员、会议、纪要版本、团队设置。不认识 HTTP
   pipeline/         后台处理一场会议的全过程，以及卡住时的自动恢复
   asr/              语音识别（sherpa-onnx，cgo）
+  correct/          转写纠错：按热词的读音替换、大模型逐句校对
   minutes/          纪要模板和提示词
   ask/              问会议：提问的提示词、交给大模型的材料、回答里的出处
   llm/              调用 OpenAI 兼容接口
@@ -54,6 +78,8 @@ web/                前端：React + TypeScript + Tailwind（网页版和桌面�
 desktop/            桌面版（macOS，Tauri 2）：本地代理、离线缓存、登录、菜单栏、录音（recorder/ 是 Swift 写的录音小程序）
 deploy/             Dockerfile、docker-compose.yml、.env.example
 tools/newapi/       make api 用的接口骨架生成器
+tools/asreval/      比较识别方案的字错误率和速度（见「比较识别方案」）
+tools/asrdata/      把公开的语音数据集整理成 asreval 要的样子
 ```
 
 ## 加一个接口

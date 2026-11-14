@@ -1799,7 +1799,7 @@ export interface components {
              * @description 正在进行的处理步骤
              * @enum {string}
              */
-            stage: "" | "models" | "assemble" | "transcribe" | "diarize" | "minutes";
+            stage: "" | "models" | "assemble" | "transcribe" | "diarize" | "correct" | "minutes";
             /** @enum {string} */
             status: "uploading" | "queued" | "processing" | "done" | "failed";
             /** @description 纪要模板的 ID */
@@ -1892,7 +1892,7 @@ export interface components {
              * @description 正在进行的处理步骤
              * @enum {string}
              */
-            stage: "" | "models" | "assemble" | "transcribe" | "diarize" | "minutes";
+            stage: "" | "models" | "assemble" | "transcribe" | "diarize" | "correct" | "minutes";
             /** @enum {string} */
             status: "uploading" | "queued" | "processing" | "done" | "failed";
             /** @description 纪要模板的 ID */
@@ -2069,6 +2069,8 @@ export interface components {
              * @description 结束时间，秒
              */
             end: number;
+            /** @description 识别出的原文。只有文字被纠错（按热词的读音、大模型校对）改过的句子才有 */
+            orig?: string;
             /**
              * Format: int64
              * @description 说话人编号，从 0 开始；-1 表示没分出来
@@ -2247,7 +2249,7 @@ export interface components {
              * @description 正在进行的处理步骤
              * @enum {string}
              */
-            stage: "" | "models" | "assemble" | "transcribe" | "diarize" | "minutes";
+            stage: "" | "models" | "assemble" | "transcribe" | "diarize" | "correct" | "minutes";
             /** @enum {string} */
             status: "uploading" | "queued" | "processing" | "done" | "failed";
             /** @description 纪要模板的 ID */

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ZaneXo/zsmeet/internal/audio"
+	"github.com/ZaneXo/zsmeet/internal/correct"
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/llm"
 	"github.com/ZaneXo/zsmeet/internal/minutes"
@@ -29,6 +30,7 @@ const (
 	StageAssemble   = "assemble"   // 拼接分片、转码
 	StageTranscribe = "transcribe" // 识别文字
 	StageDiarize    = "diarize"    // 区分说话人
+	StageCorrect    = "correct"    // 大模型校对转写里的错字（配置了大模型才有）
 	StageMinutes    = "minutes"    // 写纪要
 )
 
@@ -52,6 +54,9 @@ func (r *run) process(ctx context.Context) error {
 	// 要求重新转写时照样识别，旧的转写在新的存好之前一直留着
 	if segs == nil || r.m.Retranscribe {
 		if segs, err = r.transcribe(ctx, segs); err != nil {
+			return err
+		}
+		if segs, err = r.correct(ctx, segs); err != nil {
 			return err
 		}
 	}
@@ -215,6 +220,8 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 		return nil, err
 	}
 	ids := transcript.AssignSpeakers(segs, turns)
+	// 按热词的读音先改一遍错字：不用大模型，没配置大模型也有
+	correct.Homophones(segs, r.hotwords())
 	voices, err := r.voices(ctx, engine, samples, transcript.RenumberTurns(turns, ids))
 	if err != nil {
 		return nil, err

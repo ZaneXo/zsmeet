@@ -3,9 +3,12 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net"
+	"net/http"
 	"regexp"
 	"slices"
 	"strings"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/ssestream"
 
 	"github.com/ZaneXo/zsmeet/internal/settings"
 )
@@ -21,29 +25,62 @@ import (
 const requestTimeout = 10 * time.Minute
 
 // Chat 发一轮对话，返回模型的回答（去掉了思考过程）。
+//
+// 用流式接口收回答：推理模型要先想一两分钟才开始回答，挂在 Cloudflare 后面的中转服务一百秒没有数据
+// 就断开连接（524）；流式时思考过程一直在传，连接不会断。不支持流式、照样一次返回整个回答的接口也认。
 func Chat(ctx context.Context, cfg settings.LLM, system, user string) (string, error) {
 	if !cfg.Ready() {
 		return "", errors.New("还没有配置大模型")
 	}
 	client := newClient(cfg)
-	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+	params := openai.ChatCompletionNewParams{
 		Model: cfg.Model,
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(system),
 			openai.UserMessage(user),
 		},
-	})
-	if err != nil {
+	}
+	var res *http.Response
+	if err := client.Post(ctx, "chat/completions", params, &res, option.WithJSONSet("stream", true)); err != nil {
 		return "", explain(err)
 	}
-	if len(resp.Choices) == 0 {
-		return "", errors.New("大模型没有返回内容")
+	// 回答读到一半出的错不走 explain：连接被重置不是地址、网络配错了，提示「检查接口地址」会误导
+	text, err := readAnswer(res)
+	if err != nil {
+		return "", err
 	}
-	text := stripThinking(resp.Choices[0].Message.Content)
+	text = stripThinking(text)
 	if text == "" {
 		return "", errors.New("大模型返回了空内容")
 	}
 	return text, nil
+}
+
+// readAnswer 读出回答的正文：流式的一段段拼起来，不是流式的直接取。
+func readAnswer(res *http.Response) (string, error) {
+	defer res.Body.Close()
+	if mt, _, _ := mime.ParseMediaType(res.Header.Get("Content-Type")); mt == "application/json" {
+		var whole openai.ChatCompletion
+		if err := json.NewDecoder(res.Body).Decode(&whole); err != nil {
+			return "", fmt.Errorf("大模型的回答读不出来：%w", err)
+		}
+		if len(whole.Choices) == 0 {
+			return "", errors.New("大模型没有返回内容")
+		}
+		return whole.Choices[0].Message.Content, nil
+	}
+	stream := ssestream.NewStream[openai.ChatCompletionChunk](ssestream.NewDecoder(res), nil)
+	defer stream.Close()
+	var b strings.Builder
+	for stream.Next() {
+		if ch := stream.Current().Choices; len(ch) > 0 {
+			b.WriteString(ch[0].Delta.Content)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return "", fmt.Errorf("大模型的回答中途断了：%w", err)
+	}
+	return b.String(), nil
 }
 
 func newClient(cfg settings.LLM) openai.Client {

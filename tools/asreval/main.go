@@ -20,8 +20,8 @@
 //	deepseek-asr(按句)       DeepSeek 在线识别（-deepseek-asr），按 SenseVoice 的 VAD 一句一个请求
 //	deepseek-asr(合到N秒)    同上，相邻的句子合到最长 N 秒（-deepseek-chunk）再发，上下文更多
 //
-// 解码（包括响度归一化）和切段方式（Silero VAD，一段最长 10 秒）都和线上一样，只换识别模型，
-// 所以比较的就是识别模型本身。-filter 换掉线上的处理：-filter anull 看不做归一化的效果。
+// 解码（包括音量处理）和切段方式（Silero VAD，一段最长 10 秒）都和线上一样，只换识别模型，
+// 所以比较的就是识别模型本身。-filter 换掉线上的音量处理：-filter none 看不处理的效果。
 // 字错误率按「一个汉字算一个、一个英文单词算一个」算编辑距离。
 package main
 
@@ -33,7 +33,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -73,7 +72,7 @@ func main() {
 	flag.StringVar(&f.models, "models", cmp.Or(os.Getenv("ZSMEET_MODELS_DIR"), "./models"), "线上用的模型目录（SenseVoice、VAD），缺了会下载")
 	flag.StringVar(&f.mirror, "mirror", cmp.Or(os.Getenv("ZSMEET_MODEL_MIRROR"), "https://huggingface.co"), "下载线上模型用的 Hugging Face 地址")
 	flag.StringVar(&f.senseVoice, "sensevoice", "", "换一个 SenseVoice 模型文件（比如 GPU 上用没有量化的 model.onnx），不给就用 -models 里线上用的")
-	flag.StringVar(&f.filter, "filter", "", "读录音时用这个 ffmpeg 音频滤镜代替线上的响度归一化，比如 anull（不处理）、dynaudnorm")
+	flag.StringVar(&f.filter, "filter", "", "读录音时用这个 ffmpeg 音频滤镜代替线上的音量处理（audio.SpeechFilter），none 是不处理，比如 loudnorm=I=-20")
 	flag.StringVar(&f.funasrNano, "funasr-nano", "", "Fun-ASR-Nano 的模型目录，不给就不比")
 	flag.StringVar(&f.qwen3ASR, "qwen3-asr", "", "Qwen3-ASR 的模型目录，不给就不比")
 	flag.StringVar(&f.hotwords, "hotwords", "", "所有录音共用的热词，逗号隔开")
@@ -369,7 +368,7 @@ func (rn runner) recognize(ctx context.Context, name string, config func(hotword
 	return r, errors.Join(errs...)
 }
 
-// loadClips 读出目录里所有有标准文字的录音，解码成 16k 单声道。filter 不为空时用它代替线上的响度归一化。
+// loadClips 读出目录里所有有标准文字的录音，解码成 16k 单声道。filter 见 decode。
 func loadClips(ctx context.Context, dir string, shared []string, filter string) ([]clip, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -420,17 +419,17 @@ func loadClips(ctx context.Context, dir string, shared []string, filter string) 
 	return clips, nil
 }
 
-// decode 和线上一样解成 16k 单声道 float32；给了滤镜时用它代替线上的响度归一化。
+// decode 和线上一样解成 16k 单声道 float32（先按 audio.SpeechFilter 调匀音量）。
+// filter 不为空时用它代替线上的音量处理，none 是不处理（和 zsmeet transcribe 的 -filter 一样）。
 func decode(ctx context.Context, in, pcm, filter string) error {
-	if filter == "" {
+	switch filter {
+	case "":
 		return audio.Decode(ctx, in, pcm)
+	case "none":
+		return audio.DecodeWith(ctx, in, pcm, "")
+	default:
+		return audio.DecodeWith(ctx, in, pcm, filter)
 	}
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", in,
-		"-map", "0:a:0", "-vn", "-af", filter, "-ac", "1", "-ar", fmt.Sprint(audio.SampleRate), "-f", "f32le", pcm)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ffmpeg：%v：%s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 func cloneAll(in [][]transcript.Segment) [][]transcript.Segment {

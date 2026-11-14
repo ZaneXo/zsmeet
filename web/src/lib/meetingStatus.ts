@@ -8,3 +8,11 @@ import type { Meeting } from "../api/client";
 export function waitingForRecording(m: Pick<Meeting, "source" | "status"> | undefined): boolean {
   return (m?.source === "record" || m?.source === "desktop") && m.status === "uploading";
 }
+
+/**
+ * 处理中的会议这一次只写纪要（重新生成纪要，或者上次是写纪要那一步失败了点的重试），还是要从录音重新识别。
+ * 已经有转写不等于只写纪要：重新转写时旧的转写在新的存好之前一直留着，这时还要接收转码、识别、区分说话人。
+ */
+export function writingMinutesOnly(m: Pick<Meeting, "stage" | "retranscribing">, hasTranscript: boolean): boolean {
+  return m.stage === "minutes" || (hasTranscript && !m.retranscribing);
+}

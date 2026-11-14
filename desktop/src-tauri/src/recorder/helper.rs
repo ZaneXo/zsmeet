@@ -54,7 +54,7 @@ fn resolve(env: Option<OsString>, exe: Option<PathBuf>) -> Option<PathBuf> {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     /// 开始录了。mic 是麦克风的名字，没录麦克风时是 null；system：在录电脑的声音；
-    /// echo_cancellation：回声消除用的哪种模式（以前的录音程序不报，是 None）
+    /// echo_cancellation：回声消除用的哪种模式；mic_gain：麦克风自动增益用的哪种模式（以前的录音程序不报，是 None）
     Started {
         #[serde(default)]
         mic: Option<String>,
@@ -62,6 +62,8 @@ pub enum Event {
         system: bool,
         #[serde(default, deserialize_with = "lenient")]
         echo_cancellation: Option<EchoMode>,
+        #[serde(default, deserialize_with = "lenient")]
+        mic_gain: Option<MicGainMode>,
     },
     /// 回声消除实际上开没开变了：auto 模式下声音改从耳机、扬声器出来了，电脑声音那一路断了、又有了。
     /// reason 是 speakers、headphones、airplay、no_reference、forced、off，以后可能会加，原样交给界面
@@ -171,6 +173,49 @@ impl EchoCancel {
     }
 }
 
+/// 录音程序报的麦克风自动增益（started 的 mic_gain，界面上的 micGain）。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MicGainMode {
+    /// 不调，麦克风的声音照原样录
+    Off,
+    /// 在回声消除之后把麦克风那一路调到正常的说话音量（有人说话时才往上调，最多调大 30 dB，不超过满幅）
+    Auto,
+    /// 要调却没能打开，麦克风的声音照原样录
+    Unavailable,
+}
+
+/// 要录音程序怎么调麦克风的音量（record 的 --mic-gain）。界面上没有开关，App 总是用 auto。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MicGain {
+    /// 不调
+    Off,
+    /// 自动调到正常的说话音量（录音程序的默认值）
+    #[default]
+    Auto,
+}
+
+impl MicGain {
+    /// App 用哪种：auto；环境变量 ZSMEET_RECORDER_MIC_GAIN 是 off 时不调（排查用，比如对比调和不调时的转写）
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var("ZSMEET_RECORDER_MIC_GAIN").ok().as_deref())
+    }
+
+    fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some("off") => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+
+    fn arg(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 /// 发给录音程序的命令。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -204,6 +249,8 @@ pub struct RecordArgs<'a> {
     pub system: bool,
     /// 回声消除（--echo-cancel）。总是明说，不靠录音程序的默认值
     pub echo_cancel: EchoCancel,
+    /// 麦克风自动增益（--mic-gain）。也总是明说
+    pub mic_gain: MicGain,
     /// 测试用（--input-file）：拿这个音频文件代替麦克风和电脑的声音，不要权限、不弹提示，读完自动结束
     pub input_file: Option<&'a Path>,
     /// 测试用（--realtime）：和 input_file 一起，按文件的实际时长读，像真的在录
@@ -232,6 +279,8 @@ pub fn record_args(a: &RecordArgs) -> Vec<OsString> {
     }
     args.push("--echo-cancel".into());
     args.push(a.echo_cancel.arg().into());
+    args.push("--mic-gain".into());
+    args.push(a.mic_gain.arg().into());
     if let Some(file) = a.input_file {
         args.push("--input-file".into());
         args.push(file.into());
@@ -368,21 +417,23 @@ mod tests {
     fn reads_events() {
         assert_eq!(
             parse_event(
-                r#"{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true,"echo_cancellation":"auto"}"#
+                r#"{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true,"echo_cancellation":"auto","mic_gain":"auto"}"#
             ),
             Some(Event::Started {
                 mic: Some("MacBook Pro 麦克风".into()),
                 system: true,
                 echo_cancellation: Some(EchoMode::Auto),
+                mic_gain: Some(MicGainMode::Auto),
             })
         );
-        // 以前的录音程序不报回声消除
+        // 以前的录音程序不报回声消除、自动增益
         assert_eq!(
             parse_event(r#"{"event":"started","mic":null,"system":false}"#),
             Some(Event::Started {
                 mic: None,
                 system: false,
                 echo_cancellation: None,
+                mic_gain: None,
             })
         );
         assert_eq!(
@@ -445,6 +496,7 @@ mod tests {
                     mic: Some("MacBook Pro 麦克风".into()),
                     system: true,
                     echo_cancellation: Some(mode),
+                    mic_gain: None,
                 }),
                 "{raw}"
             );
@@ -457,6 +509,32 @@ mod tests {
                     mic: Some("MacBook Pro 麦克风".into()),
                     system: true,
                     echo_cancellation: None,
+                    mic_gain: None,
+                }),
+                "{raw}"
+            );
+        }
+        // 麦克风自动增益的模式；认不出来的同样当成没报
+        let gain = |raw: &str| {
+            parse_event(&format!(
+                r#"{{"event":"started","mic":"MacBook Pro 麦克风","system":true,"echo_cancellation":"off","mic_gain":{raw}}}"#
+            ))
+        };
+        for (raw, mode) in [
+            (r#""off""#, Some(MicGainMode::Off)),
+            (r#""auto""#, Some(MicGainMode::Auto)),
+            (r#""unavailable""#, Some(MicGainMode::Unavailable)),
+            (r#""loud""#, None),
+            ("null", None),
+            ("1", None),
+        ] {
+            assert_eq!(
+                gain(raw),
+                Some(Event::Started {
+                    mic: Some("MacBook Pro 麦克风".into()),
+                    system: true,
+                    echo_cancellation: Some(EchoMode::Off),
+                    mic_gain: mode,
                 }),
                 "{raw}"
             );
@@ -531,6 +609,7 @@ mod tests {
                 mic,
                 system,
                 echo_cancel,
+                mic_gain: MicGain::default(),
                 input_file: None,
                 realtime: false,
             })
@@ -551,14 +630,30 @@ mod tests {
                 "--mic",
                 "default",
                 "--echo-cancel",
+                "auto",
+                "--mic-gain",
                 "auto"
             ]
         );
-        // 不做回声消除也明说，不靠录音程序的默认值
+        // 不做回声消除也明说，不靠录音程序的默认值；麦克风自动增益默认开着，也明说
         assert_eq!(
             args(None, false, EchoCancel::Off)[7..],
-            ["--no-mic", "--no-system", "--echo-cancel", "off"]
+            [
+                "--no-mic",
+                "--no-system",
+                "--echo-cancel",
+                "off",
+                "--mic-gain",
+                "auto"
+            ]
         );
+        assert_eq!(MicGain::default(), MicGain::Auto);
+        // 排查用的环境变量：off 时不调，别的（没设、写错了）都是 auto
+        assert_eq!(MicGain::parse(Some("off")), MicGain::Off);
+        assert_eq!(MicGain::parse(Some(" off\n")), MicGain::Off);
+        assert_eq!(MicGain::parse(Some("auto")), MicGain::Auto);
+        assert_eq!(MicGain::parse(Some("0")), MicGain::Auto);
+        assert_eq!(MicGain::parse(None), MicGain::Auto);
         // 界面上的开关：开着是 auto，关着、没传是 off
         assert_eq!(EchoCancel::from_switch(true), EchoCancel::Auto);
         assert_eq!(EchoCancel::from_switch(false), EchoCancel::Off);
@@ -573,6 +668,7 @@ mod tests {
                 mic: Some("default"),
                 system: true,
                 echo_cancel: EchoCancel::Off,
+                mic_gain: MicGain::Off,
                 input_file: Some(&input),
                 realtime,
             })
@@ -580,9 +676,12 @@ mod tests {
             .map(|a| a.into_string().unwrap())
             .collect()
         };
-        assert_eq!(test_args(false)[11..], ["--input-file", "/tmp/speech.wav"]);
         assert_eq!(
-            test_args(true)[11..],
+            test_args(false)[11..],
+            ["--mic-gain", "off", "--input-file", "/tmp/speech.wav"]
+        );
+        assert_eq!(
+            test_args(true)[13..],
             ["--input-file", "/tmp/speech.wav", "--realtime"]
         );
         assert!(valid_mic("BuiltInMicrophoneDevice"));

@@ -11,7 +11,7 @@ let scratch = FileManager.default.temporaryDirectory
     .appendingPathComponent("zsmeet-recorder-tests", isDirectory: true)
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
-switch Harness.run(harnessTests + formatTests + audioTests + recordingTests + micTests + echoStageTests + echoQualityTests + endToEndTests) {
+switch Harness.run(harnessTests + formatTests + audioTests + recordingTests + micTests + echoStageTests + echoQualityTests + micGainTests + endToEndTests) {
 case .passed:
     try? FileManager.default.removeItem(at: scratch)
     print("全部通过")

@@ -31,6 +31,8 @@ public struct RecordOptions: Equatable {
     public var system = true
     /// 回声消除
     public var echoCancel = EchoCancelMode.off
+    /// 麦克风自动增益（--mic-gain）：默认 auto，在回声消除之后把麦克风那一路调到正常的说话音量
+    public var micGain = MicGainMode.auto
     /// 调回声消除用（--aec-lead-ms）：参考比麦克风提前多少毫秒，0 到 400
     public var aecLeadMilliseconds = 170
     /// 调回声消除用（--aec-filters）：AEC3 找回声延迟用的滤波器个数，1 到 16
@@ -71,7 +73,7 @@ public enum CommandLineParser {
               列出麦克风，输出一行 JSON：{"microphones":[{"uid":"…","name":"…","default":true}]}
           zsmeet-recorder record --out <目录> [--start-seq N] [--chunk-seconds 10]
                                  [--mic <uid> | --mic default | --no-mic] [--no-system]
-                                 [--echo-cancel off|auto|on]
+                                 [--echo-cancel off|auto|on] [--mic-gain auto|off]
                                  [--input-file <音频文件> [--realtime [--reference-file <音频文件>]]]
               录音：标准输出一行一个事件（JSON），标准输入一行一个命令：
               {"cmd":"pause"} {"cmd":"resume"} {"cmd":"stop"}，标准输入关掉等于 stop。
@@ -79,6 +81,8 @@ public enum CommandLineParser {
               系统换了一个默认的，就换过去接着录（mic_changed 事件）；--mic <uid> 只录这一个，不跟着换。
               --echo-cancel：回声消除（默认 off）。auto：麦克风和电脑声音都在录、声音不是从耳机或 AirPlay
               出来时，用电脑声音把外放录进麦克风的会议声音去掉；on：两路都在录就做。
+              --mic-gain：麦克风自动增益（默认 auto）。auto：在回声消除之后把麦克风那一路调到正常的说话音量
+              （有人说话时才往上调，最多调大 30 dB，不超过满幅）；off：麦克风的声音原样录。电脑声音那一路不动。
               --input-file 是测试用的：拿文件代替麦克风和电脑声音，尽快读完后自动结束；
               再加 --realtime 就按文件的实际时长读；再加 --reference-file 就拿它当电脑声音（测回声消除）。
               调回声消除用：--aec-lead-ms 170、--aec-filters 6、--aec-delay-hint-ms <毫秒>、
@@ -163,6 +167,12 @@ public enum CommandLineParser {
                     throw UsageError("--echo-cancel 只能是 off、auto 或者 on，现在是 \(text)")
                 }
                 options.echoCancel = mode
+            case "--mic-gain":
+                let text = try value(of: flag)
+                guard let mode = MicGainMode(rawValue: text) else {
+                    throw UsageError("--mic-gain 只能是 auto 或者 off，现在是 \(text)")
+                }
+                options.micGain = mode
             case "--aec-lead-ms":
                 options.aecLeadMilliseconds = try integer(of: flag, in: 0...400)
             case "--aec-filters":

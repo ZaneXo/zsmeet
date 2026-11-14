@@ -1,6 +1,6 @@
 -- name: CreateMeeting :one
-INSERT INTO meetings (owner_id, title, source, template, hotwords, visibility)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO meetings (owner_id, title, source, template, hotwords, visibility, speaker_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
 -- name: GetMeeting :one
@@ -184,6 +184,10 @@ UPDATE meetings SET retranscribe = true WHERE id = $1;
 
 -- name: ClearRetranscribe :exec
 UPDATE meetings SET retranscribe = false WHERE id = $1;
+
+-- name: SetMeetingSpeakerCount :exec
+-- 改这场会议有几个人说话（0 是自动区分），下次转写时用
+UPDATE meetings SET speaker_count = $2 WHERE id = $1;
 
 -- name: TrashMeeting :one
 -- 放进回收站

@@ -16,6 +16,8 @@ let endToEndTests: [(String, () throws -> Void)] = [
     ("端到端：参数写错时发 error 事件", testEndToEndBadArguments),
     ("端到端：回声消除（--reference-file）：录出来的声音里外放的回声消掉了，--echo-cancel off 时原样", testEndToEndEchoCancel),
     ("端到端：回声消除 auto 但只录麦克风：started 报 auto，接着报 no_reference；off 时不报", testEndToEndEchoWithoutReference),
+    ("端到端：麦克风自动增益：-40 dBFS 的小声说话录出来在 -22 dBFS 左右（默认 auto），--mic-gain off 时原样；started 报 mic_gain",
+     testEndToEndMicGain),
 ]
 
 enum EndToEnd {
@@ -451,8 +453,9 @@ func testEndToEndEchoCancel() throws {
     try writeWAV(micFile, s.mic)
     try writeWAV(farFile, s.far)
     let dump = directory.appendingPathComponent("dump")
+    // 量的是回声消除本身：麦克风自动增益关掉（不然消剩下的回声、没消的回声会被调成不一样大）
     func run(_ mode: String) throws -> RecorderRun {
-        try RecorderRun(["record", "--out", directory.appendingPathComponent(mode).path, "--echo-cancel", mode]
+        try RecorderRun(["record", "--out", directory.appendingPathComponent(mode).path, "--echo-cancel", mode, "--mic-gain", "off"]
                             + (mode == "on" ? ["--aec-dump", dump.path] : [])
                             + ["--input-file", micFile.path, "--realtime", "--reference-file", farFile.path], in: directory)
     }
@@ -519,4 +522,61 @@ func testEndToEndEchoWithoutReference() throws {
     expectEqual(file.exitStatus(within: 20), 0)
     expectEqual(file.events.first?["echo_cancellation"] as? String, "on")
     expect(!file.names.contains("echo"))
+}
+
+func testEndToEndMicGain() throws {
+    guard requireBinary() else { return }
+    let directory = try temporaryDirectory("e2e-gain")
+    // 30 秒小声说话（-40 dBFS，像 MacBook 自带的麦克风录一两米外的人），底噪 -70 dBFS
+    let clean = speechLike(seconds: 30, seed: 41, rms: Float(pow(10, -40.0 / 20)), active: [0..<30], formants: (550, 1_500), pitch: 120)
+    let input = add(clean, scaled(whiteNoise(clean.count, seed: 42), Float(pow(10, -70.0 / 20) * 3.0.squareRoot())))
+    let file = directory.appendingPathComponent("quiet.wav")
+    try writeWAV(file, input)
+    // 按实际时长读的（现场录音那一套：LiveEngine，麦克风一路）只读前 12 秒，省时间
+    let short = directory.appendingPathComponent("quiet-12s.wav")
+    try writeWAV(short, Array(input[0..<(12 * 48_000)]))
+    func run(_ name: String, _ arguments: [String], file: URL) throws -> RecorderRun {
+        try RecorderRun(["record", "--out", directory.appendingPathComponent(name).path] + arguments + ["--input-file", file.path],
+                        in: directory)
+    }
+    // 几个一起跑：尽快读完的测试模式（文件当成麦克风）默认、off，和按实际时长读的 auto、off
+    let auto = try run("auto", [], file: file)
+    let off = try run("off", ["--mic-gain", "off"], file: file)
+    let live = try run("live", ["--mic-gain", "auto", "--realtime"], file: short)
+    let liveOff = try run("live-off", ["--mic-gain", "off", "--realtime"], file: short)
+    for (recording, name) in [(auto, "auto"), (off, "off"), (live, "live"), (liveOff, "live-off")] {
+        expectEqual(recording.exitStatus(within: 60), 0, name)
+        expectEqual(recording.names.last, "stopped", name)
+    }
+    expectEqual(auto.events.first?["mic_gain"] as? String, "auto", "默认 auto")
+    expectEqual(off.events.first?["mic_gain"] as? String, "off")
+    expectEqual(live.events.first?["mic_gain"] as? String, "auto")
+    expectEqual(liveOff.events.first?["mic_gain"] as? String, "off")
+
+    // 录出来的分片解码以后的音量（尽快读完的模式没有开头攒的那 0.15 秒，和原来的声音对得上）
+    func decoded(_ recording: RecorderRun, _ name: String) throws -> [Float] {
+        let all = directory.appendingPathComponent("\(name).aac")
+        try concatenate(chunkEvents(recording), into: all)
+        expectEqual(try FFmpeg.decodeErrors(all), "", "\(name) 解码没有错")
+        return try FFmpeg.decodeSamples(all)
+    }
+    let inputLevel = activeLevel(input, clean: clean, from: 10, to: 30)
+    let boosted = activeLevel(try decoded(auto, "auto"), clean: clean, from: 10, to: 30)
+    let original = activeLevel(try decoded(off, "off"), clean: clean, from: 10, to: 30)
+    // 按实际时长读的：看音量事件（麦克风那一路，0 到 1，1/60 是 1 dB），6 到 12 秒的平均
+    func micLevel(_ recording: RecorderRun) -> Double {
+        let levels = recording.events.filter {
+            $0["event"] as? String == "level" && ($0["seconds"] as? Double).map { (6.0...12.0).contains($0) } == true
+        }.compactMap { $0["mic"] as? Double }
+        return levels.isEmpty ? -1 : levels.reduce(0, +) / Double(levels.count)
+    }
+    let liveGain = (micLevel(live) - micLevel(liveOff)) * 60
+    print("    测得：说话 \(String(format: "%.1f", inputLevel)) dBFS，录出来 auto \(String(format: "%.1f", boosted))、off \(String(format: "%.1f", original)) dBFS；"
+        + "按实际时长读时麦克风那一路调大了 \(String(format: "%.1f", liveGain)) dB（6 到 12 秒的音量事件）")
+    // 量到的：-39.4 → auto -24.6、off -40.7；按实际时长读的 6 到 12 秒调大 13.8 dB（还在往上调）。
+    // off 也小了 1.3 dB：AAC（64 kbps）在这么小的音量下丢掉了一些细节（对齐了量也一样），调大以后再编码丢得少
+    expect(boosted >= -27 && boosted <= -19, "auto 录出来说话的音量是 \(boosted) dBFS")
+    expect(boosted - original >= 12, "auto 只比 off 大了 \(boosted - original) dB")
+    expect(abs(original - inputLevel) <= 2, "off 时录出来的音量变了：\(inputLevel) → \(original)")
+    expect(liveGain >= 10, "按实际时长读时只调大了 \(liveGain) dB")
 }

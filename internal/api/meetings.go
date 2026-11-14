@@ -217,7 +217,8 @@ type CreateMeetingInput struct {
 		Template string `json:"template,omitempty" doc:"纪要模板的 ID，留空用通用模板"`
 		Hotwords string `json:"hotwords,omitempty" maxLength:"500" doc:"人名、产品名等专有名词，用逗号分开"`
 		// 指定具体的人要在建好以后用「谁能看」接口设置
-		Visibility string `json:"visibility,omitempty" enum:"team,private" doc:"谁能看：团队所有人（默认）或者只有自己（管理员也能看）"`
+		Visibility   string `json:"visibility,omitempty" enum:"team,private" doc:"谁能看：团队所有人（默认）或者只有自己（管理员也能看）"`
+		SpeakerCount int    `json:"speaker_count,omitzero" minimum:"0" maximum:"30" doc:"有几个人说话：0 或不填是按声音自动区分；1 到 30 是按这个人数区分说话人"`
 	}
 }
 
@@ -235,7 +236,7 @@ var createMeetingOp = huma.Operation{
 func (h *Handlers) CreateMeeting(ctx context.Context, in *CreateMeetingInput) (*MeetingOutput, error) {
 	m, err := h.svc.CreateMeeting(ctx, currentUser(ctx), service.NewMeeting{
 		Title: in.Body.Title, Source: in.Body.Source, Template: in.Body.Template, Hotwords: in.Body.Hotwords,
-		Visibility: in.Body.Visibility,
+		Visibility: in.Body.Visibility, SpeakerCount: in.Body.SpeakerCount,
 	})
 	if err != nil {
 		return nil, toHTTP(err)
@@ -503,6 +504,14 @@ func meetingChanged(cur, last Meeting) bool {
 	return !reflect.DeepEqual(cur, last)
 }
 
+type RetranscribeInput struct {
+	MeetingID
+	// 可以不带：照原来的人数（或自动区分）转写
+	Body *struct {
+		SpeakerCount *int `json:"speaker_count,omitempty" minimum:"0" maximum:"30" doc:"这次按几个人区分说话人：0 是按声音自动区分，1 到 30 是按这个人数；不填就照原来的设置"`
+	}
+}
+
 var retranscribeOp = huma.Operation{
 	OperationID: "retranscribe-meeting",
 	Method:      http.MethodPost,
@@ -513,12 +522,16 @@ var retranscribeOp = huma.Operation{
 	Security:    loggedIn,
 }
 
-func (h *Handlers) Retranscribe(ctx context.Context, in *MeetingID) (*MeetingOutput, error) {
+func (h *Handlers) Retranscribe(ctx context.Context, in *RetranscribeInput) (*MeetingOutput, error) {
 	id, err := parseID(in.ID)
 	if err != nil {
 		return nil, err
 	}
-	m, err := h.svc.Retranscribe(ctx, currentUser(ctx), id)
+	var speakerCount *int
+	if in.Body != nil {
+		speakerCount = in.Body.SpeakerCount
+	}
+	m, err := h.svc.Retranscribe(ctx, currentUser(ctx), id, speakerCount)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

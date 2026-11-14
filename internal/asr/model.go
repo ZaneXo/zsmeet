@@ -1,6 +1,7 @@
 package asr
 
 import (
+	"cmp"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,12 @@ func SenseVoiceFile(model, tokens string, threads int, language string) Model {
 	sv.UseInverseTextNormalization = 1
 	m.config.ModelConfig.Tokens = tokens
 	return m
+}
+
+// file 是加载失败时告诉用户的模型文件。
+func (m Model) file() string {
+	c := m.config.ModelConfig
+	return cmp.Or(c.SenseVoice.Model, c.FunAsrNano.EncoderAdaptor, c.Qwen3ASR.Encoder)
 }
 
 // pick 返回 dir 里第一个存在的文件，都不存在时返回第一个（加载时会报找不到）。

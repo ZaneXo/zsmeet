@@ -177,7 +177,7 @@ jobs:
             echo "Release $TAG 已经存在"
             exit 0
           fi
-          notes="镜像：\`$IMAGE:$VERSION\`（linux/amd64、linux/arm64）。部署和升级见 README 的「部署」一节。"
+          notes="镜像：\`$IMAGE:$VERSION\`（linux/amd64、linux/arm64）。部署和升级见 $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/main/docs/deploy.md"
           flags=()
           # 标签里带「-」的（v0.2.0-rc.1）是预发布版本
           if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi

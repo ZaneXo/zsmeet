@@ -210,7 +210,12 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 	}
 
 	r.report(ctx, StageDiarize, 0)
-	turns := engine.Diarize(samples)
+	// 用户填了有几个人说话（会议上的说话人数）就按人数分，没填是 0：按声音自动区分
+	turns, err := engine.Diarize(ctx, samples, int(r.m.SpeakerCount), func(p float64) { r.report(ctx, StageDiarize, p) })
+	if err != nil {
+		return nil, err
+	}
+	// 聚类那一步不能中断：算完以后再看一次是不是取消了
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

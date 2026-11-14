@@ -24,6 +24,43 @@ export function VisibilityField({ id, value, onChange, disabled }: {
   );
 }
 
+/** 说话人数最多能选几个，和后台的上限（service.MaxSpeakerCount）一样 */
+export const MAX_SPEAKER_COUNT = 30;
+
+/** 选有几个人说话：0 是按声音自动区分，1 到 MAX_SPEAKER_COUNT 是按这个人数区分。 */
+export function SpeakerCountSelect({ id, value, onChange, disabled, className }: {
+  id: string;
+  value: number;
+  onChange: (v: number) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <Select id={id} className={className} value={value} onChange={(e) => onChange(Number(e.target.value))} disabled={disabled}>
+      <option value={0}>自动区分</option>
+      {Array.from({ length: MAX_SPEAKER_COUNT }, (_, i) => i + 1).map((n) => (
+        <option key={n} value={n}>
+          {n} 人
+        </option>
+      ))}
+    </Select>
+  );
+}
+
+/** 新建会议时选有几个人说话。知道人数时选上，区分说话人更准。 */
+export function SpeakerCountField({ id, value, onChange, disabled }: {
+  id: string;
+  value: number;
+  onChange: (v: number) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Field label="说话人数" htmlFor={id} hint="知道有几个人说话就选上，区分说话人更准；转写完以后也可以改了重新转写">
+      <SpeakerCountSelect id={id} className="sm:w-72" value={value} onChange={onChange} disabled={disabled} />
+    </Field>
+  );
+}
+
 export function useTemplates() {
   return useQuery({
     queryKey: ["templates"],
@@ -45,6 +82,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
   const [template, setTemplate] = useState("general");
   const [hotwords, setHotwords] = useState("");
   const [visibility, setVisibility] = useState<"team" | "private">("team");
+  const [speakerCount, setSpeakerCount] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [sent, setSent] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -80,7 +118,9 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
     const controller = new AbortController();
     abort.current = controller;
     try {
-      const meeting = await unwrap(api.POST("/api/meetings", { body: { title, source: "upload", template, hotwords, visibility } }));
+      const meeting = await unwrap(
+        api.POST("/api/meetings", { body: { title, source: "upload", template, hotwords, visibility, speaker_count: speakerCount } }),
+      );
       const chunks = await uploadFile(meeting.id, file, setSent, controller.signal);
       await unwrap(api.POST("/api/meetings/{id}/complete", { params: { path: { id: meeting.id } }, body: { chunks } }));
       void queryClient.invalidateQueries({ queryKey: ["meetings"] });
@@ -154,6 +194,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
           </Field>
         </div>
         <p className="-mt-2 text-xs leading-relaxed text-muted">热词会交给大模型，纪要里这些词被识别成近音字时会纠正过来。</p>
+        <SpeakerCountField id="up-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={busy} />
         <VisibilityField id="up-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 
         {busy && file && (

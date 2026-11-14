@@ -46,15 +46,19 @@ func testJSON() {
 func testEventJSON() {
     let cases: [(RecorderEvent, String)] = [
         (.started(sampleRate: 48_000, channels: 1, mic: "MacBook Pro 麦克风", system: true),
-         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true,"echo_cancellation":"off"}"#),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"MacBook Pro 麦克风","system":true,"echo_cancellation":"off","mic_gain":"off"}"#),
         (.started(sampleRate: 48_000, channels: 1, mic: nil, system: false),
-         #"{"event":"started","sample_rate":48000,"channels":1,"mic":null,"system":false,"echo_cancellation":"off"}"#),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":null,"system":false,"echo_cancellation":"off","mic_gain":"off"}"#),
         (.started(sampleRate: 48_000, channels: 1, mic: "m", system: true, echoCancellation: .auto),
-         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"auto"}"#),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"auto","mic_gain":"off"}"#),
         (.started(sampleRate: 48_000, channels: 1, mic: "m", system: true, echoCancellation: .on),
-         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"on"}"#),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"on","mic_gain":"off"}"#),
         (.started(sampleRate: 48_000, channels: 1, mic: "m", system: true, echoCancellation: .unavailable),
-         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"unavailable"}"#),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"unavailable","mic_gain":"off"}"#),
+        (.started(sampleRate: 48_000, channels: 1, mic: "m", system: true, echoCancellation: .off, micGain: .auto),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":true,"echo_cancellation":"off","mic_gain":"auto"}"#),
+        (.started(sampleRate: 48_000, channels: 1, mic: "m", system: false, echoCancellation: .auto, micGain: .unavailable),
+         #"{"event":"started","sample_rate":48000,"channels":1,"mic":"m","system":false,"echo_cancellation":"auto","mic_gain":"unavailable"}"#),
         (.echo(active: true, reason: .speakers), #"{"event":"echo","active":true,"reason":"speakers"}"#),
         (.echo(active: false, reason: .headphones), #"{"event":"echo","active":false,"reason":"headphones"}"#),
         (.echo(active: false, reason: .airplay), #"{"event":"echo","active":false,"reason":"airplay"}"#),
@@ -102,6 +106,7 @@ func testParseCommandLine() throws {
     expectEqual(defaults.chunkSeconds, 10)
     expectEqual(defaults.mic, .systemDefault)
     expectEqual(defaults.system, true)
+    expectEqual(defaults.micGain, .auto, "默认自动调麦克风的音量")
 
     var full = RecordOptions()
     full.outDir = "d"
@@ -159,6 +164,15 @@ func testParseCommandLine() throws {
     expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--input-file", "mic.wav", "--realtime", "--reference-file", "far.wav",
                                              "--echo-cancel", "off"]), .record(reference))
 
+    // 麦克风自动增益
+    var gain = RecordOptions()
+    gain.outDir = "d"
+    gain.micGain = .off
+    expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--mic-gain", "off"]), .record(gain))
+    gain.micGain = .auto
+    gain.echoCancel = .auto
+    expectEqual(try CommandLineParser.parse(["record", "--out", "d", "--echo-cancel", "auto", "--mic-gain", "auto"]), .record(gain))
+
     expectEqual(try CommandLineParser.parse(["devices"]), .devices)
     expectEqual(try CommandLineParser.parse(["--help"]), .help)
 }
@@ -185,6 +199,8 @@ func testParseErrors() {
         (["record", "--out", "d", "--loud"], "不认识的参数：--loud"),
         (["record", "--out", "d", "--echo-cancel"], "--echo-cancel 后面缺少值"),
         (["record", "--out", "d", "--echo-cancel", "yes"], "--echo-cancel 只能是 off、auto 或者 on，现在是 yes"),
+        (["record", "--out", "d", "--mic-gain"], "--mic-gain 后面缺少值"),
+        (["record", "--out", "d", "--mic-gain", "on"], "--mic-gain 只能是 auto 或者 off，现在是 on"),
         (["record", "--out", "d", "--aec-lead-ms", "401"], "--aec-lead-ms 要是 0 到 400 之间的整数，现在是 401"),
         (["record", "--out", "d", "--aec-filters", "0"], "--aec-filters 要是 1 到 16 之间的整数，现在是 0"),
         (["record", "--out", "d", "--aec-delay-hint-ms", "-1"], "--aec-delay-hint-ms 要是 0 到 500 之间的整数，现在是 -1"),

@@ -6,10 +6,10 @@ import { AppLink } from "../components/AppLink";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Citation, Meeting, Segment, User } from "../api/client";
 import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings";
-import { Button, buttonClass, Card, Chip, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
+import { Button, buttonClass, Card, Chip, Field, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
-import { waitingForRecording } from "../lib/meetingStatus";
+import { waitingForRecording, writingMinutesOnly } from "../lib/meetingStatus";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
 import { chunksFlowing, contiguous, lastReceived, receivedSeconds } from "../lib/unfinishedRecording";
 import type { RecordingSource } from "../lib/unfinishedRecording";
@@ -24,6 +24,7 @@ import { LatestWebhookSends, useMeetingWebhooks, WebhookShareDialog } from "./We
 import { meetingChip } from "./Meetings";
 import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
+import { SpeakerCountSelect } from "./UploadDialog";
 
 const isActive = (m: Meeting | undefined) => m?.status === "queued" || m?.status === "processing";
 
@@ -222,7 +223,7 @@ export function MeetingDetailPage({
       {posting && <WebhookShareDialog meeting={m} hooks={hooks} onClose={() => setPosting(false)} />}
       {access && <AccessDialog meeting={m} isOwner={m.owner_id === user.id} feishu={feishuReady} groups={hooks.length > 0} onClose={() => setAccess(false)} />}
 
-      {m.status !== "done" && <ProcessingPanel meeting={m} user={user} minutesOnly={hasTranscript} />}
+      {m.status !== "done" && <ProcessingPanel meeting={m} user={user} hasTranscript={hasTranscript} />}
 
       {m.has_audio && (
         <Card className="px-4 py-3">
@@ -381,7 +382,7 @@ const STEP_HINT: Record<(typeof STEPS)[number], string> = {
 };
 
 /** 会议还没处理完时显示：排队、各步骤的进度，或者失败原因和重试按钮。 */
-function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; user: User; minutesOnly: boolean }) {
+function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting; user: User; hasTranscript: boolean }) {
   const retry = useMutation({
     mutationFn: () => unwrap(api.POST("/api/meetings/{id}/retry", { params: { path: { id: m.id } } })),
     onSuccess: (updated) => queryClient.setQueryData(["meeting", m.id], updated),
@@ -422,7 +423,8 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
           <div>
             <Button variant="primary" size="sm" disabled={retry.isPending} onClick={() => retry.mutate()}>
               <Icon name="retry" size={15} />
-              {minutesOnly ? "重新生成纪要" : "重试"}
+              {/* 有转写时重试只重新写纪要（重新转写失败了也是，见 writingMinutesOnly 的说明） */}
+              {hasTranscript ? "重新生成纪要" : "重试"}
             </Button>
           </div>
         ) : (
@@ -441,8 +443,9 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
     );
   }
 
-  // 已经有转写时（重新生成纪要）只有写纪要这一步；刚识别完、转写已经出来的时候，可能还在校对
-  if (minutesOnly || m.stage === "minutes") {
+  // 重新生成纪要时只有写纪要这一步；重新转写时虽然有旧的转写，也要从接收转码开始一步步显示。
+  // 第一次识别完、转写已经出来的时候，可能还在校对
+  if (writingMinutesOnly(m, hasTranscript)) {
     const correcting = m.stage === "correct";
     return (
       <Card className="flex flex-col gap-2.5 p-5">
@@ -464,7 +467,7 @@ function ProcessingPanel({ meeting: m, user, minutesOnly }: { meeting: Meeting; 
             <b className="font-semibold">下载识别模型</b>
             <span className="text-[13px] tabular-nums text-muted">{Math.round(m.progress * 100)}%</span>
           </div>
-          <span className="text-[13px] text-muted">只在第一次处理会议时下载，约 280 MB，之后不用再等</span>
+          <span className="text-[13px] text-muted">只在第一次处理会议时下载，约 300 MB，之后不用再等</span>
           <ProgressBar value={m.progress} />
         </div>
       )}
@@ -686,11 +689,16 @@ function MarksCard({ marks, segments, canSeek, onSeek }: { marks: number[]; segm
 }
 
 
-/** 用现在的识别模型重新转写（换模型以前转写的会议，用它得到逐句的时间）。先确认一次。 */
+/**
+ * 用现在的识别模型重新转写：说话人分错了时选上有几个人说话再转；换模型以前转写的会议也用它得到逐句的时间。
+ * 先确认一次，确认时可以改说话人数。
+ */
 function Retranscribe({ meeting: m }: { meeting: Meeting }) {
   const [confirming, setConfirming] = useState(false);
+  const [speakerCount, setSpeakerCount] = useState(m.speaker_count);
   const run = useMutation({
-    mutationFn: () => unwrap(api.POST("/api/meetings/{id}/retranscribe", { params: { path: { id: m.id } } })),
+    mutationFn: () =>
+      unwrap(api.POST("/api/meetings/{id}/retranscribe", { params: { path: { id: m.id } }, body: { speaker_count: speakerCount } })),
     onSuccess: (updated) => {
       setConfirming(false);
       queryClient.setQueryData(["meeting", m.id], updated);
@@ -700,7 +708,15 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
   const busy = m.status !== "done" && m.status !== "failed";
   if (!confirming) {
     return (
-      <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(true)}>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        onClick={() => {
+          setSpeakerCount(m.speaker_count);
+          setConfirming(true);
+        }}
+      >
         <Icon name="retry" size={15} />
         重新转写
       </Button>
@@ -711,6 +727,9 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
       <span className="leading-relaxed text-ink-2">
         用现在的识别模型从录音重新转写，转完会重新生成一版纪要（之前的版本都保留）。长会议要几分钟，转完之前看到的还是原来的转写；重新转写失败时原来的转写和纪要也都还在。
       </span>
+      <Field label="说话人数" htmlFor="retranscribe-speakers" hint="说话人分得不对（分多了或者几个人混在一起）时，选上有几个人说话再转写">
+        <SpeakerCountSelect id="retranscribe-speakers" className="sm:w-48" value={speakerCount} onChange={setSpeakerCount} disabled={run.isPending} />
+      </Field>
       {run.isError && <Notice tone="bad">{errorMessage(run.error)}</Notice>}
       <span className="flex gap-2">
         <Button size="sm" variant="primary" disabled={run.isPending} onClick={() => run.mutate()}>

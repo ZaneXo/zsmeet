@@ -5,8 +5,8 @@ package asr
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -21,45 +21,55 @@ import (
 // Engine 持有加载好的模型。加载一次要几秒、占几百 MB 内存，所以整个进程共用一个。
 // 它的方法不能并发调用，由调用方排队。
 type Engine struct {
-	// 识别文字（SenseVoice）
+	// 语音检测和识别文字（SenseVoice）
 	*Transcriber
-	diarizer *sherpa.OfflineSpeakerDiarization
 
-	// 算声纹用的模型和区分说话人的是同一个文件。管理员打开了声纹才用到，第一次用时才加载
+	// 区分说话人时给每个小段算声纹的模型（见 Diarize）
+	diarizerModel sherpa.SpeakerEmbeddingExtractorConfig
+	diarizer      *sherpa.SpeakerEmbeddingExtractor
+
+	// 声纹库（按声音认出改过名的人）用的模型。管理员打开了声纹才用到，第一次用时才加载。
+	// 和区分说话人用的不是同一个：存下来的声纹是这个模型算的，换了模型就对不上了
 	embedding sherpa.SpeakerEmbeddingExtractorConfig
 	extractor *sherpa.SpeakerEmbeddingExtractor
 }
 
+// Params 是语音检测的参数。后台处理用 DefaultParams，zsmeet transcribe 可以换别的值来比较。
+type Params struct {
+	// 每一小段（32 毫秒）是人声的概率超过 VADThreshold 算有人在说话；
+	// 安静 MinSilence 秒算这句话说完了，短于 MinSpeech 秒的不要，长于 MaxSpeech 秒的强行切开（单位都是秒）
+	VADThreshold, MinSilence, MinSpeech, MaxSpeech float32
+}
+
+// DefaultParams 是后台处理用的参数。
+func DefaultParams() Params {
+	return Params{
+		VADThreshold: 0.5,
+		MinSilence:   0.3,
+		MinSpeech:    0.25,
+		// 一句话最长 10 秒，再长就强行切开，识别模型在短句上更准
+		MaxSpeech: 10,
+	}
+}
+
 // Load 加载模型。threads 是识别用的 CPU 线程数，language 是识别的语言（见 config.Config.ASRLanguage）。
 func Load(p models.Paths, threads int, language string) (*Engine, error) {
+	return LoadWith(p, threads, language, DefaultParams())
+}
+
+// LoadWith 和 Load 一样，只是语音检测用指定的参数。
+func LoadWith(p models.Paths, threads int, language string, params Params) (*Engine, error) {
 	e := &Engine{}
-	t, err := NewTranscriber(SenseVoice(p, threads, language), p.VAD())
+	t, err := NewTranscriberWith(SenseVoice(p, threads, language), p.VAD(), params)
 	if err != nil {
 		return nil, err
 	}
 	e.Transcriber = t
 
-	dc := sherpa.OfflineSpeakerDiarizationConfig{}
-	dc.Segmentation.Pyannote.Model = p.Segmentation()
-	dc.Segmentation.NumThreads = threads
-	dc.Segmentation.Provider = "cpu"
-	dc.Embedding.Model = p.Embedding()
-	dc.Embedding.NumThreads = threads
-	dc.Embedding.Provider = "cpu"
-	// 不知道有几个人，按声音相似度的阈值自动聚类
-	dc.Clustering.NumClusters = -1
-	// 阈值越小分出的人越多。库的默认值 0.5 会把同一个人拆成两个，0.6 是在测试录音上刚好不拆的值；
-	// 还需要用真实的多人会议再校准
-	dc.Clustering.Threshold = 0.6
-	dc.MinDurationOn = 0.3
-	dc.MinDurationOff = 0.5
-	if e.diarizer = sherpa.NewOfflineSpeakerDiarization(&dc); e.diarizer == nil {
-		return nil, errors.New("说话人模型加载失败")
+	e.diarizerModel = sherpa.SpeakerEmbeddingExtractorConfig{Model: p.Diarization(), NumThreads: threads, Provider: "cpu"}
+	if e.diarizer = sherpa.NewSpeakerEmbeddingExtractor(&e.diarizerModel); e.diarizer == nil {
+		return nil, modelError("区分说话人的模型", p.Diarization())
 	}
-	if rate := e.diarizer.SampleRate(); rate != audio.SampleRate {
-		return nil, fmt.Errorf("说话人模型要求采样率 %d，和识别用的 %d 不一致", rate, audio.SampleRate)
-	}
-
 	e.embedding = sherpa.SpeakerEmbeddingExtractorConfig{Model: p.Embedding(), NumThreads: threads, Provider: "cpu"}
 	return e, nil
 }
@@ -72,19 +82,23 @@ type Transcriber struct {
 	vad        sherpa.VadModelConfig
 }
 
-// NewTranscriber 加载识别模型 m。vadModel 是 Silero VAD 模型文件的路径。
+// NewTranscriber 加载识别模型 m，语音检测用 DefaultParams。vadModel 是 Silero VAD 模型文件的路径。
 func NewTranscriber(m Model, vadModel string) (*Transcriber, error) {
+	return NewTranscriberWith(m, vadModel, DefaultParams())
+}
+
+// NewTranscriberWith 和 NewTranscriber 一样，只是语音检测用指定的参数。
+func NewTranscriberWith(m Model, vadModel string, params Params) (*Transcriber, error) {
 	t := &Transcriber{}
 	if t.recognizer = sherpa.NewOfflineRecognizer(&m.config); t.recognizer == nil {
-		return nil, errors.New("识别模型加载失败")
+		return nil, modelError("识别模型", m.file())
 	}
 	t.vad.SileroVad.Model = vadModel
-	t.vad.SileroVad.Threshold = 0.5
-	t.vad.SileroVad.MinSilenceDuration = 0.3
-	t.vad.SileroVad.MinSpeechDuration = 0.25
+	t.vad.SileroVad.Threshold = params.VADThreshold
+	t.vad.SileroVad.MinSilenceDuration = params.MinSilence
+	t.vad.SileroVad.MinSpeechDuration = params.MinSpeech
 	t.vad.SileroVad.WindowSize = vadWindow
-	// 一句话最长 10 秒，再长就强行切开，识别模型在短句上更准
-	t.vad.SileroVad.MaxSpeechDuration = 10
+	t.vad.SileroVad.MaxSpeechDuration = params.MaxSpeech
 	t.vad.SampleRate = audio.SampleRate
 	t.vad.NumThreads = 1
 	t.vad.Provider = "cpu"
@@ -97,32 +111,51 @@ func (t *Transcriber) Close() {
 	t.recognizer = nil
 }
 
+// modelError 是模型加载失败时给用户看的说明。模型下载时校验过，加载失败多半是文件后来坏了；
+// 检查模型时只看文件在不在、大小对不对，所以要删掉它才会重新下载。
+func modelError(what, path string) error {
+	return fmt.Errorf("%s加载失败，模型文件 %s 可能坏了。请管理员删掉模型目录（ZSMEET_MODELS_DIR，"+
+		"docker compose 部署的是 models 数据卷）里的这个文件，再重启后台处理（docker compose restart worker），它会自动重新下载",
+		what, filepath.Base(path))
+}
+
 // Silero VAD 在 16k 采样率下固定每次吃 512 个采样
 const vadWindow = 512
 
 // Transcribe 把整段录音识别成带时间的句子。progress 的参数是 0 到 1。
 func (t *Transcriber) Transcribe(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
+	var segs []transcript.Segment
+	err := t.detectSpeech(ctx, samples, progress, func(start int, speech []float32) {
+		from := float64(start) / audio.SampleRate
+		segs = append(segs, t.recognize(speech, from, from+float64(len(speech))/audio.SampleRate)...)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return segs, nil
+}
+
+// detectSpeech 用语音检测找出有人说话的片段，按先后交给 each（片段开头的采样下标和片段的声音）。
+// progress 的参数是 0 到 1。
+func (t *Transcriber) detectSpeech(ctx context.Context, samples []float32, progress func(float64), each func(start int, speech []float32)) error {
 	vad := sherpa.NewVoiceActivityDetector(&t.vad, 30)
 	if vad == nil {
-		return nil, errors.New("语音检测模型加载失败")
+		return modelError("语音检测模型", t.vad.SileroVad.Model)
 	}
 	defer sherpa.DeleteVoiceActivityDetector(vad)
 
-	var segs []transcript.Segment
 	drain := func() {
 		for !vad.IsEmpty() {
 			speech := vad.Front()
 			vad.Pop()
-			start := float64(speech.Start) / audio.SampleRate
-			segs = append(segs, t.recognize(speech.Samples, start, start+float64(len(speech.Samples))/audio.SampleRate)...)
+			each(speech.Start, speech.Samples)
 		}
 	}
-
 	for i := 0; i+vadWindow <= len(samples); i += vadWindow {
 		// 大约每 3 秒音频检查一次是否被取消，并报一次进度
 		if i%(vadWindow*100) == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return err
 			}
 			progress(float64(i) / float64(len(samples)))
 		}
@@ -132,7 +165,7 @@ func (t *Transcriber) Transcribe(ctx context.Context, samples []float32, progres
 	vad.Flush()
 	drain()
 	progress(1)
-	return segs, nil
+	return nil
 }
 
 // recognize 识别一小段录音（start 到 end 秒），按标点切成句子，每句带开始和结束时间。
@@ -156,26 +189,13 @@ func (t *Transcriber) recognize(samples []float32, start, end float64) []transcr
 	return nil
 }
 
-// Diarize 找出每个人说话的时间段。这一步是一次不能中断的长计算。
-func (e *Engine) Diarize(samples []float32) []transcript.Turn {
-	if len(samples) == 0 {
-		return nil
-	}
-	result := e.diarizer.Process(samples)
-	turns := make([]transcript.Turn, len(result))
-	for i, r := range result {
-		turns[i] = transcript.Turn{Start: float64(r.Start), End: float64(r.End), Speaker: r.Speaker}
-	}
-	return turns
-}
-
 // 算一个人的声纹时用他最长的几段话，加起来最多这么多秒：再多也不会更准，只是更慢
 const maxVoiceSeconds = 30
 
 // 一场会议里说话加起来不到这么多秒的人不算声纹：太短的话算出来的不可靠，容易认错
 const minVoiceSeconds = 2
 
-// Embed 给每位说话人算一个声音特征（声纹），turns 的编号就是返回值的键。
+// Embed 给每位说话人算一个声音特征（声纹），用来和声纹库比对，turns 的编号就是返回值的键。
 // 说话太少的人没有。算出来的向量已经归一化。
 func (e *Engine) Embed(samples []float32, turns []transcript.Turn) (map[int]voiceprint.Voice, error) {
 	picked := pickTurns(turns, len(samples))
@@ -184,7 +204,7 @@ func (e *Engine) Embed(samples []float32, turns []transcript.Turn) (map[int]voic
 	}
 	if e.extractor == nil {
 		if e.extractor = sherpa.NewSpeakerEmbeddingExtractor(&e.embedding); e.extractor == nil {
-			return nil, errors.New("声纹模型加载失败")
+			return nil, modelError("声纹模型", e.embedding.Model)
 		}
 	}
 	out := make(map[int]voiceprint.Voice, len(picked))

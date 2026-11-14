@@ -132,7 +132,7 @@ function UpdateDetails({ info, updater, current, onLater }: { info: UpdateInfo; 
           {blocker ? (
             <p className="text-xs leading-relaxed text-warn">{blocker}</p>
           ) : (
-            // 没签名的 App 每个版本在系统看来都是新的（README 的「桌面版」也这么说）：先告诉用户会被问什么、点哪个
+            // 没签名的 App 每个版本在系统看来都是新的（docs/desktop-guide.md 的「更新」也这么说）：先告诉用户会被问什么、点哪个
             <p className="text-xs leading-relaxed text-muted">
               更新要重启 zsmeet。安装包没有签名，macOS 会把新版本当成另一个 App：更新后第一次打开时可能会问能不能用钥匙串里的登录信息，点「始终允许」；第一次录音时可能会再问麦克风和录制系统音频的权限，点「允许」。
             </p>

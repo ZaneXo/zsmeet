@@ -39,6 +39,8 @@ import (
 type fakeEngine struct {
 	transcribed atomic.Int32
 	samples     atomic.Int64
+	// 最后一次转写时收到的声音
+	heard atomic.Pointer[[]float32]
 
 	// 算声纹时每位说话人（转写里的编号）返回的声音特征，没有的不返回
 	voices   map[int][]float32
@@ -49,11 +51,14 @@ type fakeEngine struct {
 	onEmbed func()
 	// 不为空时转写结果是它，否则是固定的两句
 	segs []transcript.Segment
+	// 最后一次区分说话人时要求分成几个人（0 是自动区分）
+	speakers atomic.Int32
 }
 
 func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
 	e.transcribed.Add(1)
 	e.samples.Store(int64(len(samples)))
+	e.heard.Store(&samples)
 	progress(1)
 	if e.segs != nil {
 		// 每次给一份新的，和真的引擎一样：处理流程会直接改返回的句子
@@ -65,8 +70,10 @@ func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress f
 	}, nil
 }
 
-func (e *fakeEngine) Diarize([]float32) []transcript.Turn {
-	return []transcript.Turn{{Start: 0, End: 1, Speaker: 4}, {Start: 1, End: 2, Speaker: 9}}
+func (e *fakeEngine) Diarize(_ context.Context, _ []float32, speakers int, progress func(float64)) ([]transcript.Turn, error) {
+	progress(1)
+	e.speakers.Store(int32(speakers))
+	return []transcript.Turn{{Start: 0, End: 1, Speaker: 4}, {Start: 1, End: 2, Speaker: 9}}, nil
 }
 
 func (e *fakeEngine) Embed(_ []float32, turns []transcript.Turn) (map[int]voiceprint.Voice, error) {
@@ -521,6 +528,36 @@ func TestMarksReachMinutesPrompt(t *testing.T) {
 	prompt := e.lastPrompt.Load()
 	if prompt == nil || !strings.Contains(*prompt, "【★ 00:01 标记为重点】") {
 		t.Errorf("提示词里没有标记的重点：%v", prompt)
+	}
+}
+
+// 会议上填了有几个人说话：区分说话人时按这个人数分；没填（0）是自动区分。重新转写前改了人数，这次就按新的分
+func TestDiarizeUsesMeetingSpeakerCount(t *testing.T) {
+	e := newEnv(t)
+	e.llm(nil)
+	ctx := t.Context()
+
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.engine.speakers.Load(); got != 0 {
+		t.Errorf("没填人数时要自动区分（0），实际按 %d 个人分", got)
+	}
+
+	id := args.MeetingID
+	a := e.enqueue(id, "done")
+	if err := e.q.SetMeetingSpeakerCount(ctx, sqlc.SetMeetingSpeakerCountParams{ID: id, SpeakerCount: 8}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.q.MarkRetranscribe(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(a); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.engine.speakers.Load(); got != 8 {
+		t.Errorf("填了 8 个人，区分说话人时要按 8 个人分，实际 %d", got)
 	}
 }
 

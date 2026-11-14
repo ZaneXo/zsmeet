@@ -941,9 +941,16 @@ func TestRetranscribe(t *testing.T) {
 	}
 
 	other.want(other.do("POST", base+"/retranscribe", nil), 403)
+	if r := c.want(c.do("GET", base, nil), 200); r.Body["retranscribing"] != false {
+		t.Errorf("还没要求重新转写：%s", r.Raw)
+	}
 	r := c.want(c.do("POST", base+"/retranscribe", nil), 200)
 	if r.Body["status"] != "queued" {
 		t.Errorf("应该进入排队：%s", r.Raw)
+	}
+	// 界面据此显示「接收与转码、识别文字……」，而不是只有「正在生成纪要」（旧的转写还在）
+	if r.Body["retranscribing"] != true {
+		t.Errorf("要求了重新转写：%s", r.Raw)
 	}
 	if tr := c.want(c.do("GET", base+"/transcript", nil), 200); len(tr.Body["segments"].([]any)) != 1 {
 		t.Errorf("旧的转写要留到新的存好为止：%s", tr.Raw)
@@ -966,6 +973,73 @@ func TestRetranscribe(t *testing.T) {
 	}
 	if r := c.want(c.do("POST", "/api/meetings/"+gone+"/retranscribe", nil), 409); !strings.Contains(r.Raw, "录音已经不在了") {
 		t.Errorf("要说明录音不在了：%s", r.Raw)
+	}
+}
+
+// 有几个人说话：新建会议时可以填，重新转写时可以改；不填是自动区分（0），超出范围的用中文说明。
+func TestSpeakerCount(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+
+	if r := c.want(c.do("POST", "/api/meetings", obj{"title": "x", "source": "upload", "speaker_count": 31}), 422); !strings.Contains(r.Raw, "说话人数") {
+		t.Errorf("说话人数超出范围要说明是哪一项：%s", r.Raw)
+	}
+	c.want(c.do("POST", "/api/meetings", obj{"title": "x", "source": "upload", "speaker_count": -1}), 422)
+	if r := c.want(c.do("POST", "/api/meetings", obj{"title": "没填人数", "source": "upload"}), 201); r.Body["speaker_count"] != float64(0) {
+		t.Errorf("不填是自动区分（0）：%s", r.Raw)
+	}
+	created := c.want(c.do("POST", "/api/meetings", obj{"title": "三个人的会", "source": "record", "speaker_count": 3}), 201)
+	if created.Body["speaker_count"] != float64(3) {
+		t.Errorf("说话人数要存下来：%s", created.Raw)
+	}
+	if r := c.want(c.do("GET", "/api/meetings/"+created.Body["id"].(string), nil), 200); r.Body["speaker_count"] != float64(3) {
+		t.Errorf("会议详情里要有说话人数：%s", r.Raw)
+	}
+
+	id := c.processed("产品周会", []transcript.Segment{{Start: 0, End: 2, Text: "好。"}}, "## 摘要\n好。", `[]`)
+	base := "/api/meetings/" + id
+	if err := os.MkdirAll(c.store.Path("audio"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.store.Path("audio/"+id+".m4a"), []byte("m4a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stored := func() int {
+		t.Helper()
+		var n int
+		if err := c.pool.QueryRow(t.Context(), "SELECT speaker_count FROM meetings WHERE id = $1", id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// 处理完了才能再重新转写；测试里直接改回已完成
+	finish := func() {
+		t.Helper()
+		if _, err := c.pool.Exec(t.Context(), "UPDATE meetings SET status = 'done', retranscribe = false WHERE id = $1", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if r := c.want(c.do("POST", base+"/retranscribe", obj{"speaker_count": 31}), 422); !strings.Contains(r.Raw, "说话人数") {
+		t.Errorf("说话人数超出范围要说明是哪一项：%s", r.Raw)
+	}
+	if r := c.want(c.do("POST", base+"/retranscribe", obj{"speaker_count": 8}), 200); r.Body["speaker_count"] != float64(8) || r.Body["status"] != "queued" {
+		t.Errorf("重新转写时改成 8 个人：%s", r.Raw)
+	}
+	// 正在处理时不能再来一次，人数也不改
+	c.want(c.do("POST", base+"/retranscribe", obj{"speaker_count": 2}), 409)
+	if n := stored(); n != 8 {
+		t.Errorf("正在处理时人数不该改，现在是 %d", n)
+	}
+	// 不带人数（以前的客户端）：照原来的人数
+	finish()
+	if r := c.want(c.do("POST", base+"/retranscribe", nil), 200); r.Body["speaker_count"] != float64(8) {
+		t.Errorf("不带人数时照原来的：%s", r.Raw)
+	}
+	// 改回自动区分
+	finish()
+	if r := c.want(c.do("POST", base+"/retranscribe", obj{"speaker_count": 0}), 200); r.Body["speaker_count"] != float64(0) {
+		t.Errorf("改回自动区分：%s", r.Raw)
 	}
 }
 

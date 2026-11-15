@@ -15,6 +15,8 @@ const (
 	QueueProcess = river.QueueDefault
 	// 巡检等维护任务单独一个队列，不会被长时间的会议处理堵住
 	QueueMaintenance = "maintenance"
+	// 录音过程中的实时字幕：单独一个队列，不会被长会议的写纪要堵住
+	QueueLiveCaption = "live_caption"
 	// 发到飞书（推群、导入文档）。飞书云空间同一个文件夹不支持并发操作，一个一个来
 	QueueFeishu = "feishu"
 	// 导入飞书会议的录制：要等飞书生成好、再下载，单独一个队列，不耽误发群
@@ -44,6 +46,22 @@ func (ReapArgs) Kind() string { return "reap_stalled" }
 
 func (ReapArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{Queue: QueueMaintenance, MaxAttempts: 1}
+}
+
+// LiveCaptionArgs 把正在录音的会议新传上来的分片识别成实时字幕。
+// 同一场会议同时只跑或排一个任务；跑的期间又传上来新分片时，worker 会在临走前顺手把新到的分片也算完。
+type LiveCaptionArgs struct {
+	MeetingID uuid.UUID `json:"meeting_id" river:"unique"`
+}
+
+func (LiveCaptionArgs) Kind() string { return "live_caption" }
+
+func (LiveCaptionArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:       QueueLiveCaption,
+		MaxAttempts: 2,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true},
+	}
 }
 
 // FeishuShareArgs 把一场会议的纪要发到飞书：推到群里、导入成飞书文档（照着 feishu_shares 表里的一条做）。

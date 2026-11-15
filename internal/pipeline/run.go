@@ -217,6 +217,9 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 		if err := q.SaveTranscript(ctx, sqlc.SaveTranscriptParams{MeetingID: id, Segments: raw}); err != nil {
 			return err
 		}
+		if err := q.DeleteLiveTranscript(ctx, id); err != nil {
+			return err
+		}
 		if err := q.SetMeetingASR(ctx, sqlc.SetMeetingASRParams{ID: id, AsrEngine: asrEngine, AsrWarning: asrWarning}); err != nil {
 			return err
 		}

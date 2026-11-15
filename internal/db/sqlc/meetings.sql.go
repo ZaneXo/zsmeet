@@ -233,6 +233,15 @@ func (q *Queries) DeleteChunks(ctx context.Context, meetingID uuid.UUID) error {
 	return err
 }
 
+const deleteLiveTranscript = `-- name: DeleteLiveTranscript :exec
+DELETE FROM live_transcripts WHERE meeting_id = $1
+`
+
+func (q *Queries) DeleteLiveTranscript(ctx context.Context, meetingID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteLiveTranscript, meetingID)
+	return err
+}
+
 const expiredAudio = `-- name: ExpiredAudio :many
 SELECT id, audio_key FROM meetings
 WHERE audio_key <> '' AND audio_deleted_at IS NULL AND status IN ('done', 'failed')
@@ -352,6 +361,24 @@ func (q *Queries) FinishMeeting(ctx context.Context, arg FinishMeetingParams) (i
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const getLiveTranscript = `-- name: GetLiveTranscript :one
+SELECT meeting_id, chunks, finalized_sec, finalized, segments, updated_at FROM live_transcripts WHERE meeting_id = $1
+`
+
+func (q *Queries) GetLiveTranscript(ctx context.Context, meetingID uuid.UUID) (LiveTranscript, error) {
+	row := q.db.QueryRow(ctx, getLiveTranscript, meetingID)
+	var i LiveTranscript
+	err := row.Scan(
+		&i.MeetingID,
+		&i.Chunks,
+		&i.FinalizedSec,
+		&i.Finalized,
+		&i.Segments,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getMeeting = `-- name: GetMeeting :one
@@ -1374,4 +1401,35 @@ func (q *Queries) TrashMeeting(ctx context.Context, arg TrashMeetingParams) (Mee
 		&i.Language,
 	)
 	return i, err
+}
+
+const upsertLiveTranscript = `-- name: UpsertLiveTranscript :exec
+INSERT INTO live_transcripts (meeting_id, chunks, finalized_sec, finalized, segments, updated_at)
+VALUES ($1, $2, $3, $4, $5, now())
+ON CONFLICT (meeting_id) DO UPDATE
+SET chunks = EXCLUDED.chunks,
+    finalized_sec = EXCLUDED.finalized_sec,
+    finalized = EXCLUDED.finalized,
+    segments = EXCLUDED.segments,
+    updated_at = now()
+WHERE live_transcripts.chunks <= EXCLUDED.chunks
+`
+
+type UpsertLiveTranscriptParams struct {
+	MeetingID    uuid.UUID
+	Chunks       int32
+	FinalizedSec float64
+	Finalized    []byte
+	Segments     []byte
+}
+
+func (q *Queries) UpsertLiveTranscript(ctx context.Context, arg UpsertLiveTranscriptParams) error {
+	_, err := q.db.Exec(ctx, upsertLiveTranscript,
+		arg.MeetingID,
+		arg.Chunks,
+		arg.FinalizedSec,
+		arg.Finalized,
+		arg.Segments,
+	)
+	return err
 }

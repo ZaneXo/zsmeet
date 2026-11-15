@@ -1,6 +1,6 @@
 // 录音在这台电脑上的缓存（浏览器的 IndexedDB）。
 //
-// 录音每 10 秒切一片，每一片先存在这里再上传。断网、服务器暂时连不上时分片留在这里，恢复后补传；
+// 录音每 6 秒切一片，每一片先存在这里再上传。断网、服务器暂时连不上时分片留在这里，恢复后补传；
 // 页面关掉、浏览器崩溃以后，下次打开还能把没传完的接着传上去。传完、交给服务器处理以后删掉。
 
 import { tr } from "../../i18n/lang";
@@ -25,7 +25,7 @@ export type LocalRecording = {
 };
 
 /** 每片的长度。浏览器崩溃、电脑断电时最多丢最后这么长 */
-export const SLICE_MS = 10_000;
+export const SLICE_MS = 6_000;
 
 const DB_NAME = "zsmeet";
 const RECORDINGS = "recordings";

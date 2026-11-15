@@ -266,6 +266,33 @@
         ],
         "type": "object"
       },
+      "Captions": {
+        "additionalProperties": false,
+        "properties": {
+          "finalized_count": {
+            "description": "segments 里前多少句已经定稿",
+            "format": "int64",
+            "type": "integer"
+          },
+          "segments": {
+            "description": "当前已识别出的实时字幕句子（前 finalized_count 句已定稿，末尾剩余的是可能跨分片继续补全的暂定句）",
+            "items": {
+              "$ref": "#/components/schemas/Segment"
+            },
+            "type": "array"
+          },
+          "updated_at": {
+            "description": "最近一次刷新实时字幕的时间",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "segments",
+          "finalized_count"
+        ],
+        "type": "object"
+      },
       "ChangePasswordInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1410,7 +1437,7 @@
             "type": "string"
           },
           "last_chunk_at": {
-            "description": "最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次",
+            "description": "最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 6 秒左右更新一次",
             "format": "date-time",
             "type": "string"
           },
@@ -1656,7 +1683,7 @@
             "type": "string"
           },
           "last_chunk_at": {
-            "description": "最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次",
+            "description": "最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 6 秒左右更新一次",
             "format": "date-time",
             "type": "string"
           },
@@ -2660,7 +2687,7 @@
             "type": "string"
           },
           "last_chunk_at": {
-            "description": "最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次",
+            "description": "最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 6 秒左右更新一次",
             "format": "date-time",
             "type": "string"
           },
@@ -4422,6 +4449,57 @@
         ]
       }
     },
+    "/api/meetings/{id}/captions": {
+      "get": {
+        "description": "录音过程中边录边识别出的字幕；还没有识别出字或正式转写已完成时返回空列表。",
+        "operationId": "get-captions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Captions"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "实时字幕",
+        "tags": [
+          "会议"
+        ]
+      }
+    },
     "/api/meetings/{id}/chunks": {
       "get": {
         "description": "断点续传时用：网页刷新或断网恢复后，跳过已经传上来的分片。",
@@ -4605,7 +4683,7 @@
     },
     "/api/meetings/{id}/events": {
       "get": {
-        "description": "会议状态或进度变化时推送一条 meeting 事件，内容和「会议详情」一样。处理结束（done 或 failed）后连接关闭。",
+        "description": "会议状态或进度变化时推送一条 meeting 事件；录音过程中实时字幕刷新时推送一条 captions 事件。处理结束（done 或 failed）后连接关闭。",
         "operationId": "meeting-events",
         "parameters": [
           {
@@ -4626,6 +4704,39 @@
                   "description": "Each oneOf object in the array represents one possible Server Sent Events (SSE) message, serialized as UTF-8 text according to the SSE specification.",
                   "items": {
                     "oneOf": [
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/Captions"
+                          },
+                          "event": {
+                            "const": "captions",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "oneOf": [
+                              {
+                                "type": "integer"
+                              },
+                              {
+                                "type": "string"
+                              }
+                            ]
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event captions",
+                        "type": "object"
+                      },
                       {
                         "properties": {
                           "data": {
@@ -4687,7 +4798,7 @@
             "bearer": []
           }
         ],
-        "summary": "订阅处理进度（SSE）",
+        "summary": "订阅处理进度与实时字幕（SSE）",
         "tags": [
           "会议"
         ]

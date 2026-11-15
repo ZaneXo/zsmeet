@@ -4,6 +4,7 @@ import type { FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { api, ApiError, errorMessage, queryClient, unwrap } from "../api/client";
 import { AppLink } from "../components/AppLink";
+import { LiveCaptions } from "../components/LiveCaptions";
 import { LevelMeter, RecordingMarks } from "../components/RecordingParts";
 import { Button, buttonClass, Card, Field, Icon, Input, Notice, Select } from "../components/ui";
 import { isEn } from "../i18n/lang";
@@ -560,6 +561,8 @@ function Live({ state, micQuiet }: { state: RecorderState; micQuiet: boolean }) 
           <span className="text-muted">{upload.text}</span>
         </div>
       </Card>
+
+      {state.meetingId && <LiveCaptions meetingId={state.meetingId} streaming paused={paused} />}
 
       <RecordingMarks marks={state.marks} />
 

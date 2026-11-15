@@ -40,7 +40,7 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, restoreMeetingOp, h.RestoreMeeting)
 	huma.Register(api, purgeMeetingOp, h.PurgeMeeting)
 	huma.Register(api, askOp, h.Ask)
-	sse.Register(api, meetingEventsOp, map[string]any{"meeting": Meeting{}}, h.MeetingEvents)
+	sse.Register(api, meetingEventsOp, map[string]any{"meeting": Meeting{}, "captions": Captions{}}, h.MeetingEvents)
 
 	huma.Register(api, putChunkOp, h.PutChunk)
 	huma.Register(api, listChunksOp, h.ListChunks)
@@ -48,6 +48,7 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, completeUploadOp, h.CompleteUpload)
 
 	huma.Register(api, getTranscriptOp, h.GetTranscript)
+	huma.Register(api, getCaptionsOp, h.GetCaptions)
 	huma.Register(api, getMinutesOp, h.GetMinutes)
 	huma.Register(api, editMinutesOp, h.EditMinutes)
 	huma.Register(api, regenerateMinutesOp, h.RegenerateMinutes)

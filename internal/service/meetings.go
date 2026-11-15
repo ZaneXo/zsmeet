@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"slices"
 	"strings"
@@ -26,7 +27,7 @@ import (
 )
 
 const (
-	// 分片序号上限。网页录音每 10 秒一片（录满 6 小时是 2160 片），上传文件每片 4 MB
+	// 分片序号上限。网页录音每 6 秒一片（录满 6 小时是 3600 片），上传文件每片 4 MB
 	MaxChunks = 4000
 	// 一场录音最多标记多少个重点
 	MaxMarks = 500
@@ -445,7 +446,16 @@ func (s *Service) PutChunk(ctx context.Context, user sqlc.User, id uuid.UUID, se
 		return err
 	}
 	// 记下最后收到分片的时间，网页据此显示录音还在不在进行
-	return s.q.TouchChunkTime(ctx, id)
+	if err := s.q.TouchChunkTime(ctx, id); err != nil {
+		return err
+	}
+	// 网页和桌面版录音边录边传分片时，顺手触发一次增量实时字幕；入队失败不能影响保存录音分片本身
+	if s.queue != nil && (m.Source == "record" || m.Source == "desktop") {
+		if _, err := s.queue.Insert(ctx, queue.LiveCaptionArgs{MeetingID: id}, nil); err != nil {
+			slog.Warn("实时字幕任务入队失败", "meeting", id, "err", err)
+		}
+	}
+	return nil
 }
 
 // ReceivedChunks 返回已经收到的分片序号，网页断点续传时用它跳过传过的。
@@ -698,6 +708,45 @@ func (s *Service) Transcript(ctx context.Context, user sqlc.User, id uuid.UUID) 
 	}
 	segs := []transcript.Segment{}
 	return segs, json.Unmarshal(raw, &segs)
+}
+
+// LiveCaptions 是录音过程中识别出的实时字幕。
+type LiveCaptions struct {
+	Segments       []transcript.Segment
+	FinalizedCount int
+	UpdatedAt      *time.Time
+}
+
+// LiveCaptions 返回这场会议当前的实时字幕；还没有识别出字（或者正式转写完成后已清理）时返回空列表。
+func (s *Service) LiveCaptions(ctx context.Context, user sqlc.User, id uuid.UUID) (LiveCaptions, error) {
+	if _, err := s.GetMeeting(ctx, user, id); err != nil {
+		return LiveCaptions{}, err
+	}
+	lt, err := s.q.GetLiveTranscript(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return LiveCaptions{Segments: []transcript.Segment{}}, nil
+	}
+	if err != nil {
+		return LiveCaptions{}, err
+	}
+	segs := []transcript.Segment{}
+	if len(lt.Segments) > 0 {
+		if err := json.Unmarshal(lt.Segments, &segs); err != nil {
+			return LiveCaptions{}, err
+		}
+	}
+	var finalized []transcript.Segment
+	if len(lt.Finalized) > 0 {
+		if err := json.Unmarshal(lt.Finalized, &finalized); err != nil {
+			return LiveCaptions{}, err
+		}
+	}
+	t := lt.UpdatedAt.UTC()
+	return LiveCaptions{
+		Segments:       segs,
+		FinalizedCount: min(len(finalized), len(segs)),
+		UpdatedAt:      &t,
+	}, nil
 }
 
 // Minutes 是纪要的某一个版本，加上这场会议的全部版本记录。

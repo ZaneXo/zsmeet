@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"strings"
@@ -73,6 +74,37 @@ func Decode(ctx context.Context, in, pcmOut string) error {
 // DecodeWith 和 Decode 一样，只是用指定的滤镜，空字符串表示不处理（原始的声音）。
 func DecodeWith(ctx context.Context, in, pcmOut, speech string) error {
 	return ffmpeg(ctx, append([]string{"-i", in}, pcmArgs(pcmOut, speech)...)...)
+}
+
+// liveWarmupSeconds 是实时字幕截尾解码时多往前留的一小段：SpeechFilter（dynaudnorm）按前后几秒平滑增益，
+// 先喂两秒声音把增益热好，再在内存里裁掉这两秒，这样截出来的那一段音量平稳、采样位置也分毫不差。
+const liveWarmupSeconds = 2
+
+// DecodeTail 从 in 的第 fromSec 秒起解出识别用的 16k 单声道 float32 采样（先用 SpeechFilter 处理过），
+// 并返回实际起点对应的秒数（按采样对齐，即 fromSample / SampleRate）。实时字幕只重算还没定稿的尾巴时用。
+func DecodeTail(ctx context.Context, in, pcmOut string, fromSec float64) ([]float32, float64, error) {
+	fromSample := max(0, int(math.Round(fromSec*SampleRate)))
+	warmSamples := min(fromSample, liveWarmupSeconds*SampleRate)
+	startSample := fromSample - warmSamples
+
+	af := fmt.Sprintf("aformat=sample_rates=%d:channel_layouts=mono", SampleRate)
+	if startSample > 0 {
+		af += fmt.Sprintf(",atrim=start_sample=%d,asetpts=PTS-STARTPTS", startSample)
+	}
+	af += "," + SpeechFilter
+
+	if err := ffmpeg(ctx, "-i", in, "-map", "0:a:0", "-vn", "-af", af, "-ac", "1", "-ar", fmt.Sprint(SampleRate), "-f", "f32le", pcmOut); err != nil {
+		return nil, 0, err
+	}
+	samples, err := ReadPCM(pcmOut)
+	if err != nil {
+		return nil, 0, err
+	}
+	actualFrom := float64(fromSample) / SampleRate
+	if len(samples) <= warmSamples {
+		return nil, actualFrom, nil
+	}
+	return samples[warmSamples:], actualFrom, nil
 }
 
 // pcmArgs 是输出识别用的 PCM 的那部分参数。滤镜放在转成 16k 单声道之后：不管上传的是什么格式，

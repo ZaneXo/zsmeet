@@ -8,7 +8,7 @@ import { duration } from "../lib/format";
 import { dismissResume, startResume, useResumes } from "../lib/recording/resume";
 import type { ResumeState } from "../lib/recording/resume";
 import { abandonedRecordings, downloadLocal } from "../lib/recording/session";
-import { deleteRecording } from "../lib/recording/store";
+import { deleteRecording, SLICE_MS } from "../lib/recording/store";
 import type { LocalRecording } from "../lib/recording/store";
 import { nothingSavedText } from "../lib/recording/upload";
 import type { Trouble } from "../lib/recording/upload";
@@ -130,8 +130,8 @@ export function LocalRecordingCard({ item: { rec, state } }: { item: LocalItem }
                 ? `Started ${started}. ${nothingSavedText()}`
                 : `${started} 开始。${nothingSavedText()}`
               : isEn()
-                ? `Started ${started}, recorded ${duration(rec.seconds)}${rec.finished ? "." : " (the recording tab closed unexpectedly; the last ~10s may be missing)."}`
-                : `${started} 开始，录了 ${duration(rec.seconds)}${rec.finished ? "。" : "（录音的网页是中途关掉的，最后 10 秒左右可能没存下来）。"}`}
+                ? `Started ${started}, recorded ${duration(rec.seconds)}${rec.finished ? "." : ` (the recording tab closed unexpectedly; the last ~${SLICE_MS / 1000}s may be missing).`}`
+                : `${started} 开始，录了 ${duration(rec.seconds)}${rec.finished ? "。" : `（录音的网页是中途关掉的，最后 ${SLICE_MS / 1000} 秒左右可能没存下来）。`}`}
           </span>
         </div>
         {!uploading && !confirming && (

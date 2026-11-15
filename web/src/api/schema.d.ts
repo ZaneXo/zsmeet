@@ -449,6 +449,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/meetings/{id}/captions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 实时字幕
+         * @description 录音过程中边录边识别出的字幕；还没有识别出字或正式转写已完成时返回空列表。
+         */
+        get: operations["get-captions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/meetings/{id}/chunks": {
         parameters: {
             query?: never;
@@ -517,8 +537,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * 订阅处理进度（SSE）
-         * @description 会议状态或进度变化时推送一条 meeting 事件，内容和「会议详情」一样。处理结束（done 或 failed）后连接关闭。
+         * 订阅处理进度与实时字幕（SSE）
+         * @description 会议状态或进度变化时推送一条 meeting 事件；录音过程中实时字幕刷新时推送一条 captions 事件。处理结束（done 或 failed）后连接关闭。
          */
         get: operations["meeting-events"];
         put?: never;
@@ -1420,6 +1440,20 @@ export interface components {
             /** @description 一次性的授权码，2 分钟内有效。网页把它带在 zsmeet://auth?code=…&state=… 里交给 App */
             code: string;
         };
+        Captions: {
+            /**
+             * Format: int64
+             * @description segments 里前多少句已经定稿
+             */
+            finalized_count: number;
+            /** @description 当前已识别出的实时字幕句子（前 finalized_count 句已定稿，末尾剩余的是可能跨分片继续补全的暂定句） */
+            segments: components["schemas"]["Segment"][];
+            /**
+             * Format: date-time
+             * @description 最近一次刷新实时字幕的时间
+             */
+            updated_at?: string;
+        };
         ChangePasswordInputBody: {
             current_password: string;
             /** @description 8 到 200 位 */
@@ -1866,7 +1900,7 @@ export interface components {
             language: "" | "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /**
              * Format: date-time
-             * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次
+             * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 6 秒左右更新一次
              */
             last_chunk_at?: string;
             /** @description 网页录音时标记的重点：录音开始后的秒数 */
@@ -1971,7 +2005,7 @@ export interface components {
             language: "" | "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /**
              * Format: date-time
-             * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次
+             * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 6 秒左右更新一次
              */
             last_chunk_at?: string;
             /** @description 网页录音时标记的重点：录音开始后的秒数 */
@@ -2340,7 +2374,7 @@ export interface components {
             language: "" | "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /**
              * Format: date-time
-             * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次
+             * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 6 秒左右更新一次
              */
             last_chunk_at?: string;
             /** @description 网页录音时标记的重点：录音开始后的秒数 */
@@ -3377,6 +3411,37 @@ export interface operations {
             };
         };
     };
+    "get-captions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Captions"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "list-chunks": {
         parameters: {
             query?: never;
@@ -3495,7 +3560,18 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/event-stream": {
+                    "text/event-stream": ({
+                        data: components["schemas"]["Captions"];
+                        /**
+                         * @description The event name.
+                         * @constant
+                         */
+                        event: "captions";
+                        /** @description The event ID. */
+                        id?: number | string;
+                        /** @description The retry time in milliseconds. */
+                        retry?: number;
+                    } | {
                         data: components["schemas"]["Meeting"];
                         /**
                          * @description The event name.
@@ -3506,7 +3582,7 @@ export interface operations {
                         id?: number | string;
                         /** @description The retry time in milliseconds. */
                         retry?: number;
-                    }[];
+                    })[];
                 };
             };
             /** @description Error */

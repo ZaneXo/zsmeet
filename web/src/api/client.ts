@@ -10,6 +10,7 @@ export type MeetingListItem = components["schemas"]["MeetingListItem"];
 export type SearchHit = components["schemas"]["SearchHit"];
 export type User = components["schemas"]["User"];
 export type Segment = components["schemas"]["Segment"];
+export type Captions = components["schemas"]["Captions"];
 export type Minutes = components["schemas"]["Minutes"];
 export type MinutesVersion = components["schemas"]["MinutesVersion"];
 export type Template = components["schemas"]["Template"];

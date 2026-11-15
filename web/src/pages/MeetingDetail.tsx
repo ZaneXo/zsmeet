@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AppLink } from "../components/AppLink";
+import { LiveCaptions } from "../components/LiveCaptions";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Citation, Meeting, Segment, User } from "../api/client";
 import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings";
@@ -29,6 +30,8 @@ import { TranscriptPane } from "./TranscriptPane";
 import { ASRLanguageSelect, SpeakerCountSelect } from "./UploadDialog";
 
 const isActive = (m: Meeting | undefined) => m?.status === "queued" || m?.status === "processing";
+const isLiveRecording = (m: Meeting | undefined) =>
+  m?.status === "uploading" && (m.source === "record" || m.source === "desktop");
 
 /**
  * 订阅服务器推送的处理进度（SSE），收到就更新缓存里的会议。
@@ -66,7 +69,7 @@ export function MeetingDetailPage({
     refetchInterval: (query) => (isActive(query.state.data) ? 5000 : waitingForRecording(query.state.data) ? 10_000 : false),
   });
   const m = meeting.data;
-  useMeetingEvents(id, isActive(m));
+  useMeetingEvents(id, isActive(m) || isLiveRecording(m));
 
   const transcript = useQuery({
     queryKey: ["transcript", id],
@@ -265,6 +268,10 @@ export function MeetingDetailPage({
       )}
 
       {(m.marks ?? []).length > 0 && <MarksCard marks={m.marks ?? []} segments={segments} canSeek={m.has_audio} onSeek={seek} />}
+
+      {(m.source === "record" || m.source === "desktop") && !hasTranscript && m.status !== "done" && (
+        <LiveCaptions meetingId={m.id} streaming={m.status === "uploading"} />
+      )}
 
       {/* 重新转写、重新生成期间（或者失败了）已有的纪要和转写照样能看 */}
       {(m.status === "done" || hasTranscript || m.minutes_version > 0) && (

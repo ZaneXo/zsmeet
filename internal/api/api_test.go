@@ -3,6 +3,7 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1769,5 +1770,84 @@ func TestASRSettings(t *testing.T) {
 	cleared := c.want(c.do("PUT", "/api/settings/asr", obj{"provider": "local", "base_url": srv.URL, "clear_api_key": true}), 200)
 	if cleared.Body["api_key_set"] != false {
 		t.Fatalf("clear_api_key=true 应该清掉 Key：%s", cleared.Raw)
+	}
+}
+
+func TestLiveCaptionsAPI(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	outsider := c.addMember("outsider@example.com", "王悦")
+
+	// 网页录音的会议：传分片时自动排队一个去重的 live_caption 任务；上传文件的会议不排队
+	recID := c.want(c.do("POST", "/api/meetings", obj{"title": "现场评审", "source": "record", "visibility": "private"}), 201).Body["id"].(string)
+	upID := c.want(c.do("POST", "/api/meetings", obj{"title": "上传录音", "source": "upload"}), 201).Body["id"].(string)
+
+	empty := c.want(c.do("GET", "/api/meetings/"+recID+"/captions", nil), 200)
+	if len(empty.Body["segments"].([]any)) != 0 || empty.Body["finalized_count"] != float64(0) {
+		t.Fatalf("还没出字时 captions 应为空：%s", empty.Raw)
+	}
+
+	c.want(c.do("PUT", "/api/meetings/"+recID+"/chunks/0", []byte("chunk0")), 204)
+	c.want(c.do("PUT", "/api/meetings/"+recID+"/chunks/1", []byte("chunk1")), 204)
+	c.want(c.do("PUT", "/api/meetings/"+upID+"/chunks/0", []byte("chunk0")), 204)
+
+	var jobCount int
+	if err := c.pool.QueryRow(t.Context(), "SELECT count(*) FROM river_job WHERE kind = 'live_caption'").Scan(&jobCount); err != nil {
+		t.Fatal(err)
+	}
+	if jobCount != 1 {
+		t.Fatalf("同一场录音连传两片只应排队 1 个 live_caption 任务（upload 不排），实际 %d 个", jobCount)
+	}
+
+	// 写入实时字幕后，创建者能读到定稿数与句子，看不到的成员返回 404
+	q := sqlc.New(c.pool)
+	finRaw, _ := json.Marshal([]transcript.Segment{{Start: 0.2, End: 2.5, Text: "第一句已定稿。"}})
+	allRaw, _ := json.Marshal([]transcript.Segment{
+		{Start: 0.2, End: 2.5, Text: "第一句已定稿。"},
+		{Start: 3.0, End: 4.8, Text: "第二句暂定"},
+	})
+	if err := q.UpsertLiveTranscript(t.Context(), sqlc.UpsertLiveTranscriptParams{
+		MeetingID:    uuid.MustParse(recID),
+		Chunks:       2,
+		FinalizedSec: 2.5,
+		Finalized:    finRaw,
+		Segments:     allRaw,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outsider.want(outsider.do("GET", "/api/meetings/"+recID+"/captions", nil), 404)
+	caps := c.want(c.do("GET", "/api/meetings/"+recID+"/captions", nil), 200)
+	if caps.Body["finalized_count"] != float64(1) || len(caps.Body["segments"].([]any)) != 2 {
+		t.Fatalf("返回的实时字幕不对：%s", caps.Raw)
+	}
+
+	// SSE 同时推送 meeting 和 captions 事件
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", c.base+"/api/meetings/"+recID+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 8192)
+	var stream strings.Builder
+	for !strings.Contains(stream.String(), "event: captions") {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			stream.Write(buf[:n])
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	gotStream := stream.String()
+	if !strings.Contains(gotStream, "event: meeting") || !strings.Contains(gotStream, "event: captions") || !strings.Contains(gotStream, "第二句暂定") {
+		t.Fatalf("SSE 应推送 meeting 与 captions 事件，实际收到：\n%s", gotStream)
 	}
 }

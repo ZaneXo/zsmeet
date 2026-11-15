@@ -82,6 +82,15 @@ type FeishuShare struct {
 	FinishedAt     *time.Time
 }
 
+type LiveTranscript struct {
+	MeetingID    uuid.UUID
+	Chunks       int32
+	FinalizedSec float64
+	Finalized    []byte
+	Segments     []byte
+	UpdatedAt    time.Time
+}
+
 type LoginFailure struct {
 	Key         string
 	Failures    int32

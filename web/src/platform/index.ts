@@ -66,14 +66,59 @@ export function mediaUrl(path: string): string {
   return isDesktop ? desktop.mediaUrl(path) : path;
 }
 
-/** 订阅服务器推送的某一种事件，返回取消订阅的函数。 */
+type SharedStream = {
+  refs: number;
+  add: (event: string, fn: (data: string) => void) => () => void;
+  close: () => void;
+};
+
+const streams = new Map<string, SharedStream>();
+
+/** 订阅服务器推送的某一种事件，同一路径自动复用同一条连接，返回取消订阅的函数。 */
 export function subscribe(path: string, event: string, onData: (data: string) => void): () => void {
-  if (isDesktop) {
-    return desktop.subscribeEvents(path, (e) => {
-      if (e.event === event) onData(e.data);
-    });
+  let shared = streams.get(path);
+  if (!shared) {
+    if (isDesktop) {
+      const listeners = new Set<{ event: string; fn: (data: string) => void }>();
+      const stop = desktop.subscribeEvents(path, (e) => {
+        for (const l of listeners) {
+          if (l.event === e.event) l.fn(e.data);
+        }
+      });
+      shared = {
+        refs: 0,
+        add(ev, fn) {
+          const entry = { event: ev, fn };
+          listeners.add(entry);
+          return () => listeners.delete(entry);
+        },
+        close: stop,
+      };
+    } else {
+      const source = new EventSource(path);
+      shared = {
+        refs: 0,
+        add(ev, fn) {
+          const handler = (e: Event) => fn((e as MessageEvent<string>).data);
+          source.addEventListener(ev, handler);
+          return () => source.removeEventListener(ev, handler);
+        },
+        close: () => source.close(),
+      };
+    }
+    streams.set(path, shared);
   }
-  const source = new EventSource(path);
-  source.addEventListener(event, (e) => onData((e as MessageEvent<string>).data));
-  return () => source.close();
+  shared.refs++;
+  const remove = shared.add(event, onData);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    remove();
+    shared.refs--;
+    if (shared.refs === 0) {
+      streams.delete(path);
+      shared.close();
+    }
+  };
 }

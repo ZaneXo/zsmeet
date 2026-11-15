@@ -128,6 +128,23 @@ ON CONFLICT (meeting_id) DO UPDATE SET segments = EXCLUDED.segments, created_at 
 -- name: GetTranscript :one
 SELECT segments FROM transcripts WHERE meeting_id = $1;
 
+-- name: GetLiveTranscript :one
+SELECT * FROM live_transcripts WHERE meeting_id = $1;
+
+-- name: UpsertLiveTranscript :exec
+INSERT INTO live_transcripts (meeting_id, chunks, finalized_sec, finalized, segments, updated_at)
+VALUES ($1, $2, $3, $4, $5, now())
+ON CONFLICT (meeting_id) DO UPDATE
+SET chunks = EXCLUDED.chunks,
+    finalized_sec = EXCLUDED.finalized_sec,
+    finalized = EXCLUDED.finalized,
+    segments = EXCLUDED.segments,
+    updated_at = now()
+WHERE live_transcripts.chunks <= EXCLUDED.chunks;
+
+-- name: DeleteLiveTranscript :exec
+DELETE FROM live_transcripts WHERE meeting_id = $1;
+
 -- name: AddMinutesVersion :one
 -- 版本号取 max+1，并把会议指向新版本。调用前先 LockMeeting，避免并发时撞号。
 WITH v AS (

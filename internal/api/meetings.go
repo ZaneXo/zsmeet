@@ -449,14 +449,14 @@ var meetingEventsOp = huma.Operation{
 	OperationID: "meeting-events",
 	Method:      http.MethodGet,
 	Path:        "/api/meetings/{id}/events",
-	Summary:     "订阅处理进度（SSE）",
-	Description: "会议状态或进度变化时推送一条 meeting 事件，内容和「会议详情」一样。处理结束（done 或 failed）后连接关闭。",
+	Summary:     "订阅处理进度与实时字幕（SSE）",
+	Description: "会议状态或进度变化时推送一条 meeting 事件；录音过程中实时字幕刷新时推送一条 captions 事件。处理结束（done 或 failed）后连接关闭。",
 	Tags:        []string{"会议"},
 	Security:    loggedIn,
 }
 
 // MeetingEvents 每秒查一次数据库，有变化就推给浏览器。
-// 进度由 worker 进程写进数据库，这里读出来，api 和 worker 之间不需要别的通道。
+// 进度和实时字幕都由 worker 进程写进数据库，这里读出来，api 和 worker 之间不需要别的通道。
 func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Sender) {
 	id, err := parseID(in.ID)
 	if err != nil {
@@ -465,7 +465,11 @@ func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Se
 	viewer := currentUser(ctx)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	var last Meeting
+	var (
+		last             Meeting
+		lastCaptionsTime *time.Time
+		sentCaptions     bool
+	)
 	idle := 0
 	for {
 		// 每次都重新检查：看着看着被改成看不到了，就断开
@@ -474,12 +478,27 @@ func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Se
 			return
 		}
 		cur := toMeeting(ctx, m)
-		switch {
-		case meetingChanged(cur, last):
+		pushed := false
+		if meetingChanged(cur, last) {
 			if send.Data(cur) != nil {
 				return
 			}
-			last, idle = cur, 0
+			last = cur
+			pushed = true
+		}
+		if cur.Source == "record" || cur.Source == "desktop" {
+			if caps, err := h.svc.LiveCaptions(ctx, viewer, id); err == nil && captionsChanged(caps.UpdatedAt, lastCaptionsTime, sentCaptions) {
+				if send.Data(toCaptions(caps)) != nil {
+					return
+				}
+				lastCaptionsTime = caps.UpdatedAt
+				sentCaptions = caps.UpdatedAt != nil
+				pushed = true
+			}
+		}
+		switch {
+		case pushed:
+			idle = 0
 		case idle >= 15:
 			// 长时间没有变化时发一行注释，免得中间的代理把空闲连接掐掉
 			if send.Comment("keepalive") != nil {
@@ -498,6 +517,13 @@ func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Se
 		case <-ticker.C:
 		}
 	}
+}
+
+func captionsChanged(cur, last *time.Time, sent bool) bool {
+	if cur == nil {
+		return sent
+	}
+	return last == nil || !cur.Equal(*last)
 }
 
 // meetingChanged 看会议和上次推送的比有没有变化。Meeting 里有切片和指针，要比较内容。
@@ -612,6 +638,32 @@ func (h *Handlers) GetTranscript(ctx context.Context, in *MeetingID) (*Transcrip
 	out := &TranscriptOutput{}
 	out.Body.Segments = toSegments(segs)
 	return out, nil
+}
+
+type CaptionsOutput struct {
+	Body Captions
+}
+
+var getCaptionsOp = huma.Operation{
+	OperationID: "get-captions",
+	Method:      http.MethodGet,
+	Path:        "/api/meetings/{id}/captions",
+	Summary:     "实时字幕",
+	Description: "录音过程中边录边识别出的字幕；还没有识别出字或正式转写已完成时返回空列表。",
+	Tags:        []string{"会议"},
+	Security:    loggedIn,
+}
+
+func (h *Handlers) GetCaptions(ctx context.Context, in *MeetingID) (*CaptionsOutput, error) {
+	id, err := parseID(in.ID)
+	if err != nil {
+		return nil, err
+	}
+	caps, err := h.svc.LiveCaptions(ctx, currentUser(ctx), id)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	return &CaptionsOutput{Body: toCaptions(caps)}, nil
 }
 
 // ---- 纪要 ----

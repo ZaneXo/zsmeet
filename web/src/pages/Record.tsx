@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from "react";
 import { errorMessage } from "../api/client";
 import type { User } from "../api/client";
 import { AppLink } from "../components/AppLink";
+import { LiveCaptions } from "../components/LiveCaptions";
 import { LevelMeter, RecordingMarks } from "../components/RecordingParts";
 import { Button, buttonClass, Card, Field, Icon, Input, Notice, Select } from "../components/ui";
 import { isEn } from "../i18n/lang";
@@ -25,7 +26,7 @@ export function RecordPage({ user }: { user: User }) {
       <div className="flex flex-col gap-1.5">
         <h1 className="text-[26px] font-bold">{tr("网页录音", "Web Recording")}</h1>
         <p className="text-sm text-muted">
-          {tr("录音边录边传到服务器。断网也不会丢，录完自动出纪要。", "Streams audio to the server as you record. Safe across network drops, with minutes generated automatically afterwards.")}
+          {tr("录音边录边传、实时出字。断网也不会丢，录完自动出纪要。", "Streams audio with live captions as you record. Safe across network drops, with minutes generated automatically afterwards.")}
         </p>
       </div>
       {rec.phase === "idle" || rec.phase === "starting" ? (
@@ -389,6 +390,8 @@ function Live({ rec }: { rec: Snapshot }) {
           </span>
         </div>
       </Card>
+
+      <LiveCaptions meetingId={rec.meetingId} streaming paused={paused} />
 
       <RecordingMarks marks={rec.marks} />
 

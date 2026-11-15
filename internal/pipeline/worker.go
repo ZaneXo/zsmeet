@@ -122,6 +122,7 @@ func Start(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, store *st
 	workers := river.NewWorkers()
 	river.AddWorker(workers, w)
 	river.AddWorker(workers, &reaper{pool: pool, store: w.store, settings: st})
+	river.AddWorker(workers, &liveWorker{w: w})
 	river.AddWorker(workers, &shareWorker{w: w})
 	river.AddWorker(workers, &importWorker{w: w})
 	river.AddWorker(workers, &webhookWorker{w: w})
@@ -130,6 +131,7 @@ func Start(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, store *st
 		Queues: map[string]river.QueueConfig{
 			queue.QueueProcess:      {MaxWorkers: cfg.Concurrency},
 			queue.QueueMaintenance:  {MaxWorkers: 1},
+			queue.QueueLiveCaption:  {MaxWorkers: 1},
 			queue.QueueFeishu:       {MaxWorkers: 1},
 			queue.QueueFeishuImport: {MaxWorkers: 1},
 			queue.QueueWebhook:      {MaxWorkers: 1},

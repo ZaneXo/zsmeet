@@ -95,6 +95,69 @@ func TestConvertKeepsTiming(t *testing.T) {
 	}
 }
 
+// 实时字幕截尾解码：不管是网页录音的 WebM/Opus 还是桌面版的 ADTS AAC，
+// 从第 5 秒截出来的采样长度和「咔哒」的位置都跟整段解码严丝合缝；起点超出时长时返回空切片。
+func TestDecodeTail(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("没有安装 ffmpeg")
+	}
+	for _, c := range []struct {
+		name string
+		ext  string
+		args []string
+	}{
+		{"WebM_Opus", ".webm", []string{"-c:a", "libopus", "-b:a", "32k"}},
+		{"ADTS_AAC", ".aac", []string{"-c:a", "aac", "-b:a", "64k", "-f", "adts"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := filepath.Join(dir, "stream"+c.ext)
+			// 12 秒轻声底音，第 8 秒处有一下清晰的「咔哒」
+			ffArgs := append([]string{
+				"-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+				"-f", "lavfi", "-i", "aevalsrc='0.002*sin(2*PI*300*t)+if(between(t,8,8.002),0.08,0)':s=48000:d=12",
+				"-ac", "1",
+			}, c.args...)
+			ffArgs = append(ffArgs, in)
+			if msg, err := exec.CommandContext(t.Context(), "ffmpeg", ffArgs...).CombinedOutput(); err != nil {
+				t.Fatalf("ffmpeg 生成 %s 失败：%v\n%s", c.name, err, msg)
+			}
+
+			fullPCM := filepath.Join(dir, "full.f32")
+			if err := Decode(t.Context(), in, fullPCM); err != nil {
+				t.Fatal(err)
+			}
+			full := readPCM(t, fullPCM)
+			wantClick := loudest(full)
+
+			tail, actualFrom, err := DecodeTail(t.Context(), in, filepath.Join(dir, "tail.f32"), 5.0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if actualFrom != 5.0 {
+				t.Fatalf("actualFrom = %v, want 5.0", actualFrom)
+			}
+			fromSample := 5 * SampleRate
+			if len(tail) != len(full)-fromSample {
+				t.Fatalf("截尾后有 %d 个采样，整段减掉前 5 秒有 %d 个", len(tail), len(full)-fromSample)
+			}
+			gotClick := fromSample + loudest(tail)
+			// 编码器帧长以内（≤2 个采样）完全对齐
+			if math.Abs(float64(gotClick-wantClick)) > 2 {
+				t.Errorf("「咔哒」整段在第 %d 个采样，截尾换算后在第 %d 个", wantClick, gotClick)
+			}
+
+			past, _, err := DecodeTail(t.Context(), in, filepath.Join(dir, "past.f32"), 20.0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(past) != 0 {
+				t.Errorf("起点超过总时长时应返回空切片，实际 %d 个采样", len(past))
+			}
+		})
+	}
+}
+
 // writeFile 把测试用的录音写到临时目录里。
 func writeFile(t *testing.T, name string, data []byte) string {
 	t.Helper()

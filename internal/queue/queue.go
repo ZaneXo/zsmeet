@@ -49,9 +49,10 @@ func (ReapArgs) InsertOpts() river.InsertOpts {
 }
 
 // LiveCaptionArgs 把正在录音的会议新传上来的分片识别成实时字幕。
-// 同一场会议同时只跑或排一个任务；跑的期间又传上来新分片时，worker 会在临走前顺手把新到的分片也算完。
+// 不设 River 的 UniqueOpts（它默认连 completed 和 running 状态的旧任务也去重，会吞掉后续分片）；
+// live_caption 队列并发度固定为 1，正在跑的那一轮会顺手把期间新到的分片一并算完，排在后面的重复任务看到进度已追平会立刻返回。
 type LiveCaptionArgs struct {
-	MeetingID uuid.UUID `json:"meeting_id" river:"unique"`
+	MeetingID uuid.UUID `json:"meeting_id"`
 }
 
 func (LiveCaptionArgs) Kind() string { return "live_caption" }
@@ -60,7 +61,6 @@ func (LiveCaptionArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
 		Queue:       QueueLiveCaption,
 		MaxAttempts: 2,
-		UniqueOpts:  river.UniqueOpts{ByArgs: true},
 	}
 }
 

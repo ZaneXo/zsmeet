@@ -81,19 +81,20 @@ func DecodeWith(ctx context.Context, in, pcmOut, speech string) error {
 const liveWarmupSeconds = 2
 
 // DecodeTail 从 in 的第 fromSec 秒起解出识别用的 16k 单声道 float32 采样（先用 SpeechFilter 处理过），
-// 并返回实际起点对应的秒数（按采样对齐，即 fromSample / SampleRate）。实时字幕只重算还没定稿的尾巴时用。
+// 并返回实际起点对应的秒数（按采样对齐，即 fromSample / SampleRate）。实时字幕只重算还没定稿的尾巴时用：
+// -ss 放在 -i 前面，让解复用器直接跳过前面几十分钟的压缩包，长会议每轮也只解码最后几秒到十几秒。
 func DecodeTail(ctx context.Context, in, pcmOut string, fromSec float64) ([]float32, float64, error) {
 	fromSample := max(0, int(math.Round(fromSec*SampleRate)))
 	warmSamples := min(fromSample, liveWarmupSeconds*SampleRate)
 	startSample := fromSample - warmSamples
 
-	af := fmt.Sprintf("aformat=sample_rates=%d:channel_layouts=mono", SampleRate)
+	af := fmt.Sprintf("aformat=sample_rates=%d:channel_layouts=mono,%s", SampleRate, SpeechFilter)
+	var args []string
 	if startSample > 0 {
-		af += fmt.Sprintf(",atrim=start_sample=%d,asetpts=PTS-STARTPTS", startSample)
+		args = append(args, "-ss", fmt.Sprintf("%.6f", float64(startSample)/SampleRate))
 	}
-	af += "," + SpeechFilter
-
-	if err := ffmpeg(ctx, "-i", in, "-map", "0:a:0", "-vn", "-af", af, "-ac", "1", "-ar", fmt.Sprint(SampleRate), "-f", "f32le", pcmOut); err != nil {
+	args = append(args, "-i", in, "-map", "0:a:0", "-vn", "-af", af, "-ac", "1", "-ar", fmt.Sprint(SampleRate), "-f", "f32le", pcmOut)
+	if err := ffmpeg(ctx, args...); err != nil {
 		return nil, 0, err
 	}
 	samples, err := ReadPCM(pcmOut)

@@ -15,9 +15,31 @@ SELECT * FROM users WHERE email = $1;
 -- name: GetSetting :one
 SELECT value FROM settings WHERE key = $1;
 
+-- name: GetSettingWithTime :one
+SELECT value, updated_at FROM settings WHERE key = $1;
+
 -- name: PutSetting :exec
 INSERT INTO settings (key, value) VALUES ($1, $2)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+-- name: DeleteSetting :exec
+DELETE FROM settings WHERE key = $1;
+
+-- name: PutASRStatusIfUnchanged :exec
+-- 只在语音识别配置从 asr_updated_at 以来没被管理员改过时写入最近一次错误，免得旧任务盖掉刚改好的新配置状态
+INSERT INTO settings (key, value)
+SELECT 'asr_status', sqlc.arg('value')::jsonb
+WHERE EXISTS (
+    SELECT 1 FROM settings s WHERE s.key = 'asr' AND s.updated_at <= sqlc.arg('asr_updated_at')::timestamptz
+)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+-- name: ClearASRStatusIfUnchanged :exec
+DELETE FROM settings
+WHERE key = 'asr_status'
+  AND EXISTS (
+      SELECT 1 FROM settings s WHERE s.key = 'asr' AND s.updated_at <= sqlc.arg('asr_updated_at')::timestamptz
+  );
 
 -- name: PutSettingIfNoURL :exec
 -- 只在这项配置还没有地址（没有这一行，或者 url 是空的）时写入。判断和写入在同一条语句里：

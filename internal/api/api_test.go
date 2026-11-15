@@ -1657,3 +1657,63 @@ func TestRetryAfterAudioExpired(t *testing.T) {
 	c.want(c.do("POST", "/api/meetings/"+withTranscript+"/retranscribe", nil), 409)
 	c.want(c.do("POST", "/api/meetings/"+withTranscript+"/retry", nil), 200)
 }
+
+func TestASRSettings(t *testing.T) {
+	c := newServer(t)
+	c.setup()
+	member := c.addMember("member@example.com", "李航")
+
+	// 普通成员不能看也不能改
+	member.want(member.do("GET", "/api/settings/asr", nil), 403)
+	member.want(member.do("PUT", "/api/settings/asr", obj{"provider": "local"}), 403)
+	member.want(member.do("POST", "/api/settings/asr/test", obj{}), 403)
+
+	// 默认是本机识别，没有保存 Key
+	r := c.want(c.do("GET", "/api/settings/asr", nil), 200)
+	if r.Body["provider"] != "local" || r.Body["api_key_set"] != false || r.Body["base_url"] != settings.DefaultASRBaseURL {
+		t.Fatalf("默认语音识别配置不对：%s", r.Raw)
+	}
+
+	// 打开在线识别必须填 Key
+	c.want(c.do("PUT", "/api/settings/asr", obj{"provider": "deepseek"}), 422)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("Authorization") != "Bearer sk-good-key" {
+			http.Error(w, "invalid api key", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"text":""}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	// 测试连接：错的 Key 返回 422 且不回显密钥，对的 Key 返回 204
+	bad := c.want(c.do("POST", "/api/settings/asr/test", obj{"base_url": srv.URL, "api_key": "sk-bad-secret"}), 422)
+	if strings.Contains(bad.Raw, "sk-bad-secret") {
+		t.Fatalf("报错响应不能泄露提交的 API Key：%s", bad.Raw)
+	}
+	c.want(c.do("POST", "/api/settings/asr/test", obj{"base_url": srv.URL, "api_key": "sk-good-key"}), 204)
+
+	// 保存配置：响应只带 api_key_set=true，不带明文 Key
+	saved := c.want(c.do("PUT", "/api/settings/asr", obj{
+		"provider": "deepseek",
+		"base_url": srv.URL + "/",
+		"api_key":  "sk-good-key",
+	}), 200)
+	if saved.Body["provider"] != "deepseek" || saved.Body["api_key_set"] != true || saved.Body["base_url"] != srv.URL || strings.Contains(saved.Raw, "sk-good-key") {
+		t.Fatalf("保存后的语音识别配置不对：%s", saved.Raw)
+	}
+
+	// 留空 Key 沿用已保存的 Key 测试与保存
+	c.want(c.do("POST", "/api/settings/asr/test", obj{"base_url": srv.URL}), 204)
+	kept := c.want(c.do("PUT", "/api/settings/asr", obj{"provider": "local", "base_url": srv.URL}), 200)
+	if kept.Body["provider"] != "local" || kept.Body["api_key_set"] != true {
+		t.Fatalf("切回本机识别默认保留已保存的 Key：%s", kept.Raw)
+	}
+
+	// 勾上清除 Key 后清掉
+	cleared := c.want(c.do("PUT", "/api/settings/asr", obj{"provider": "local", "base_url": srv.URL, "clear_api_key": true}), 200)
+	if cleared.Body["api_key_set"] != false {
+		t.Fatalf("clear_api_key=true 应该清掉 Key：%s", cleared.Raw)
+	}
+}

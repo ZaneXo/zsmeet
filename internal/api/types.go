@@ -38,9 +38,11 @@ type Meeting struct {
 	// 0 是按声音自动区分
 	SpeakerCount int `json:"speaker_count" doc:"有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人"`
 	// 已经有转写不等于这次只写纪要：重新转写时旧的转写在新的存好之前一直留着
-	Retranscribing bool `json:"retranscribing" doc:"要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false"`
-	DurationSec    int  `json:"duration_sec"`
-	HasAudio       bool `json:"has_audio" doc:"录音还在不在（过了保留期会被删除）"`
+	Retranscribing bool   `json:"retranscribing" doc:"要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false"`
+	ASREngine      string `json:"asr_engine" enum:",local,deepseek" doc:"当前这份转写实际用的语音识别：还没转写或旧会议为空，local 是本机识别，deepseek 是 DeepSeek 在线识别"`
+	ASRWarning     string `json:"asr_warning,omitempty" doc:"在线识别没用上、自动退回本机识别时的原因，可以直接展示"`
+	DurationSec    int    `json:"duration_sec"`
+	HasAudio       bool   `json:"has_audio" doc:"录音还在不在（过了保留期会被删除）"`
 	// 录音过了保留期被删除的时间；没删时没有这一项
 	AudioDeletedAt *time.Time `json:"audio_deleted_at,omitempty" doc:"录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项"`
 	// 0 表示还没有纪要
@@ -93,6 +95,8 @@ func toMeeting(m service.Meeting) Meeting {
 		Hotwords:       m.Hotwords,
 		SpeakerCount:   int(m.SpeakerCount),
 		Retranscribing: m.Retranscribe,
+		ASREngine:      m.AsrEngine,
+		ASRWarning:     m.AsrWarning,
 		DurationSec:    int(m.DurationSec),
 		HasAudio:       m.AudioKey != "" && m.AudioDeletedAt == nil,
 		AudioDeletedAt: m.AudioDeletedAt,

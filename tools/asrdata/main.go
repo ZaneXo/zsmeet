@@ -1,5 +1,5 @@
 // asrdata 把公开的语音识别数据集整理成 asreval 要的样子：一个目录里每段录音（16k 单声道 wav）
-// 配一个同名的 .txt 标准文字，有热词的再配一个同名的 .hotwords.txt。
+// 配一个同名的 .txt 标准文字，有热词的再配一个同名的 .hotwords.txt，有说话人标注的再配一个 .segments.json。
 //
 //	go run ./tools/asrdata textgrid -audio 录音目录 -textgrid 标注目录 -out 输出目录 [-channel 0]
 //	go run ./tools/asrdata contextasr -jsonl ContextASR-Dialogue_Mandarin.jsonl -audio 解压出的录音目录 -n 60 -out 输出目录
@@ -60,6 +60,7 @@ func textgridCmd(args []string) error {
 	gridDir := fs.String("textgrid", "", "TextGrid 标注目录")
 	out := fs.String("out", "", "输出目录")
 	channel := fs.Int("channel", 0, "取第几路声道（从 0 数）")
+	skipAudio := fs.Bool("skip-audio", false, "只写标注（.txt、.segments.json），跳过转码录音")
 	fs.Parse(args)
 	if *audioDir == "" || *gridDir == "" || *out == "" {
 		fs.Usage()
@@ -95,19 +96,32 @@ func textgridCmd(args []string) error {
 			return fmt.Errorf("%s：%w", g, err)
 		}
 		slices.SortStableFunc(intervals, func(a, b interval) int { return cmp.Compare(a.start, b.start) })
-		var lines []string
+		var (
+			lines []string
+			segs  []refSegment
+		)
 		for _, iv := range intervals {
 			if t := cleanText(iv.text); t != "" {
 				lines = append(lines, t)
+				segs = append(segs, refSegment{Start: iv.start, End: iv.end, Speaker: iv.speaker, Text: t})
 			}
 		}
 		if err := os.WriteFile(filepath.Join(*out, base+".txt"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 			return err
 		}
-		src := filepath.Join(*audioDir, audios[i].Name())
-		dst := filepath.Join(*out, base+".wav")
-		if err := ffmpeg("-i", src, "-af", fmt.Sprintf("pan=mono|c0=c%d", *channel), "-ar", "16000", "-c:a", "pcm_s16le", dst); err != nil {
-			return fmt.Errorf("%s：%w", src, err)
+		rawSegs, err := json.MarshalIndent(segs, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(*out, base+".segments.json"), append(rawSegs, '\n'), 0o644); err != nil {
+			return err
+		}
+		if !*skipAudio {
+			src := filepath.Join(*audioDir, audios[i].Name())
+			dst := filepath.Join(*out, base+".wav")
+			if err := ffmpeg("-i", src, "-af", fmt.Sprintf("pan=mono|c0=c%d", *channel), "-ar", "16000", "-c:a", "pcm_s16le", dst); err != nil {
+				return fmt.Errorf("%s：%w", src, err)
+			}
 		}
 		log.Printf("%s：%d 句", base, len(lines))
 	}
@@ -116,16 +130,25 @@ func textgridCmd(args []string) error {
 
 type interval struct {
 	start, end float64
+	speaker    int
 	text       string
 }
 
+type refSegment struct {
+	Start   float64 `json:"start"`
+	End     float64 `json:"end"`
+	Speaker int     `json:"speaker"`
+	Text    string  `json:"text"`
+}
+
 var (
+	tierLine   = regexp.MustCompile(`^item \[(\d+)\]`)
 	numberLine = regexp.MustCompile(`^(xmin|xmax) = ([0-9.eE+-]+)$`)
 	textLine   = regexp.MustCompile(`^text = "(.*)"$`)
 )
 
 // parseTextGrid 读 Praat 的长格式 TextGrid，返回所有层里的所有区间（没有文字的也在内）。
-// 文字里的 "" 是转义的双引号。
+// 每层（item [1]、item [2]……）对应一位说话人（编号从 0 开始）。文字里的 "" 是转义的双引号。
 func parseTextGrid(path string) ([]interval, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -134,16 +157,23 @@ func parseTextGrid(path string) ([]interval, error) {
 	defer f.Close()
 	var out []interval
 	var cur *interval
+	speaker := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		line := strings.TrimSpace(strings.TrimPrefix(sc.Text(), "\uFEFF"))
 		switch {
 		case strings.HasPrefix(line, "intervals ["):
-			out = append(out, interval{})
+			out = append(out, interval{speaker: speaker})
 			cur = &out[len(out)-1]
 		case strings.HasPrefix(line, "item ["):
 			cur = nil
+			if m := tierLine.FindStringSubmatch(line); m != nil {
+				n, err := strconv.Atoi(m[1])
+				if err == nil && n >= 1 {
+					speaker = n - 1
+				}
+			}
 		case cur == nil:
 		case numberLine.MatchString(line):
 			m := numberLine.FindStringSubmatch(line)

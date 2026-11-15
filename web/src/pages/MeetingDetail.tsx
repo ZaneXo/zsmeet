@@ -224,6 +224,7 @@ export function MeetingDetailPage({
       {access && <AccessDialog meeting={m} isOwner={m.owner_id === user.id} feishu={feishuReady} groups={hooks.length > 0} onClose={() => setAccess(false)} />}
 
       {m.status !== "done" && <ProcessingPanel meeting={m} user={user} hasTranscript={hasTranscript} />}
+      {m.asr_warning && <Notice tone="warn">{m.asr_warning}</Notice>}
 
       {m.has_audio && (
         <Card className="px-4 py-3">
@@ -284,7 +285,16 @@ export function MeetingDetailPage({
                 </button>
               ))}
             </div>
-            {tab === "transcript" && m.can_edit && m.has_audio && <Retranscribe meeting={m} />}
+            {tab === "transcript" && (m.asr_engine || (m.can_edit && m.has_audio)) && (
+              <div className="flex items-center gap-3 py-1.5">
+                {m.asr_engine && (
+                  <span className="text-xs text-muted">
+                    {m.asr_engine === "deepseek" ? "DeepSeek 在线识别" : "本机识别"}
+                  </span>
+                )}
+                {m.can_edit && m.has_audio && <Retranscribe meeting={m} />}
+              </div>
+            )}
           </div>
           {tab === "minutes" ? (
             <MinutesPane meeting={m} hasTranscript={hasTranscript} llmReady={llmReady} isAdmin={isAdmin} canSeek={m.has_audio} onSeek={seek} />

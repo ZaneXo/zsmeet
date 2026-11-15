@@ -16,7 +16,7 @@
 - 任务队列用 [River](https://riverqueue.com)，任务就存在 Postgres 里，不需要 Redis。
   「把会议改成排队中」和「任务入队」在同一个事务里，不会出现改了状态却没有任务的情况。
 - worker 处理期间定时写心跳。worker 被杀掉或者机器重启时，心跳一停，巡检任务会在两三分钟内把会议重新入队，不用人工处理。
-- 语音识别用 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)：Silero VAD 切出有人说话的片段，SenseVoice 识别成带标点的文字（数字写成阿拉伯数字，每个字都有时间），按标点切成句子。区分说话人照着 [3D-Speaker](https://github.com/modelscope/3D-Speaker) 的做法（`internal/diarize`）：有人说话的地方切成 1.5 秒长、每隔 0.75 秒一段的小段，用 3D-Speaker 的 CAM++ 模型给每段算声纹，谱聚类分成几个人（没选说话人数时按拉普拉斯矩阵特征值的间隔估计人数），很小的类归到最像的人，相邻的小段接成每个人说话的时间段。打开了声纹的话，再用 CAM++ 给每位说话人算一个声音特征，和改过名的人比对。
+- 语音识别默认用 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)：Silero VAD 切出有人说话的片段，SenseVoice 识别成带标点的文字（数字写成阿拉伯数字，每个字都有时间），按标点切成句子。管理员打开 DeepSeek 在线识别时（`internal/cloudasr`），VAD 区间合到最长 100 秒发给 DeepSeek，返回的文字再按编辑距离对齐回 SenseVoice 的字级时间切句（对不上或失败时退回 SenseVoice）。区分说话人照着 [3D-Speaker](https://github.com/modelscope/3D-Speaker) 的做法（`internal/diarize`）：有人说话的地方切成 1.5 秒长、每隔 0.75 秒一段的小段，用 3D-Speaker 的 CAM++ 模型给每段算声纹，谱聚类分成几个人（没选说话人数时按拉普拉斯矩阵特征值的间隔估计人数），很小的类归到最像的人，相邻的小段接成每个人说话的时间段。打开了声纹的话，再用 CAM++ 给每位说话人算一个声音特征，和改过名的人比对。
 - 识别之前先用 ffmpeg 把音量动态地调匀（`internal/audio`）：离麦克风远、没有自动增益的录音（比如以前的桌面版直接录的麦克风）声音很小，不调的话小声的话会被当成静音丢掉。一场 -39 LUFS 的真实站会，调之前只认出 75 句、26% 的时间有字，调了以后 118 句、75% 的时间有字。正常音量的录音只调大两三 dB，认出来的字不变。回放用的录音也调响一些，调得更慢更轻，听起来不会忽大忽小。
 - 桌面版录音时自己先把麦克风调到正常的说话音量（WebRTC 的 AGC2，在混音之前，见[桌面版的设计](desktop.md)的「麦克风自动增益」）：服务器拿到的是麦克风和电脑声音混好的一路，线上会议时你和对方一来一回地说，按几秒平滑的音量处理跟不上，只能在混音之前把小了 20 dB 的麦克风单独调上来。
 - 转写按句存，每句都有开始和结束时间：搜索命中、点击跳转、播放高亮都精确到句。
@@ -49,10 +49,10 @@ make asr-eval DATA=录音目录 ARGS="-llm-url https://.../v1 -llm-model 模型�
 
 - 录音目录里每段录音（wav、m4a、mp3 等）配一个同名的 `.txt`，是人工校对过的标准文字；可以再配一个同名的 `.hotwords.txt`（这段录音的热词）。标点、空格、换行不影响结果，数字请写成阿拉伯数字（识别结果是这么写的）。挑几段真实的会议、每段几分钟、人工改好文字，就够看出差别。
 - 比较的方案：现在用的 SenseVoice；再按热词读音改；再让大模型校对；以及 [Fun-ASR-Nano](https://k2-fsa.github.io/sherpa/onnx/funasr-nano/index.html) 和 [Qwen3-ASR 0.6B](https://k2-fsa.github.io/sherpa/onnx/qwen3-asr/index.html) 两个更大的识别模型（带热词和不带热词各一遍）。第一次会下载这两个模型（约 2 GB，只用于评测）。解码（包括音量处理）和切段方式都和线上一样，只换识别模型；`ARGS="-filter none"` 看不处理音量的效果，也可以给别的 ffmpeg 滤镜。
-- 也能比较 DeepSeek 的[在线识别](https://api-docs.deepseek.com/zh-cn/guides/asr)：`ARGS="-deepseek-asr https://api.deepseek.com/v1/tools/asr"`，API Key 放在环境变量 `ZSMEET_EVAL_DEEPSEEK_KEY`。**录音会发给 DeepSeek**，只拿公开数据集或允许外发的录音来比。接口一次最多收 120 秒、不返回时间，所以按 SenseVoice 的 VAD 切出的句子切录音，一句一个请求、相邻的句子合到最长 100 秒（`-deepseek-chunk`）一个请求，各比一遍。
-- 输出每种方案的字错误率（一个汉字、一个英文单词各算一个）、热词认对了几次、识别耗时和录音时长之比；每种方案识别出的文字写在 `.dev/asreval/` 下，可以逐句对比。
+- 也能比较 DeepSeek 的[在线识别](https://api-docs.deepseek.com/zh-cn/guides/asr)：`ARGS="-deepseek-asr https://api.deepseek.com/v1/tools/asr"`，API Key 放在环境变量 `ZSMEET_EVAL_DEEPSEEK_KEY`。**录音会发给 DeepSeek**，只拿公开数据集或允许外发的录音来比。会同时跑三种送法：一句一个请求、合到最长 100 秒（`-deepseek-chunk`）不对齐、以及和线上一致的 `deepseek-asr(线上)`（合到 100 秒后对齐回 SenseVoice 字级时间再按标点切句，有热词或大模型时接着跑拼音和大模型校对）。
+- 输出每种方案的字错误率（一个汉字、一个英文单词各算一个）、带说话人错字率（cpCER，录音目录里有 `.segments.json` 时自动算）、热词认对了几次、识别耗时和录音时长之比；每种方案识别出的文字写在 `.dev/asreval/` 下，可以逐句对比。
 - 没有自己的录音时，可以先用公开的数据集，`tools/asrdata` 把它们整理成上面的样子：
-  - [AliMeeting](https://openslr.org/119/)、[AISHELL-4](https://www.openslr.org/111)：真实的中文会议，麦克风阵列录的。`asrdata textgrid` 取阵列里的一路声道（和用一个麦克风录会议一样），所有人的话按时间排好当标准文字。
+  - [AliMeeting](https://openslr.org/119/)、[AISHELL-4](https://www.openslr.org/111)：真实的中文会议，麦克风阵列录的。`asrdata textgrid` 取阵列里的一路声道（和用一个麦克风录会议一样），所有人的话按时间排好写成 `.txt`，同时写出带说话人和起止时间的 `.segments.json` 供计算 cpCER。
   - [ContextASR-Bench](https://huggingface.co/datasets/MrSupW/ContextASR-Bench) 的中文对话：每条带一份专有名词列表，`asrdata contextasr` 把它写成热词，用来量热词纠错的效果。录音是语音合成的。
   - 这些数据集的标准文字按读音写数字（「十八到三十五岁」），评分前两边的阿拉伯数字都会换成汉字读法再比。
 - 看结果时留意：Fun-ASR-Nano、Qwen3-ASR 识别时要几倍于 SenseVoice 的 CPU 时间（在 Apple Silicon 上耗时约为录音时长的 0.07～0.1 倍，SenseVoice 约 0.015 倍）；Qwen3-ASR 带热词时，遇到很短或开头不清楚的片段，偶尔会把热词列表原样当成识别结果吐出来。
@@ -68,6 +68,7 @@ internal/
   service/          业务逻辑：账号、成员、会议、纪要版本、团队设置。不认识 HTTP
   pipeline/         后台处理一场会议的全过程，以及卡住时的自动恢复
   asr/              语音识别（sherpa-onnx，cgo）
+  cloudasr/         可选的在线语音识别（DeepSeek 客户端、按 VAD 停顿切段、字级时间轴对齐）
   correct/          转写纠错：按热词的读音替换、大模型逐句校对
   minutes/          纪要模板和提示词
   ask/              问会议：提问的提示词、交给大模型的材料、回答里的出处

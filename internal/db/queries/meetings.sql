@@ -185,6 +185,10 @@ UPDATE meetings SET retranscribe = true WHERE id = $1;
 -- name: ClearRetranscribe :exec
 UPDATE meetings SET retranscribe = false WHERE id = $1;
 
+-- name: SetMeetingASR :exec
+-- 记下这场会议这次转写实际用了哪种识别方式，以及在线识别退回本机识别时的提示（没有时为空）
+UPDATE meetings SET asr_engine = $2, asr_warning = $3, updated_at = now() WHERE id = $1;
+
 -- name: SetMeetingSpeakerCount :exec
 -- 改这场会议有几个人说话（0 是自动区分），下次转写时用
 UPDATE meetings SET speaker_count = $2 WHERE id = $1;

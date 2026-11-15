@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -176,4 +177,111 @@ func (h *Handlers) PutRetention(ctx context.Context, in *RetentionInput) (*Reten
 	out := &RetentionOutput{}
 	out.Body.AudioDays = r.AudioDays
 	return out, nil
+}
+
+// ---- 语音识别 ----
+
+type ASRSettings struct {
+	Provider string `json:"provider" enum:"local,deepseek" doc:"语音识别方式：本机识别（默认，录音不出服务器），或者 DeepSeek 在线识别"`
+	BaseURL  string `json:"base_url" doc:"DeepSeek 在线识别接口地址"`
+	// 已保存的 Key 不会返回给网页，只说有没有
+	APIKeySet   bool       `json:"api_key_set" doc:"是否已经保存了 API Key；Key 本身不会返回"`
+	LastError   string     `json:"last_error,omitempty" doc:"最近一次调用在线识别失败的原因；管理员重新保存或之后转写恢复正常会自动清掉"`
+	LastErrorAt *time.Time `json:"last_error_at,omitempty" doc:"最近一次调用在线识别失败的时间"`
+}
+
+type ASRSettingsOutput struct {
+	Body ASRSettings
+}
+
+func toASRSettings(cfg service.ASRSettings) *ASRSettingsOutput {
+	provider := cfg.Provider
+	if provider == "" {
+		provider = settings.ASRLocal
+	}
+	return &ASRSettingsOutput{Body: ASRSettings{
+		Provider:    provider,
+		BaseURL:     cfg.EffectiveURL(),
+		APIKeySet:   cfg.APIKey != "",
+		LastError:   cfg.LastError,
+		LastErrorAt: cfg.LastErrorAt,
+	}}
+}
+
+var getASRSettingsOp = huma.Operation{
+	OperationID: "get-asr-settings",
+	Method:      http.MethodGet,
+	Path:        "/api/settings/asr",
+	Summary:     "语音识别配置",
+	Tags:        []string{"设置"},
+	Security:    adminOnly,
+}
+
+func (h *Handlers) GetASRSettings(ctx context.Context, _ *struct{}) (*ASRSettingsOutput, error) {
+	cfg, err := h.svc.ASRSettings(ctx)
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	return toASRSettings(cfg), nil
+}
+
+type ASRSettingsInput struct {
+	Body struct {
+		Provider    string `json:"provider" enum:"local,deepseek" doc:"local 是本机识别，deepseek 是 DeepSeek 在线识别"`
+		BaseURL     string `json:"base_url,omitempty" maxLength:"500" doc:"DeepSeek 在线识别接口地址，留空用默认地址"`
+		APIKey      string `json:"api_key,omitempty" maxLength:"500" doc:"留空表示沿用已保存的 Key"`
+		ClearAPIKey bool   `json:"clear_api_key,omitempty" doc:"是否清除已保存的 API Key（切回本机识别时可选）"`
+	}
+}
+
+func (in *ASRSettingsInput) toService() service.ASRInput {
+	return service.ASRInput{
+		Provider:    in.Body.Provider,
+		BaseURL:     in.Body.BaseURL,
+		APIKey:      in.Body.APIKey,
+		ClearAPIKey: in.Body.ClearAPIKey,
+	}
+}
+
+var putASRSettingsOp = huma.Operation{
+	OperationID: "put-asr-settings",
+	Method:      http.MethodPut,
+	Path:        "/api/settings/asr",
+	Summary:     "保存语音识别配置",
+	Description: "全团队共用一份。打开 DeepSeek 在线识别后，新转写的会议会把录音分段发给 DeepSeek；API Key 加密后保存。",
+	Tags:        []string{"设置"},
+	Security:    adminOnly,
+}
+
+func (h *Handlers) PutASRSettings(ctx context.Context, in *ASRSettingsInput) (*ASRSettingsOutput, error) {
+	cfg, err := h.svc.SaveASR(ctx, in.toService())
+	if err != nil {
+		return nil, toHTTP(err)
+	}
+	return toASRSettings(cfg), nil
+}
+
+type ASRTestInput struct {
+	Body struct {
+		BaseURL string `json:"base_url,omitempty" maxLength:"500" doc:"DeepSeek 在线识别接口地址，留空用默认地址"`
+		APIKey  string `json:"api_key,omitempty" maxLength:"500" doc:"留空表示沿用已保存的 Key"`
+	}
+}
+
+var testASRSettingsOp = huma.Operation{
+	OperationID:   "test-asr-settings",
+	Method:        http.MethodPost,
+	Path:          "/api/settings/asr/test",
+	Summary:       "测试 DeepSeek 在线识别能不能用",
+	Description:   "用提交的值（不需要先保存）发一段 1 秒静音音频测试连通和鉴权。失败时返回 422，detail 里是原因。",
+	Tags:          []string{"设置"},
+	Security:      adminOnly,
+	DefaultStatus: http.StatusNoContent,
+}
+
+func (h *Handlers) TestASRSettings(ctx context.Context, in *ASRTestInput) (*struct{}, error) {
+	if err := h.svc.TestASR(ctx, service.ASRInput{BaseURL: in.Body.BaseURL, APIKey: in.Body.APIKey}); err != nil {
+		return nil, toHTTP(err)
+	}
+	return nil, nil
 }

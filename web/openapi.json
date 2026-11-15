@@ -1,6 +1,89 @@
 {
   "components": {
     "schemas": {
+      "ASRSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "api_key_set": {
+            "description": "是否已经保存了 API Key；Key 本身不会返回",
+            "type": "boolean"
+          },
+          "base_url": {
+            "description": "DeepSeek 在线识别接口地址",
+            "type": "string"
+          },
+          "last_error": {
+            "description": "最近一次调用在线识别失败的原因；管理员重新保存或之后转写恢复正常会自动清掉",
+            "type": "string"
+          },
+          "last_error_at": {
+            "description": "最近一次调用在线识别失败的时间",
+            "format": "date-time",
+            "type": "string"
+          },
+          "provider": {
+            "description": "语音识别方式：本机识别（默认，录音不出服务器），或者 DeepSeek 在线识别",
+            "enum": [
+              "local",
+              "deepseek"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "base_url",
+          "api_key_set"
+        ],
+        "type": "object"
+      },
+      "ASRSettingsInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "api_key": {
+            "description": "留空表示沿用已保存的 Key",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "base_url": {
+            "description": "DeepSeek 在线识别接口地址，留空用默认地址",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "clear_api_key": {
+            "description": "是否清除已保存的 API Key（切回本机识别时可选）",
+            "type": "boolean"
+          },
+          "provider": {
+            "description": "local 是本机识别，deepseek 是 DeepSeek 在线识别",
+            "enum": [
+              "local",
+              "deepseek"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
+      },
+      "ASRTestInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "api_key": {
+            "description": "留空表示沿用已保存的 Key",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "base_url": {
+            "description": "DeepSeek 在线识别接口地址，留空用默认地址",
+            "maxLength": 500,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "AcceptLinkInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1218,6 +1301,19 @@
       "Meeting": {
         "additionalProperties": false,
         "properties": {
+          "asr_engine": {
+            "description": "当前这份转写实际用的语音识别：还没转写或旧会议为空，local 是本机识别，deepseek 是 DeepSeek 在线识别",
+            "enum": [
+              "",
+              "local",
+              "deepseek"
+            ],
+            "type": "string"
+          },
+          "asr_warning": {
+            "description": "在线识别没用上、自动退回本机识别时的原因，可以直接展示",
+            "type": "string"
+          },
           "audio_deleted_at": {
             "description": "录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项",
             "format": "date-time",
@@ -1384,6 +1480,7 @@
           "hotwords",
           "speaker_count",
           "retranscribing",
+          "asr_engine",
           "duration_sec",
           "has_audio",
           "minutes_version",
@@ -1429,6 +1526,19 @@
       "MeetingListItem": {
         "additionalProperties": false,
         "properties": {
+          "asr_engine": {
+            "description": "当前这份转写实际用的语音识别：还没转写或旧会议为空，local 是本机识别，deepseek 是 DeepSeek 在线识别",
+            "enum": [
+              "",
+              "local",
+              "deepseek"
+            ],
+            "type": "string"
+          },
+          "asr_warning": {
+            "description": "在线识别没用上、自动退回本机识别时的原因，可以直接展示",
+            "type": "string"
+          },
           "audio_deleted_at": {
             "description": "录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项",
             "format": "date-time",
@@ -1603,6 +1713,7 @@
           "hotwords",
           "speaker_count",
           "retranscribing",
+          "asr_engine",
           "duration_sec",
           "has_audio",
           "minutes_version",
@@ -2390,6 +2501,19 @@
       "TrashedMeeting": {
         "additionalProperties": false,
         "properties": {
+          "asr_engine": {
+            "description": "当前这份转写实际用的语音识别：还没转写或旧会议为空，local 是本机识别，deepseek 是 DeepSeek 在线识别",
+            "enum": [
+              "",
+              "local",
+              "deepseek"
+            ],
+            "type": "string"
+          },
+          "asr_warning": {
+            "description": "在线识别没用上、自动退回本机识别时的原因，可以直接展示",
+            "type": "string"
+          },
           "audio_deleted_at": {
             "description": "录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项",
             "format": "date-time",
@@ -2573,6 +2697,7 @@
           "hotwords",
           "speaker_count",
           "retranscribing",
+          "asr_engine",
           "duration_sec",
           "has_audio",
           "minutes_version",
@@ -5542,6 +5667,148 @@
         "summary": "团队里的人",
         "tags": [
           "成员"
+        ]
+      }
+    },
+    "/api/settings/asr": {
+      "get": {
+        "operationId": "get-asr-settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ASRSettings"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "语音识别配置",
+        "tags": [
+          "设置"
+        ]
+      },
+      "put": {
+        "description": "全团队共用一份。打开 DeepSeek 在线识别后，新转写的会议会把录音分段发给 DeepSeek；API Key 加密后保存。",
+        "operationId": "put-asr-settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ASRSettingsInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ASRSettings"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "保存语音识别配置",
+        "tags": [
+          "设置"
+        ]
+      }
+    },
+    "/api/settings/asr/test": {
+      "post": {
+        "description": "用提交的值（不需要先保存）发一段 1 秒静音音频测试连通和鉴权。失败时返回 422，detail 里是原因。",
+        "operationId": "test-asr-settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ASRTestInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "session": [
+              "admin"
+            ]
+          },
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "测试 DeepSeek 在线识别能不能用",
+        "tags": [
+          "设置"
         ]
       }
     },

@@ -120,6 +120,8 @@ type Meeting struct {
 	Retranscribe   bool
 	AutoSpeakers   []int32
 	SpeakerCount   int32
+	AsrEngine      string
+	AsrWarning     string
 }
 
 type MeetingMember struct {

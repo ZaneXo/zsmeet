@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
+	"github.com/ZaneXo/zsmeet/internal/cloudasr"
 	"github.com/ZaneXo/zsmeet/internal/config"
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/queue"
@@ -68,6 +69,33 @@ func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress f
 		{Start: 0, End: 0.9, Speaker: -1, Text: "一期只做网页端。"},
 		{Start: 1.1, End: 1.9, Speaker: -1, Text: "同意，录音器放到二期。"},
 	}, nil
+}
+
+func (e *fakeEngine) TranscribeDetailed(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Speech, error) {
+	segs, err := e.Transcribe(ctx, samples, progress)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]transcript.Speech, 0, len(segs))
+	for _, seg := range segs {
+		runes := []rune(seg.Text)
+		if len(runes) == 0 {
+			continue
+		}
+		dur := max(seg.End-seg.Start, 0)
+		step := dur / float64(len(runes))
+		toks := make([]transcript.Token, len(runes))
+		for i, r := range runes {
+			toks[i] = transcript.Token{Text: string(r), Start: float64(i) * step}
+		}
+		out = append(out, transcript.Speech{
+			Start:    seg.Start,
+			End:      seg.End,
+			Tokens:   toks,
+			Segments: []transcript.Segment{seg},
+		})
+	}
+	return out, nil
 }
 
 func (e *fakeEngine) Diarize(_ context.Context, _ []float32, speakers int, progress func(float64)) ([]transcript.Turn, error) {
@@ -129,6 +157,13 @@ func newEnv(t *testing.T) *env {
 	engine := &fakeEngine{}
 	w.ensureModels = func(context.Context, func(done, total int64)) error { return nil }
 	w.newEngine = func() (recognizer, error) { return engine, nil }
+	w.newOnlineASR = func(cfg settings.ASR) cloudasr.Provider {
+		return &cloudasr.DeepSeek{
+			URL:     cfg.EffectiveURL(),
+			APIKey:  cfg.APIKey,
+			Backoff: func(int) time.Duration { return 0 },
+		}
+	}
 	// 测试里不跑 River：加进队列的任务留在表里，由测试自己检查、自己执行
 	if w.queue, err = queue.NewInserter(pool); err != nil {
 		t.Fatal(err)
@@ -850,5 +885,93 @@ func TestCorrectionIsBestEffort(t *testing.T) {
 	}
 	if segs := e.transcriptOf(args.MeetingID); segs[0].Text != "纪要发到非书群里。" || segs[0].Orig != "" {
 		t.Errorf("这场没有热词，校对又失败了，转写应该原样：%+v", segs)
+	}
+}
+
+// 打开 DeepSeek 在线识别后：成功时对齐时间轴、区分说话人并记下 asr_engine=deepseek；
+// 鉴权失败（401）时不让会议失败，自动退回本机识别并写下 asr_warning 和设置里的最近一次错误；
+// 恢复正常并重新转写后，asr_engine 更新为 deepseek、警告和错误清掉。
+func TestOnlineASRAndFallback(t *testing.T) {
+	e := newEnv(t)
+	e.engine.segs = []transcript.Segment{
+		{Start: 0, End: 0.9, Speaker: -1, Text: "一期只做王页端。"},
+		{Start: 1.1, End: 1.9, Speaker: -1, Text: "同意，录音机放到二期。"},
+	}
+
+	var statusCode atomic.Int32
+	statusCode.Store(http.StatusOK)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer sk-deepseek-test" {
+			http.Error(w, "bad key", http.StatusUnauthorized)
+			return
+		}
+		code := int(statusCode.Load())
+		if code != http.StatusOK {
+			http.Error(w, "auth failed", code)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"text":"一期只做网页端。同意，录音器放到二期。"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	if err := e.w.settings.SaveASR(t.Context(), settings.ASR{
+		Provider: settings.ASRDeepSeek,
+		BaseURL:  srv.URL,
+		APIKey:   "sk-deepseek-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. 正常走在线识别
+	args := e.upload(wav())
+	if err := e.work(args); err != nil {
+		t.Fatal(err)
+	}
+	m := e.meeting(args.MeetingID)
+	if m.Status != "done" || m.AsrEngine != "deepseek" || m.AsrWarning != "" {
+		t.Fatalf("应该用上 deepseek 且无警告：status=%s engine=%q warning=%q", m.Status, m.AsrEngine, m.AsrWarning)
+	}
+	segs := e.transcriptOf(args.MeetingID)
+	if len(segs) != 2 || segs[0].Text != "一期只做网页端。" || segs[0].Speaker != 0 || segs[1].Text != "同意，录音器放到二期。" || segs[1].Speaker != 1 {
+		t.Fatalf("在线识别对齐后的句子或说话人不对：%+v", segs)
+	}
+	if segs[0].End > 0.95 {
+		t.Errorf("第一句结束时间不该跨过静音拉到下一位说话人：%+v", segs[0])
+	}
+
+	// 2. 接口返回 401 时退回本机识别，会议照样完成，并记录警告和状态错误
+	statusCode.Store(http.StatusUnauthorized)
+	args2 := e.upload(wav())
+	if err := e.work(args2); err != nil {
+		t.Fatal(err)
+	}
+	m2 := e.meeting(args2.MeetingID)
+	if m2.Status != "done" || m2.AsrEngine != "local" || !strings.Contains(m2.AsrWarning, "API Key") {
+		t.Fatalf("401 时应该退回 local 并写明原因：status=%s engine=%q warning=%q", m2.Status, m2.AsrEngine, m2.AsrWarning)
+	}
+	if segs2 := e.transcriptOf(args2.MeetingID); len(segs2) != 2 || segs2[0].Text != "一期只做王页端。" {
+		t.Fatalf("退回本机识别时应该保留 SenseVoice 识别结果：%+v", segs2)
+	}
+	st, err := e.w.settings.ASRStatus(t.Context())
+	if err != nil || !strings.Contains(st.LastError, "API Key") {
+		t.Fatalf("settings 里应该记下最近一次错误：%+v %v", st, err)
+	}
+
+	// 3. 接口恢复后重新转写，警告和设置里的错误都清掉
+	statusCode.Store(http.StatusOK)
+	retranscribeArgs := e.enqueue(args2.MeetingID, "done")
+	if err := e.q.MarkRetranscribe(t.Context(), args2.MeetingID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(retranscribeArgs); err != nil {
+		t.Fatal(err)
+	}
+	m2After := e.meeting(args2.MeetingID)
+	if m2After.AsrEngine != "deepseek" || m2After.AsrWarning != "" {
+		t.Fatalf("重新转写成功后应更新为 deepseek 并清掉警告：engine=%q warning=%q", m2After.AsrEngine, m2After.AsrWarning)
+	}
+	if st, err := e.w.settings.ASRStatus(t.Context()); err != nil || st.LastError != "" {
+		t.Fatalf("重新转写成功后应该清掉设置里的最近一次错误：%+v %v", st, err)
 	}
 }

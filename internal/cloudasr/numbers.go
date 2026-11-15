@@ -1,22 +1,21 @@
-package main
+package cloudasr
 
 import (
 	"regexp"
 	"strings"
 )
 
-// 评分前把阿拉伯数字换成汉字的读法，标准文字和识别结果都换。公开数据集的标准文字大多按读音写数字
-// （「十八到三十五岁」），识别模型却会写成「18到35岁」，不换的话同一句话会算出一堆错字；
-// 两边都换，标准文字本来写的是阿拉伯数字时也照样对得上。
+// 对齐和评测前把阿拉伯数字换成汉字的读法，本地识别和在线识别两边都换：
+// 同一句话一边写成「十八到三十五岁」、另一边写成「18到35岁」时照样对得上。
 //
-// 读法按最常见的说法，猜不准的（「两千」还是「二千」）统一一种，对所有方案都一样，不影响比较。
+// 读法按最常见的说法，猜不准的（「两千」还是「二千」）统一一种，两边用同一套规则就不影响对齐。
 
 var numberPattern = regexp.MustCompile(`\d+(?:\.\d+)?%|\d{1,2}:\d{2}|\d+\.\d+|\d+`)
 
 var digitNames = []string{"零", "一", "二", "三", "四", "五", "六", "七", "八", "九"}
 
-// spokenNumbers 把 s 里的阿拉伯数字换成汉字读法。
-func spokenNumbers(s string) string {
+// SpokenNumbers 把 s 里的阿拉伯数字换成汉字读法。
+func SpokenNumbers(s string) string {
 	locs := numberPattern.FindAllStringIndex(s, -1)
 	if locs == nil {
 		return s

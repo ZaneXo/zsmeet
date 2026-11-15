@@ -72,6 +72,10 @@ func (h *Handlers) Register(api huma.API) {
 	huma.Register(api, testLLMSettingsOp, h.TestLLMSettings)
 	huma.Register(api, listLLMModelsOp, h.ListLLMModels)
 
+	huma.Register(api, getASRSettingsOp, h.GetASRSettings)
+	huma.Register(api, putASRSettingsOp, h.PutASRSettings)
+	huma.Register(api, testASRSettingsOp, h.TestASRSettings)
+
 	huma.Register(api, getRetentionOp, h.GetRetention)
 	huma.Register(api, putRetentionOp, h.PutRetention)
 

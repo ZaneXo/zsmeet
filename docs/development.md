@@ -73,6 +73,7 @@ internal/
   minutes/          纪要模板和提示词
   ask/              问会议：提问的提示词、交给大模型的材料、回答里的出处
   llm/              调用 OpenAI 兼容接口
+  i18n/             中英双语：解析请求头 Accept-Language，翻译报错、校验提示与内置模板
   db/               表结构迁移（migrations/）、SQL（queries/）、sqlc 生成的代码（sqlc/）
   …                 其余是各管一件小事的包：audio、models、search、storage、secret、settings
 web/                前端：React + TypeScript + Tailwind（网页版和桌面版共用，不同的地方在 src/platform/）
@@ -100,8 +101,8 @@ make api NAME=DeleteMeeting METHOD=DELETE ROUTE=/api/meetings/{id}
 ## 几条约定
 
 - 接口框架 huma 只出现在 `internal/api` 里，业务逻辑写在 `internal/service`。有测试守着这条规则（`internal/arch`），以后要换框架只需要重写接口层。
-- 给用户看的文字（报错、提示）都写成能照着处理的中文，不把内部报错直接抛给用户。
-- 参数校验没通过、请求内容不是 JSON 这类进不到处理函数、被 huma 直接挡下的请求，报错也换成了中文（`internal/api/problem.go`）：`detail` 是一句说清楚哪一项不对、怎么改的话（「标题太长了，最多 200 个字」），网页和桌面版直接显示它。加接口时，用户在网页上自己填的字段，要把它在界面上的叫法加进 `fieldNames`，没加的报错里写字段名。升级 huma 以后跑一遍测试：它新加的校验提示还没有中文时，测试会失败。
+- 给用户看的文字（报错、提示、界面文案）支持简体中文和英文（前端 `web/src/i18n`、桌面版 `desktop/src-tauri/src/i18n.rs`、后端 `internal/i18n` 按请求头 `Accept-Language` 协商），都要写成能照着处理的说明，不把内部报错直接抛给用户。
+- 参数校验没通过、请求内容不是 JSON 这类进不到处理函数、被 huma 直接挡下的请求，报错按请求语言转成中文或英文（`internal/api/problem.go`）：`detail` 是一句说清楚哪一项不对、怎么改的话（「标题太长了，最多 200 个字」/ "Title is too long (at most 200 characters)."），网页和桌面版直接显示它。加接口时，用户在网页上自己填的字段，要把它在界面上的中英文叫法加进 `fieldNames` / `fieldNamesEN`，没加的报错里写字段名；新增业务报错也要在 `internal/i18n` 补上英文翻译。升级 huma 以后跑一遍测试：它新加的校验提示还没有翻译时，测试会失败。
 - 生成的文件（sqlc 的代码、`openapi.json`、`schema.d.ts`）都提交进仓库，`make test` 和 `make check` 会检查它们是不是最新的。
 - 前端不依赖 React 的小函数可以在旁边写 `*.test.ts`，用 Node 自带的测试运行（`pnpm -C web test`，`make test` 会跑）；测试里 import 要带 `.ts` 后缀，被测的文件引用别的文件里的值（不只是类型）时也要带。
 - 网页里的站内链接用 `AppLink`（`web/src/components/AppLink.tsx`），不直接用 react-router 的 `Link`：用户按住 Option 点 `Link` 时，浏览器会下载一个没用的网页空壳。`make check` 会检查。

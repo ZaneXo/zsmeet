@@ -14,6 +14,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::process::{self, Child, ChildStderr, ChildStdin, ChildStdout};
 
+use crate::i18n::{is_en, tr};
+
 pub const HELPER_NAME: &str = "zsmeet-recorder";
 
 /// warning 的 code：录音程序在写服务器能收的最后一片（序号 3999），够长了也不再切新的分片，App 该结束录音了。
@@ -324,15 +326,31 @@ pub async fn devices(helper: &Path) -> Result<Devices, String> {
     .map_err(|e| spawn_error(&e))?;
     let output = tokio::time::timeout(DEVICES_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| "录音程序一直没有列出麦克风，请再试一次".to_string())?
-        .map_err(|e| format!("没能列出这台电脑上的麦克风（{e}），请再试一次"))?;
+        .map_err(|_| {
+            tr(
+                "录音程序一直没有列出麦克风，请再试一次",
+                "Recorder helper timed out while listing microphones. Please try again.",
+            )
+            .to_string()
+        })?
+        .map_err(|e| {
+            if is_en() {
+                format!("Could not list microphones on this Mac ({e}). Please try again.")
+            } else {
+                format!("没能列出这台电脑上的麦克风（{e}），请再试一次")
+            }
+        })?;
     if !output.status.success() {
         log::warn!(
             "列麦克风失败（{}）：{}",
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
-        return Err("没能列出这台电脑上的麦克风，请再试一次".into());
+        return Err(tr(
+            "没能列出这台电脑上的麦克风，请再试一次",
+            "Could not list microphones on this Mac. Please try again.",
+        )
+        .into());
     }
     parse_devices(&output.stdout)
 }
@@ -341,7 +359,13 @@ fn parse_devices(stdout: &[u8]) -> Result<Devices, String> {
     String::from_utf8_lossy(stdout)
         .lines()
         .find_map(|line| serde_json::from_str::<Devices>(line.trim()).ok())
-        .ok_or_else(|| "录音程序列出的麦克风看不懂，请重新安装 zsmeet".to_string())
+        .ok_or_else(|| {
+            tr(
+                "录音程序列出的麦克风看不懂，请重新安装 zsmeet",
+                "Could not parse microphone list from recorder helper. Please reinstall zsmeet.",
+            )
+            .to_string()
+        })
 }
 
 /// 启动好的录音程序，三个管道都接着。
@@ -366,7 +390,11 @@ pub fn spawn(helper: &Path, args: &[OsString]) -> Result<Process, String> {
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
-        return Err("录音程序没能启动，请再试一次".into());
+        return Err(tr(
+            "录音程序没能启动，请再试一次",
+            "Failed to start recorder helper. Please try again.",
+        )
+        .into());
     };
     Ok(Process {
         child,
@@ -378,11 +406,23 @@ pub fn spawn(helper: &Path, args: &[OsString]) -> Result<Process, String> {
 
 fn spawn_error(e: &io::Error) -> String {
     match e.kind() {
-        io::ErrorKind::NotFound => "找不到录音程序（zsmeet-recorder），请重新安装 zsmeet".into(),
-        io::ErrorKind::PermissionDenied => {
-            "录音程序打不开（没有执行权限），请重新安装 zsmeet".into()
+        io::ErrorKind::NotFound => tr(
+            "找不到录音程序（zsmeet-recorder），请重新安装 zsmeet",
+            "Recorder helper (zsmeet-recorder) not found. Please reinstall zsmeet.",
+        )
+        .into(),
+        io::ErrorKind::PermissionDenied => tr(
+            "录音程序打不开（没有执行权限），请重新安装 zsmeet",
+            "Recorder helper lacks execute permission. Please reinstall zsmeet.",
+        )
+        .into(),
+        _ => {
+            if is_en() {
+                format!("Failed to launch recorder helper ({e}). Reinstall zsmeet and try again.")
+            } else {
+                format!("录音程序没能启动（{e}），请重新安装 zsmeet 后再试")
+            }
         }
-        _ => format!("录音程序没能启动（{e}），请重新安装 zsmeet 后再试"),
     }
 }
 

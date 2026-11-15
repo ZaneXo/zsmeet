@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::Instant;
 
 use crate::core::{Account, Core};
+use crate::i18n::{self, is_en, tr};
 pub use helper::{locate as locate_helper, Devices, EchoCancel, EchoMode, MicGain, MicGainMode};
 use helper::{Command, Event, RecordArgs};
 use local::{Recording, Status};
@@ -120,13 +121,28 @@ impl RecorderState {
     /// 还有录音没传完（边录边传、在传、暂时传不上去在等着再试、在告诉服务器传完了）。重启不会丢录音，
     /// 但会打断录音和上传。中断了、传不上去了的录音要等用户处理，可能一直放着，不算。
     pub fn update_blocker(&self) -> Option<String> {
+        let en = is_en();
         match self.status {
             Phase::Idle => {}
             Phase::Stopping => {
-                return Some("录音正在结束。等录好的都传完以后再更新".into());
+                return Some(
+                    if en {
+                        "Recording is stopping. Wait until all recorded audio finishes uploading before updating."
+                    } else {
+                        "录音正在结束。等录好的都传完以后再更新"
+                    }
+                    .into(),
+                );
             }
             Phase::Starting | Phase::Recording | Phase::Paused => {
-                return Some("正在录音。结束录音、等录好的都传完以后再更新".into());
+                return Some(
+                    if en {
+                        "Recording in progress. Stop the recording and wait for uploading to finish before updating."
+                    } else {
+                        "正在录音。结束录音、等录好的都传完以后再更新"
+                    }
+                    .into(),
+                );
             }
         }
         let pending = self
@@ -149,6 +165,26 @@ impl RecorderState {
             .iter()
             .filter(|u| u.status == UploadStatus::Waiting)
             .count();
+        if en {
+            let rec_word = |n: usize| if n == 1 { "recording" } else { "recordings" };
+            let stuck = match (pending, waiting) {
+                (0, _) => return None,
+                (n, 0) => {
+                    return Some(format!(
+                        "{n} {} still uploading. Update after uploading finishes.",
+                        rec_word(n)
+                    ))
+                }
+                (n, w) if w == n => format!("{n} {} temporarily unable to upload", rec_word(n)),
+                (n, w) => format!(
+                    "{n} {} still uploading ({w} temporarily unable to upload)",
+                    rec_word(n)
+                ),
+            };
+            return Some(format!(
+                "{stuck}, waiting to retry automatically. Check your network and server, then update once uploading finishes."
+            ));
+        }
         let stuck = match (pending, waiting) {
             (0, _) => return None,
             (n, 0) => return Some(format!("还有 {n} 段录音没传完。传完以后再更新")),
@@ -443,7 +479,7 @@ impl Recorder {
 
     /// 这台电脑上的麦克风。
     pub async fn devices(&self) -> Result<Devices, String> {
-        let helper = self.opts.helper.as_deref().ok_or(NO_HELPER)?;
+        let helper = self.opts.helper.as_deref().ok_or_else(|| rtr(NO_HELPER))?;
         helper::devices(helper).await
     }
 
@@ -459,16 +495,30 @@ impl Recorder {
         echo_cancel: EchoCancel,
     ) -> Result<RecorderState, String> {
         if !local::valid_meeting_id(meeting_id) {
-            return Err("会议编号不对，请回到录音页重新开始".into());
+            return Err(tr(
+                "会议编号不对，请回到录音页重新开始",
+                "Invalid meeting ID. Return to the recording page and start again.",
+            )
+            .into());
         }
         if mic.as_deref().is_some_and(|m| !helper::valid_mic(m)) {
-            return Err("选的麦克风不对，请重新选一个".into());
+            return Err(tr(
+                "选的麦克风不对，请重新选一个",
+                "Invalid microphone selection. Please select another microphone.",
+            )
+            .into());
         }
         if mic.is_none() && !system {
-            return Err("麦克风和电脑的声音至少要录一个".into());
+            return Err(tr(
+                "麦克风和电脑的声音至少要录一个",
+                "Select at least one audio source (microphone or system audio).",
+            )
+            .into());
         }
-        let helper_path = self.opts.helper.clone().ok_or(NO_HELPER)?;
-        let account = self.core.account().ok_or("请先登录，再开始录音")?;
+        let helper_path = self.opts.helper.clone().ok_or_else(|| rtr(NO_HELPER))?;
+        let account = self.core.account().ok_or_else(|| {
+            tr("请先登录，再开始录音", "Please sign in before recording.").to_string()
+        })?;
 
         let (id, fresh, commands) = self.reserve(meeting_id, &account)?;
         self.session_changed();
@@ -493,7 +543,7 @@ impl Recorder {
             // 只剩最后一片了：开始了也得马上结束（见 on_event），再往后的分片服务器不收。
             // 录音程序也不接受 4000 以上的 --start-seq，它说的是参数的事，用户看不懂
             self.abandon(id);
-            return Err(CHUNKS_FULL.into());
+            return Err(rtr(CHUNKS_FULL));
         }
         // 等服务器回话的时候就被结束了（比如退出了 App）：不用再启动录音程序
         let cancelled = {
@@ -505,7 +555,11 @@ impl Recorder {
         };
         if cancelled {
             self.abandon(id);
-            return Err("录音还没开始就被结束了".into());
+            return Err(tr(
+                "录音还没开始就被结束了",
+                "Recording was stopped before it began.",
+            )
+            .into());
         }
         let args = helper::record_args(&RecordArgs {
             out: &dir,
@@ -535,11 +589,11 @@ impl Recorder {
         if !settled {
             self.kill(id);
             self.wait_session(id, KILL_WAIT, |s| s.is_none()).await;
-            return Err(START_TIMEOUT.into());
+            return Err(rtr(START_TIMEOUT));
         }
         // 没开始录就退出了的，退出时记下了原因；开始了的（哪怕马上又中断了）都算开始成功，后面的看状态
         let failed = match &self.inner.lock().unwrap().ended {
-            Some((ended, reason)) if *ended == id => Some(reason.clone()),
+            Some((ended, reason)) if *ended == id => Some(rtr(reason)),
             _ => None,
         };
         match failed {
@@ -556,31 +610,62 @@ impl Recorder {
     ) -> Result<(u64, bool, mpsc::UnboundedReceiver<Command>), String> {
         let mut inner = self.inner.lock().unwrap();
         if inner.updating {
-            return Err(UPDATING.into());
+            return Err(rtr(UPDATING));
         }
         if let Some(s) = &inner.session {
             return Err(if s.phase == Phase::Stopping {
-                "上一场录音还在结束，请稍等几秒再开始".into()
+                tr(
+                    "上一场录音还在结束，请稍等几秒再开始",
+                    "The previous recording is still finishing. Please wait a few seconds.",
+                )
+                .into()
             } else if s.meeting_id == meeting_id {
-                "这场会议已经在录音了".into()
+                tr("这场会议已经在录音了", "This meeting is already recording.").into()
             } else {
-                "正在录另一场会议，请先结束那一场再开始".into()
+                tr(
+                    "正在录另一场会议，请先结束那一场再开始",
+                    "Another meeting is currently recording. Stop that recording first.",
+                )
+                .into()
             });
         }
         let fresh = match inner.recordings.get(meeting_id) {
             None => true,
             Some(l) if !l.rec.belongs_to(&account.server, &account.user_id) => {
-                return Err("这场会议的录音是另一个账号录的，不能接着录".into())
+                return Err(tr(
+                    "这场会议的录音是另一个账号录的，不能接着录",
+                    "This local recording belongs to another account and cannot be resumed.",
+                )
+                .into())
             }
             Some(l) => match l.rec.status {
                 Status::Interrupted => false,
-                Status::Recording => return Err("这场会议已经在录音了".into()),
-                Status::Stopped => return Err("这场会议已经录完了，正在上传".into()),
-                Status::Completed => return Err("这场会议已经录完、传完了".into()),
-                Status::Failed => return Err(
-                    "这场会议的录音传不上去了，不能接着录。可以删掉这段录音，再新建一场会议录音"
-                        .into(),
-                ),
+                Status::Recording => {
+                    return Err(
+                        tr("这场会议已经在录音了", "This meeting is already recording.").into(),
+                    )
+                }
+                Status::Stopped => {
+                    return Err(tr(
+                        "这场会议已经录完了，正在上传",
+                        "This meeting has already finished recording and is uploading.",
+                    )
+                    .into())
+                }
+                Status::Completed => {
+                    return Err(tr(
+                        "这场会议已经录完、传完了",
+                        "This meeting has already been recorded and uploaded.",
+                    )
+                    .into())
+                }
+                Status::Failed => {
+                    return Err(tr(
+                        "这场会议的录音传不上去了，不能接着录。可以删掉这段录音，再新建一场会议录音",
+                        "This local recording cannot be uploaded and cannot be resumed. Delete it and create a new meeting to record.",
+                    )
+                    .into())
+                }
             },
         };
         let id = inner.next_session;
@@ -626,7 +711,11 @@ impl Recorder {
         let title = match found {
             Ok(meeting) => {
                 if meeting.get("status").and_then(Value::as_str) != Some("uploading") {
-                    return Err("这场会议已经开始处理了，不能再录音。请新建一场会议".into());
+                    return Err(tr(
+                        "这场会议已经开始处理了，不能再录音。请新建一场会议",
+                        "This meeting has already started processing and can no longer be recorded. Create a new meeting.",
+                    )
+                    .into());
                 }
                 meeting
                     .get("title")
@@ -636,14 +725,20 @@ impl Recorder {
             }
             Err(Outcome::Unauthorized) => {
                 self.core.unauthorized(&account.token);
-                return Err("登录已失效，请重新登录后再录音".into());
+                return Err(tr(
+                    "登录已失效，请重新登录后再录音",
+                    "Session expired. Please sign in again before recording.",
+                )
+                .into());
             }
             // 刚建好会议就连不上了：照样录，录好的等网络恢复再传
             Err(Outcome::Retry(_)) => String::new(),
             Err(_) => {
-                return Err(
-                    "服务器上找不到这场会议，或者你没有权限往里面录音。请回到录音页重新开始".into(),
+                return Err(tr(
+                    "服务器上找不到这场会议，或者你没有权限往里面录音。请回到录音页重新开始",
+                    "Meeting not found on the server or you lack permission to record into it. Return to the recording page and start again.",
                 )
+                .into())
             }
         };
         let dir = self.opts.root.join(meeting_id);
@@ -667,11 +762,17 @@ impl Recorder {
         local::create_private_dir(&self.opts.root)
             .and_then(|_| local::create_private_dir(&dir))
             .and_then(|_| local::save(&dir, &rec))
-            .map_err(|e| format!("录音没法存到这台电脑上（{e}），请检查磁盘空间"))?;
+            .map_err(|e| {
+                if is_en() {
+                    format!("Cannot save recording on this Mac ({e}). Check available disk space.")
+                } else {
+                    format!("录音没法存到这台电脑上（{e}），请检查磁盘空间")
+                }
+            })?;
         let mut inner = self.inner.lock().unwrap();
         if inner.session.as_ref().is_none_or(|s| s.id != id) {
             let _ = std::fs::remove_dir_all(&dir);
-            return Err(NOT_RECORDING.into());
+            return Err(rtr(NOT_RECORDING));
         }
         inner
             .recordings
@@ -701,7 +802,11 @@ impl Recorder {
             }
             Err(Outcome::Unauthorized) => {
                 self.core.unauthorized(&account.token);
-                Err("登录已失效，请重新登录后再试".into())
+                Err(tr(
+                    "登录已失效，请重新登录后再试",
+                    "Session expired. Please sign in again and retry.",
+                )
+                .into())
             }
             // 会议被删了、没有权限了：接着录也传不上去
             Err(Outcome::Fatal(reason) | Outcome::Conflict(reason)) => Err(reason),
@@ -725,8 +830,10 @@ impl Recorder {
         let session = session
             .as_mut()
             .filter(|s| s.id == id)
-            .ok_or(NOT_RECORDING)?;
-        let l = recordings.get_mut(meeting_id).ok_or(NOT_HERE)?;
+            .ok_or_else(|| rtr(NOT_RECORDING))?;
+        let l = recordings
+            .get_mut(meeting_id)
+            .ok_or_else(|| rtr(NOT_HERE))?;
         local::remove_partials(&l.dir);
         local::recover(&l.dir, &mut l.rec);
         if let Some(reason) = received.and_then(|r| l.taken_on_server(r)) {
@@ -734,7 +841,7 @@ impl Recorder {
             // 再核对、把它算成传不上去
             l.ready();
             self.wake.notify_one();
-            return Err(reason);
+            return Err(rtr(&reason));
         }
         l.catch_up(received.unwrap_or_default(), self.opts.chunk_seconds);
         if received.is_none() {
@@ -954,7 +1061,13 @@ impl Recorder {
                         s.warnings.push(Warning { code, message });
                     }
                 }
-                Event::Error { message, .. } => s.error = Some(message),
+                Event::Error { code, message } => {
+                    s.error = Some(i18n::translate_helper_error_for(
+                        i18n::current(),
+                        &code,
+                        &message,
+                    ));
+                }
                 Event::Stopped { .. } => s.stopped = true,
                 Event::Unknown => {}
             }
@@ -1087,16 +1200,19 @@ impl Recorder {
     ) -> Result<RecorderState, String> {
         let id = {
             let inner = self.inner.lock().unwrap();
-            let s = inner.session.as_ref().ok_or(NOT_RECORDING)?;
+            let s = inner.session.as_ref().ok_or_else(|| rtr(NOT_RECORDING))?;
             if s.phase == to {
                 None
             } else if s.phase != from {
                 return Err(match s.phase {
-                    Phase::Starting => "录音还没开始，请稍等",
-                    Phase::Stopping => "录音正在结束",
-                    _ => NOT_RECORDING,
-                }
-                .into());
+                    Phase::Starting => tr(
+                        "录音还没开始，请稍等",
+                        "Recording is still starting; please wait",
+                    )
+                    .into(),
+                    Phase::Stopping => tr("录音正在结束", "Recording is stopping").into(),
+                    _ => rtr(NOT_RECORDING),
+                });
             } else {
                 let _ = s.commands.send(command);
                 Some(s.id)
@@ -1107,7 +1223,7 @@ impl Recorder {
                 .wait_session(id, COMMAND_TIMEOUT, |s| s.is_none_or(|s| s.phase != from))
                 .await;
             if !answered {
-                return Err(NO_RESPONSE.into());
+                return Err(rtr(NO_RESPONSE));
             }
         }
         Ok(self.state())
@@ -1125,11 +1241,17 @@ impl Recorder {
             let s = session
                 .as_ref()
                 .filter(|s| matches!(s.phase, Phase::Recording | Phase::Paused))
-                .ok_or(NOT_RECORDING)?;
-            let l = recordings.get_mut(&s.meeting_id).ok_or(NOT_RECORDING)?;
+                .ok_or_else(|| rtr(NOT_RECORDING))?;
+            let l = recordings
+                .get_mut(&s.meeting_id)
+                .ok_or_else(|| rtr(NOT_RECORDING))?;
             let at = ((s.base_seconds + s.seconds) * 10.0).round() / 10.0;
             if l.rec.marks.len() >= MAX_MARKS {
-                return Err(format!("标记的重点太多了，最多 {MAX_MARKS} 个"));
+                return Err(if is_en() {
+                    format!("Too many bookmarks (maximum {MAX_MARKS})")
+                } else {
+                    format!("标记的重点太多了，最多 {MAX_MARKS} 个")
+                });
             }
             if l.rec.marks.iter().all(|m| (at - m).abs() >= 1.0) {
                 l.rec.marks.push(at);
@@ -1181,7 +1303,10 @@ impl Recorder {
     /// 这台电脑上已有的（不然服务器会说收到的分片比声明的多），时长也要算上，丢掉的标记才对。
     /// 断网时接着录的部分和服务器上已有的分片用了同样的序号时不传（会覆盖服务器上的录音），返回原因。
     pub async fn finish(&self, meeting_id: &str) -> Result<RecorderState, String> {
-        let account = self.core.account().ok_or("请先登录")?;
+        let account = self
+            .core
+            .account()
+            .ok_or_else(|| tr("请先登录", "Please sign in first").to_string())?;
         if finishable(&mut self.inner.lock().unwrap(), meeting_id, &account)?.is_none() {
             return Ok(self.state());
         }
@@ -1194,7 +1319,7 @@ impl Recorder {
                     // 上传任务马上照常传完前面的分片，再核对、把它算成传不上去
                     Some(reason) => {
                         l.ready();
-                        Err(reason)
+                        Err(rtr(&reason))
                     }
                     None => {
                         l.catch_up(
@@ -1228,7 +1353,10 @@ impl Recorder {
 
     /// 删掉一段中断了的、传不上去的录音（只删这台电脑上的，服务器上已经收到的部分不动）。
     pub fn discard(&self, meeting_id: &str) -> Result<RecorderState, String> {
-        let account = self.core.account().ok_or("请先登录")?;
+        let account = self
+            .core
+            .account()
+            .ok_or_else(|| tr("请先登录", "Please sign in first").to_string())?;
         {
             let mut inner = self.inner.lock().unwrap();
             if inner
@@ -1236,19 +1364,31 @@ impl Recorder {
                 .as_ref()
                 .is_some_and(|s| s.meeting_id == meeting_id)
             {
-                return Err("这场会议正在录音，请先结束录音".into());
+                return Err(tr(
+                    "这场会议正在录音，请先结束录音",
+                    "This meeting is currently recording; please stop recording first",
+                )
+                .into());
             }
             let l = inner
                 .recordings
                 .get(meeting_id)
                 .filter(|l| l.rec.belongs_to(&account.server, &account.user_id))
-                .ok_or(NOT_HERE)?;
+                .ok_or_else(|| rtr(NOT_HERE))?;
             if !matches!(l.rec.status, Status::Interrupted | Status::Failed) {
-                return Err("只能删掉中断了的、传不上去的录音".into());
+                return Err(tr(
+                    "只能删掉中断了的、传不上去的录音",
+                    "Only interrupted or failed recordings can be deleted",
+                )
+                .into());
             }
             if let Err(e) = std::fs::remove_dir_all(&l.dir) {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(format!("这段录音没能删掉（{e}），请再试一次"));
+                    return Err(if is_en() {
+                        format!("Failed to delete local recording ({e}). Please try again.")
+                    } else {
+                        format!("这段录音没能删掉（{e}），请再试一次")
+                    });
                 }
             }
             inner.recordings.remove(meeting_id);
@@ -1485,6 +1625,15 @@ fn snapshot(inner: &Inner, account: Option<&Account>) -> RecorderState {
         mine.sort_by_key(|l| l.rec.started_at);
         state.uploads = mine.into_iter().map(Local::upload).collect();
     }
+    if is_en() {
+        for w in &mut state.warnings {
+            w.message = i18n::translate_helper_warning_for(i18n::Lang::En, &w.code, &w.message);
+        }
+        state.error = state.error.map(|e| rtr(&e));
+        for u in &mut state.uploads {
+            u.error = u.error.take().map(|e| rtr(&e));
+        }
+    }
     state
 }
 
@@ -1500,18 +1649,26 @@ fn finishable<'a>(
         .as_ref()
         .is_some_and(|s| s.meeting_id == meeting_id)
     {
-        return Err("这场会议正在录音，请点「结束录音」".into());
+        return Err(tr(
+            "这场会议正在录音，请点「结束录音」",
+            "This meeting is currently recording; click \"Stop recording\" instead",
+        )
+        .into());
     }
     let l = inner
         .recordings
         .get_mut(meeting_id)
         .filter(|l| l.rec.belongs_to(&account.server, &account.user_id))
-        .ok_or(NOT_HERE)?;
+        .ok_or_else(|| rtr(NOT_HERE))?;
     match l.rec.status {
         Status::Interrupted | Status::Failed => Ok(Some(l)),
         // 已经在传、已经传完了
         Status::Stopped | Status::Completed => Ok(None),
-        Status::Recording => Err("这场会议正在录音，请点「结束录音」".into()),
+        Status::Recording => Err(tr(
+            "这场会议正在录音，请点「结束录音」",
+            "This meeting is currently recording; click \"Stop recording\" instead",
+        )
+        .into()),
     }
 }
 
@@ -1566,7 +1723,23 @@ fn load_all(root: &Path) -> BTreeMap<String, Local> {
 /// 录音程序还没开始录就退出了，又没说为什么。
 fn start_failed(status: Option<ExitStatus>) -> String {
     match status.and_then(|s| s.code()) {
-        Some(code) => format!("录音程序没能开始录音（退出码 {code}），请再试一次"),
-        None => "录音程序没能开始录音，请再试一次".into(),
+        Some(code) => {
+            if is_en() {
+                format!(
+                    "Recorder helper exited before starting (exit code {code}). Please try again."
+                )
+            } else {
+                format!("录音程序没能开始录音（退出码 {code}），请再试一次")
+            }
+        }
+        None => tr(
+            "录音程序没能开始录音，请再试一次",
+            "Recorder helper exited before starting. Please try again.",
+        )
+        .into(),
     }
+}
+
+fn rtr(msg: &str) -> String {
+    i18n::translate_recorder_text_for(i18n::current(), msg)
 }

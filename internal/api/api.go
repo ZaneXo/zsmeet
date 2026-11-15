@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
@@ -69,9 +70,13 @@ func NewSessions(store scs.Store, secureCookie bool) *scs.SessionManager {
 	sess.Cookie.HttpOnly = true
 	sess.Cookie.SameSite = http.SameSiteLaxMode
 	sess.Cookie.Secure = secureCookie
-	sess.ErrorFunc = func(w http.ResponseWriter, _ *http.Request, err error) {
+	sess.ErrorFunc = func(w http.ResponseWriter, r *http.Request, err error) {
 		slog.Error("会话读写失败", "err", err)
-		http.Error(w, "服务器内部出错了，请稍后再试", http.StatusInternalServerError)
+		lang := i18n.ZH
+		if r != nil {
+			lang = i18n.ParseAcceptLanguage(r.Header.Get("Accept-Language"))
+		}
+		http.Error(w, i18n.TranslateMessage(lang, "服务器内部出错了，请稍后再试"), http.StatusInternalServerError)
 	}
 	return sess
 }
@@ -126,13 +131,18 @@ func NewHandler(svc *service.Service, sess *scs.SessionManager, web fs.FS, proxi
 	mux.Handle("/", spa(web))
 	withSession := sess.LoadAndSave(mux)
 	return securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lang := i18n.ParseAcceptLanguage(r.Header.Get("Accept-Language"))
+		if q := strings.TrimSpace(r.URL.Query().Get("lang")); q != "" {
+			lang = i18n.ParseAcceptLanguage(q)
+		}
+		ctx := i18n.WithLang(r.Context(), lang)
 		if token, ok := bearerToken(r); ok {
 			// 带 App 令牌的请求只认令牌：不读网页的会话 Cookie，也不发新的
 			r.Header.Del("Cookie")
-			mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), bearerKey{}, token)))
+			mux.ServeHTTP(w, r.WithContext(context.WithValue(ctx, bearerKey{}, token)))
 			return
 		}
-		withSession.ServeHTTP(w, r)
+		withSession.ServeHTTP(w, r.WithContext(ctx))
 	}))
 }
 
@@ -382,10 +392,11 @@ func parseID(s string) (uuid.UUID, error) {
 
 // audio 回放录音。网页按会话 Cookie 认人，App 按令牌认人。
 func (h *Handlers) audio(w http.ResponseWriter, r *http.Request) {
+	lang := i18n.FromContext(r.Context())
 	user, _, err := h.requestUser(r.Context())
 	if err != nil {
 		code, msg := status(err)
-		http.Error(w, msg, code)
+		http.Error(w, i18n.TranslateMessage(lang, msg), code)
 		return
 	}
 	id, err := uuid.Parse(r.PathValue("id"))
@@ -396,7 +407,7 @@ func (h *Handlers) audio(w http.ResponseWriter, r *http.Request) {
 	path, err := h.svc.AudioPath(r.Context(), user, id)
 	if err != nil {
 		code, msg := status(err)
-		http.Error(w, msg, code)
+		http.Error(w, i18n.TranslateMessage(lang, msg), code)
 		return
 	}
 	w.Header().Set("Content-Type", "audio/mp4")
@@ -409,7 +420,7 @@ func spa(web fs.FS) http.Handler {
 	files := http.FileServerFS(web)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.Error(w, "没有这个接口", http.StatusNotFound)
+			http.Error(w, i18n.TranslateMessage(i18n.FromContext(r.Context()), "没有这个接口"), http.StatusNotFound)
 			return
 		}
 		name := strings.TrimPrefix(r.URL.Path, "/")

@@ -7,6 +7,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 )
@@ -194,7 +195,7 @@ type ASRSettingsOutput struct {
 	Body ASRSettings
 }
 
-func toASRSettings(cfg service.ASRSettings) *ASRSettingsOutput {
+func toASRSettings(ctx context.Context, cfg service.ASRSettings) *ASRSettingsOutput {
 	provider := cfg.Provider
 	if provider == "" {
 		provider = settings.ASRLocal
@@ -203,7 +204,7 @@ func toASRSettings(cfg service.ASRSettings) *ASRSettingsOutput {
 		Provider:    provider,
 		BaseURL:     cfg.EffectiveURL(),
 		APIKeySet:   cfg.APIKey != "",
-		LastError:   cfg.LastError,
+		LastError:   i18n.TranslateMessage(i18n.FromContext(ctx), cfg.LastError),
 		LastErrorAt: cfg.LastErrorAt,
 	}}
 }
@@ -222,7 +223,7 @@ func (h *Handlers) GetASRSettings(ctx context.Context, _ *struct{}) (*ASRSetting
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return toASRSettings(cfg), nil
+	return toASRSettings(ctx, cfg), nil
 }
 
 type ASRSettingsInput struct {
@@ -258,7 +259,7 @@ func (h *Handlers) PutASRSettings(ctx context.Context, in *ASRSettingsInput) (*A
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return toASRSettings(cfg), nil
+	return toASRSettings(ctx, cfg), nil
 }
 
 type ASRTestInput struct {

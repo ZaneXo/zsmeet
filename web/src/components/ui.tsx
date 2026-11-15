@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { ButtonHTMLAttributes, ComponentProps, ReactNode } from "react";
+import { getLang, subscribeLang, tr } from "../i18n/lang";
 
 // 几个到处都用的小组件。样式和原型保持一致。
 
@@ -108,6 +109,7 @@ export function Spinner({ label }: { label: string }) {
 
 /** 弹窗。用浏览器原生的 dialog：自带焦点管理，按 Esc 关闭。 */
 export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  useSyncExternalStore(subscribeLang, getLang);
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const dialog = ref.current;
@@ -123,7 +125,7 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
       <div className="flex flex-col gap-4 p-6">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold">{title}</h2>
-          <Button variant="ghost" size="sm" aria-label="关闭" onClick={onClose}>
+          <Button variant="ghost" size="sm" aria-label={tr("关闭", "Close")} onClick={onClose}>
             <Icon name="close" />
           </Button>
         </div>

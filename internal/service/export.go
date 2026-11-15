@@ -11,6 +11,7 @@ import (
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/export"
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
@@ -30,8 +31,9 @@ func (s *Service) Export(ctx context.Context, user sqlc.User, id uuid.UUID, what
 	if err != nil {
 		return ExportFile{}, err
 	}
+	lang := i18n.FromContext(ctx)
 	names := transcript.ParseNames(m.Speakers)
-	info := export.Info(m.CreatedAt, int(m.DurationSec), m.OwnerName, names)
+	info := export.InfoLang(lang, m.CreatedAt, int(m.DurationSec), m.OwnerName, names)
 
 	var markdown, suffix string
 	switch what {
@@ -43,8 +45,13 @@ func (s *Service) Export(ctx context.Context, user sqlc.User, id uuid.UUID, what
 		if err != nil {
 			return ExportFile{}, err
 		}
-		info = append(info, fmt.Sprintf("纪要版本：第 %d 版", minutes.Version))
-		markdown, suffix = export.MinutesMarkdown(m.Title, info, minutes.Content), "纪要"
+		if lang == i18n.EN {
+			info = append(info, fmt.Sprintf("Minutes version: v%d", minutes.Version))
+			markdown, suffix = export.MinutesMarkdown(m.Title, info, minutes.Content), "minutes"
+		} else {
+			info = append(info, fmt.Sprintf("纪要版本：第 %d 版", minutes.Version))
+			markdown, suffix = export.MinutesMarkdown(m.Title, info, minutes.Content), "纪要"
+		}
 		if format == "txt" {
 			format = "md" // 纪要本来就是 Markdown 文本
 		}
@@ -57,33 +64,42 @@ func (s *Service) Export(ctx context.Context, user sqlc.User, id uuid.UUID, what
 			return ExportFile{}, conflict("这场会议还没有转写，等识别完以后再导出")
 		}
 		suffix = "转写"
+		docTitle := m.Title + "（转写）"
+		if lang == i18n.EN {
+			suffix = "transcript"
+			docTitle = m.Title + " (Transcript)"
+		}
 		if format == "txt" {
 			return ExportFile{
-				Name:        fileName(m.Title, suffix, "txt"),
+				Name:        fileNameLang(lang, m.Title, suffix, "txt"),
 				ContentType: "text/plain; charset=utf-8",
-				Data:        []byte(export.TranscriptText(m.Title, info, segs, names)),
+				Data:        []byte(export.TranscriptTextLang(lang, m.Title, info, segs, names)),
 			}, nil
 		}
-		markdown = export.TranscriptMarkdown(m.Title+"（转写）", info, segs, names)
+		markdown = export.TranscriptMarkdownLang(lang, docTitle, info, segs, names)
 	default:
 		return ExportFile{}, invalid("不认识的导出内容：%s", what)
 	}
 
 	switch format {
 	case "md":
-		return ExportFile{Name: fileName(m.Title, suffix, "md"), ContentType: "text/markdown; charset=utf-8", Data: []byte(markdown)}, nil
+		return ExportFile{Name: fileNameLang(lang, m.Title, suffix, "md"), ContentType: "text/markdown; charset=utf-8", Data: []byte(markdown)}, nil
 	case "docx":
 		data, err := export.Docx(markdown)
 		if err != nil {
 			return ExportFile{}, err
 		}
-		return ExportFile{Name: fileName(m.Title, suffix, "docx"), ContentType: docxType, Data: data}, nil
+		return ExportFile{Name: fileNameLang(lang, m.Title, suffix, "docx"), ContentType: docxType, Data: data}, nil
 	}
 	return ExportFile{}, invalid("不认识的导出格式：%s", format)
 }
 
 // fileName 用会议标题起文件名：去掉文件名里不能用的字符，太长的截短。
 func fileName(title, suffix, ext string) string {
+	return fileNameLang(i18n.ZH, title, suffix, ext)
+}
+
+func fileNameLang(lang i18n.Lang, title, suffix, ext string) string {
 	clean := strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || strings.ContainsRune(`\/:*?"<>|`, r) {
 			return '_'
@@ -94,7 +110,11 @@ func fileName(title, suffix, ext string) string {
 		clean = string([]rune(clean)[:60])
 	}
 	if clean == "" {
-		clean = "会议"
+		if lang == i18n.EN {
+			clean = "meeting"
+		} else {
+			clean = "会议"
+		}
 	}
 	return clean + "-" + suffix + "." + ext
 }

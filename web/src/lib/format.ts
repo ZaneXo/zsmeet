@@ -1,4 +1,21 @@
 import type { Meeting } from "../api/client";
+import { isEn, tr } from "../i18n/lang.ts";
+
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS_LONG = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 
 /** 秒数写成 mm:ss，超过一小时写成 h:mm:ss。和后端转写里的时间点格式一致。 */
 export function clock(sec: number): string {
@@ -21,16 +38,21 @@ export function parseClock(text: string): number {
 }
 
 export function duration(sec: number): string {
-  if (sec < 60) return `${sec} 秒`;
+  if (sec < 60) return isEn() ? `${sec}s` : `${sec} 秒`;
   const minutes = Math.round(sec / 60);
-  if (minutes < 60) return `${minutes} 分钟`;
+  if (minutes < 60) return isEn() ? `${minutes} min` : `${minutes} 分钟`;
   const rest = minutes % 60;
+  if (isEn()) return rest ? `${Math.floor(minutes / 60)}h ${rest}m` : `${Math.floor(minutes / 60)}h`;
   return rest ? `${Math.floor(minutes / 60)} 小时 ${rest} 分` : `${Math.floor(minutes / 60)} 小时`;
 }
 
 export function dateTime(iso: string): string {
   const d = new Date(iso);
   const time = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (isEn()) {
+    const yr = d.getFullYear() === new Date().getFullYear() ? "" : `, ${d.getFullYear()}`;
+    return `${MONTHS_SHORT[d.getMonth()]} ${d.getDate()}${yr} ${time}`;
+  }
   const year = d.getFullYear() === new Date().getFullYear() ? "" : `${d.getFullYear()}年`;
   return `${year}${d.getMonth() + 1}月${d.getDate()}日 ${time}`;
 }
@@ -41,40 +63,72 @@ export function dayGroup(iso: string): string {
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
   const days = Math.floor((startOfToday.getTime() - new Date(d).setHours(0, 0, 0, 0)) / 86_400_000);
-  if (days <= 0) return "今天";
-  if (days === 1) return "昨天";
-  if (days < 7) return "最近一周";
+  if (days <= 0) return tr("今天", "Today");
+  if (days === 1) return tr("昨天", "Yesterday");
+  if (days < 7) return tr("最近一周", "Past 7 days");
+  if (isEn()) {
+    const month = MONTHS_LONG[d.getMonth()] ?? "";
+    return d.getFullYear() === startOfToday.getFullYear() ? month : `${month} ${d.getFullYear()}`;
+  }
   const year = d.getFullYear() === startOfToday.getFullYear() ? "" : `${d.getFullYear()}年`;
   return `${year}${d.getMonth() + 1}月`;
 }
 
 export const SOURCE_LABEL: Record<Meeting["source"], string> = {
-  upload: "上传文件",
-  record: "网页录音",
-  feishu: "飞书会议",
-  desktop: "桌面版录音",
+  get upload() {
+    return tr("上传文件", "Uploaded file");
+  },
+  get record() {
+    return tr("网页录音", "Web recording");
+  },
+  get feishu() {
+    return tr("飞书会议", "Feishu meeting");
+  },
+  get desktop() {
+    return tr("桌面版录音", "Desktop recording");
+  },
 };
 
 export const STAGE_LABEL: Record<Meeting["stage"], string> = {
-  "": "准备中",
-  models: "下载识别模型",
-  assemble: "接收与转码",
-  transcribe: "识别文字",
-  diarize: "区分说话人",
-  correct: "校对文字",
-  minutes: "生成纪要",
+  get ""() {
+    return tr("准备中", "Preparing");
+  },
+  get models() {
+    return tr("下载识别模型", "Downloading ASR models");
+  },
+  get assemble() {
+    return tr("接收与转码", "Receiving & transcoding");
+  },
+  get transcribe() {
+    return tr("识别文字", "Transcribing");
+  },
+  get diarize() {
+    return tr("区分说话人", "Speaker diarization");
+  },
+  get correct() {
+    return tr("校对文字", "Proofreading transcript");
+  },
+  get minutes() {
+    return tr("生成纪要", "Generating minutes");
+  },
 };
 
-export const VERSION_SOURCE_LABEL = {
-  auto: "自动生成",
-  edit: "手动编辑",
-  regenerate: "重新生成",
-} as const;
+export const VERSION_SOURCE_LABEL: Record<"auto" | "edit" | "regenerate", string> = {
+  get auto() {
+    return tr("自动生成", "Auto-generated");
+  },
+  get edit() {
+    return tr("手动编辑", "Edited");
+  },
+  get regenerate() {
+    return tr("重新生成", "Regenerated");
+  },
+};
 
 /** 说话人的名字：起过名字就用名字，没起过是「说话人 N」。names 的键是说话人编号（字符串）。 */
 export function speakerName(speaker: number, names?: Record<string, string>): string {
-  if (speaker < 0) return "说话人";
-  return names?.[String(speaker)] || `说话人 ${speaker + 1}`;
+  if (speaker < 0) return tr("说话人", "Speaker");
+  return names?.[String(speaker)] || (isEn() ? `Speaker ${speaker + 1}` : `说话人 ${speaker + 1}`);
 }
 
 // 蓝、橙、绿、紫……相邻的说话人在色相和明度上都拉开，色弱也分得出

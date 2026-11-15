@@ -4,6 +4,8 @@ import type { DragEvent, FormEvent } from "react";
 import { useNavigate } from "react-router";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import { Button, Field, Icon, Input, Modal, Notice, ProgressBar, Select } from "../components/ui";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { fileSize } from "../lib/format";
 import { MAX_UPLOAD_BYTES, uploadFile } from "../lib/upload";
 
@@ -14,11 +16,16 @@ export function VisibilityField({ id, value, onChange, disabled }: {
   onChange: (v: "team" | "private") => void;
   disabled?: boolean;
 }) {
+  useLang();
   return (
-    <Field label="谁能看" htmlFor={id} hint="建好以后可以在会议页面上改，也可以指定具体的人">
+    <Field
+      label={tr("谁能看", "Visibility")}
+      htmlFor={id}
+      hint={tr("建好以后可以在会议页面上改，也可以指定具体的人", "Can be changed later on the meeting page, including sharing with specific teammates")}
+    >
       <Select id={id} className="sm:w-72" value={value} onChange={(e) => onChange(e.target.value === "private" ? "private" : "team")} disabled={disabled}>
-        <option value="team">团队里所有人</option>
-        <option value="private">只有我（管理员也能看）</option>
+        <option value="team">{tr("团队里所有人", "Everyone in team")}</option>
+        <option value="private">{tr("只有我（管理员也能看）", "Only me (and admins)")}</option>
       </Select>
     </Field>
   );
@@ -35,12 +42,13 @@ export function SpeakerCountSelect({ id, value, onChange, disabled, className }:
   disabled?: boolean;
   className?: string;
 }) {
+  useLang();
   return (
     <Select id={id} className={className} value={value} onChange={(e) => onChange(Number(e.target.value))} disabled={disabled}>
-      <option value={0}>自动区分</option>
+      <option value={0}>{tr("自动区分", "Auto-detect")}</option>
       {Array.from({ length: MAX_SPEAKER_COUNT }, (_, i) => i + 1).map((n) => (
         <option key={n} value={n}>
-          {n} 人
+          {isEn() ? `${n} speaker${n === 1 ? "" : "s"}` : `${n} 人`}
         </option>
       ))}
     </Select>
@@ -54,8 +62,16 @@ export function SpeakerCountField({ id, value, onChange, disabled }: {
   onChange: (v: number) => void;
   disabled?: boolean;
 }) {
+  useLang();
   return (
-    <Field label="说话人数" htmlFor={id} hint="知道有几个人说话就选上，区分说话人更准；转写完以后也可以改了重新转写">
+    <Field
+      label={tr("说话人数", "Speaker count")}
+      htmlFor={id}
+      hint={tr(
+        "知道有几个人说话就选上，区分说话人更准；转写完以后也可以改了重新转写",
+        "Specify if known for more accurate speaker diarization; can also be adjusted later when re-transcribing",
+      )}
+    >
       <SpeakerCountSelect id={id} className="sm:w-72" value={value} onChange={onChange} disabled={disabled} />
     </Field>
   );
@@ -72,6 +88,7 @@ export function useTemplates() {
 
 /** 上传录音文件：选文件、填信息、切片上传，传完跳到会议页看处理进度。 */
 export function UploadDialog({ onClose }: { onClose: () => void }) {
+  useLang();
   const navigate = useNavigate();
   const templates = useTemplates();
   const picker = useRef<HTMLInputElement>(null);
@@ -95,7 +112,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
   const choose = (f: File | undefined) => {
     if (!f) return;
     if (f.size > MAX_UPLOAD_BYTES) {
-      setError("文件超过 4 GB，请压缩或拆分后再上传");
+      setError(tr("文件超过 4 GB，请压缩或拆分后再上传", "File exceeds 4 GB — please compress or split it before uploading"));
       return;
     }
     setError("");
@@ -135,7 +152,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <Modal title="上传录音文件" onClose={onClose}>
+    <Modal title={tr("上传录音文件", "Upload Audio / Video")} onClose={onClose}>
       <form onSubmit={submit} className="flex flex-col gap-4">
         <input ref={picker} type="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.aac,.flac,.ogg,.opus,.wma,.amr,.mp4,.mov,.mkv,.webm" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
 
@@ -150,7 +167,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
             </span>
             {!busy && (
               <Button size="sm" onClick={() => picker.current?.click()}>
-                换一个
+                {tr("换一个", "Change")}
               </Button>
             )}
           </div>
@@ -171,16 +188,22 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
             <span className="text-brand">
               <Icon name="upload" size={28} />
             </span>
-            <span className="text-sm font-semibold">把文件拖到这里，或点击选择</span>
-            <span className="text-xs text-muted">mp3、m4a、wav、mp4、mov 等常见音视频格式，视频只取声音。最大 4 GB</span>
+            <span className="text-sm font-semibold">{tr("把文件拖到这里，或点击选择", "Drop a file here, or click to browse")}</span>
+            <span className="text-xs text-muted">
+              {tr("mp3、m4a、wav、mp4、mov 等常见音视频格式，视频只取声音。最大 4 GB", "Common audio/video formats (mp3, m4a, wav, mp4, mov, etc. — audio extracted from video). Max 4 GB")}
+            </span>
           </button>
         )}
 
-        <Field label="会议标题" htmlFor="up-title" hint="留空会用上传时间起一个，之后可以改">
+        <Field
+          label={tr("会议标题", "Meeting title")}
+          htmlFor="up-title"
+          hint={tr("留空会用上传时间起一个，之后可以改", "Leave blank to name by upload time; can be renamed later")}
+        >
           <Input id="up-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} disabled={busy} />
         </Field>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="纪要模板" htmlFor="up-template">
+          <Field label={tr("纪要模板", "Minutes template")} htmlFor="up-template">
             <Select id="up-template" value={template} onChange={(e) => setTemplate(e.target.value)} disabled={busy}>
               {(templates.data?.items ?? []).map((t) => (
                 <option key={t.id} value={t.id}>
@@ -189,33 +212,42 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
               ))}
             </Select>
           </Field>
-          <Field label="本场热词" htmlFor="up-hotwords">
-            <Input id="up-hotwords" value={hotwords} onChange={(e) => setHotwords(e.target.value)} maxLength={500} placeholder="人名、产品名，用逗号分开" disabled={busy} />
+          <Field label={tr("本场热词", "Hotwords for this meeting")} htmlFor="up-hotwords">
+            <Input
+              id="up-hotwords"
+              value={hotwords}
+              onChange={(e) => setHotwords(e.target.value)}
+              maxLength={500}
+              placeholder={tr("人名、产品名，用逗号分开", "Names, product terms, comma-separated")}
+              disabled={busy}
+            />
           </Field>
         </div>
-        <p className="-mt-2 text-xs leading-relaxed text-muted">热词会交给大模型，纪要里这些词被识别成近音字时会纠正过来。</p>
+        <p className="-mt-2 text-xs leading-relaxed text-muted">
+          {tr("热词会交给大模型，纪要里这些词被识别成近音字时会纠正过来。", "Hotwords are passed to the LLM to correct homophone errors in generated minutes.")}
+        </p>
         <SpeakerCountField id="up-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={busy} />
         <VisibilityField id="up-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 
         {busy && file && (
           <div className="flex flex-col gap-2">
             <div className="flex justify-between text-sm">
-              <b className="font-semibold">正在上传</b>
+              <b className="font-semibold">{tr("正在上传", "Uploading")}</b>
               <span className="tabular-nums">
                 {fileSize(sent)} / {fileSize(file.size)}
               </span>
             </div>
             <ProgressBar value={file.size ? sent / file.size : 1} />
-            <p className="text-xs text-muted">网络断了会自动重试。上传完成前请不要关闭这个页面。</p>
+            <p className="text-xs text-muted">{tr("网络断了会自动重试。上传完成前请不要关闭这个页面。", "Retries automatically on network drops. Keep this page open until upload finishes.")}</p>
           </div>
         )}
 
         {error && <Notice tone="bad">{error}</Notice>}
 
         <div className="flex justify-end gap-2.5">
-          <Button onClick={onClose}>{busy ? "取消上传" : "取消"}</Button>
+          <Button onClick={onClose}>{busy ? tr("取消上传", "Cancel upload") : tr("取消", "Cancel")}</Button>
           <Button type="submit" variant="primary" disabled={!file || busy}>
-            上传并处理
+            {tr("上传并处理", "Upload & process")}
           </Button>
         </div>
       </form>

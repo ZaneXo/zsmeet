@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { hms } from "../lib/format";
 import { Card } from "./ui";
 
@@ -43,17 +45,18 @@ export function LevelMeter({ read, active, paused = false }: { read: () => numbe
 
 /** 录音时标记的重点：第几个、在录音的第几秒。 */
 export function RecordingMarks({ marks }: { marks: readonly number[] }) {
+  useLang();
   return (
     <Card className="flex flex-col gap-2.5 p-6">
-      <b className="text-[15px] font-semibold">标记的重点（会写进纪要）</b>
+      <b className="text-[15px] font-semibold">{tr("标记的重点（会写进纪要）", "Bookmarks (highlighted in minutes)")}</b>
       {marks.length === 0 ? (
-        <span className="text-[13px] text-muted">有人说到关键内容时点「标记重点」。</span>
+        <span className="text-[13px] text-muted">{tr("有人说到关键内容时点「标记重点」。", "Click \"Add bookmark\" when someone mentions something important.")}</span>
       ) : (
         <ol className="flex flex-wrap gap-2">
           {marks.map((t, i) => (
             // 标记只会往后加，用下标当 key 没问题（两次标记可能落在同一秒）
             <li key={i} className="rounded-lg bg-subtle px-2.5 py-1 text-[13px] tabular-nums">
-              重点 {i + 1} · {hms(t)}
+              {isEn() ? `Bookmark ${i + 1} · ${hms(t)}` : `重点 ${i + 1} · ${hms(t)}`}
             </li>
           ))}
         </ol>

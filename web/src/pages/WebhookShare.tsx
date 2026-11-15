@@ -6,6 +6,8 @@ import type { Meeting } from "../api/client";
 import type { components } from "../api/schema";
 import { Button, Chip, Modal, Notice } from "../components/ui";
 import type { Tone } from "../components/ui";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { dateTime } from "../lib/format";
 import { newestFirst } from "../lib/time";
 import { PLATFORM_LABEL } from "./WebhookSettings";
@@ -16,11 +18,16 @@ import { PLATFORM_LABEL } from "./WebhookSettings";
 type Send = components["schemas"]["WebhookSend"];
 type Hook = components["schemas"]["MeetingWebhook"];
 
-const SEND_STATUS: Record<Send["status"], { tone: Tone; text: string; dot: string }> = {
-  pending: { tone: "info", text: "发送中", dot: "animate-pulse bg-brand" },
-  done: { tone: "ok", text: "已发送", dot: "bg-ok" },
-  failed: { tone: "bad", text: "发送失败", dot: "bg-bad" },
-};
+function sendStatus(status: Send["status"]): { tone: Tone; text: string; dot: string } {
+  switch (status) {
+    case "pending":
+      return { tone: "info", text: tr("发送中", "Sending"), dot: "animate-pulse bg-brand" };
+    case "done":
+      return { tone: "ok", text: tr("已发送", "Sent"), dot: "bg-ok" };
+    case "failed":
+      return { tone: "bad", text: tr("发送失败", "Failed"), dot: "bg-bad" };
+  }
+}
 
 const hooksKey = (meetingId: string) => ["meeting-webhooks", meetingId];
 
@@ -53,6 +60,7 @@ export function useMeetingWebhooks(meetingId: string, minutesVersion: number | u
  * 能发的人（传了 onOpen）看每个群最近一次，不管成没成功，点它打开「发到群里」；其他人只看发成功了的。
  */
 export function LatestWebhookSends({ hooks, meeting, onOpen }: { hooks: Hook[]; meeting: Meeting; onOpen?: () => void }) {
+  useLang();
   const sends = hooks
     .map((h) => h.latest)
     .filter((s): s is Send => !!s && (!!onOpen || s.status === "done"))
@@ -60,24 +68,30 @@ export function LatestWebhookSends({ hooks, meeting, onOpen }: { hooks: Hook[]; 
   const [latest] = sends;
   if (!latest) return null;
 
+  const en = isEn();
   const names = (status: Send["status"]) =>
     sends
       .filter((s) => s.status === status)
-      .map((s) => `「${s.webhook_name}」`)
-      .join("");
+      .map((s) => (en ? `“${s.webhook_name}”` : `「${s.webhook_name}」`))
+      .join(en ? ", " : "");
   const parts = [
-    names("pending") && `正在发到${names("pending")}…`,
-    names("done") && `已发到${names("done")}`,
-    names("failed") && `发到${names("failed")}失败 · 查看原因`,
+    names("pending") && tr(`正在发到${names("pending")}…`, `Sending to ${names("pending")}…`),
+    names("done") && tr(`已发到${names("done")}`, `Sent to ${names("done")}`),
+    names("failed") && tr(`发到${names("failed")}失败 · 查看原因`, `Failed to send to ${names("failed")} · View reason`),
   ].filter(Boolean);
   // 发出去以后纪要又改过：说一声群里的是旧的那一版
   const stale = sends.find((s) => s.status === "done" && s.minutes_version < meeting.minutes_version);
-  const old = stale ? `（发的是第 ${stale.minutes_version} 版，现在是第 ${meeting.minutes_version} 版）` : "";
+  const old = stale
+    ? tr(
+        `（发的是第 ${stale.minutes_version} 版，现在是第 ${meeting.minutes_version} 版）`,
+        ` (sent v${stale.minutes_version}, current is v${meeting.minutes_version})`,
+      )
+    : "";
   const status = sends.some((s) => s.status === "failed") ? "failed" : sends.some((s) => s.status === "pending") ? "pending" : "done";
-  const text = `${parts.join("，")}${old} · ${dateTime(latest.created_at)}`;
+  const text = `${parts.join(en ? "; " : "，")}${old} · ${dateTime(latest.created_at)}`;
   const content = (
     <>
-      <span className={`size-1.5 shrink-0 rounded-full ${SEND_STATUS[status].dot}`} aria-hidden="true" />
+      <span className={`size-1.5 shrink-0 rounded-full ${sendStatus(status).dot}`} aria-hidden="true" />
       {text}
     </>
   );
@@ -85,7 +99,12 @@ export function LatestWebhookSends({ hooks, meeting, onOpen }: { hooks: Hook[]; 
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
       {onOpen ? (
-        <button type="button" onClick={onOpen} title="查看发到群里的情况" className={`inline-flex cursor-pointer items-center gap-2 text-left hover:underline ${color}`}>
+        <button
+          type="button"
+          onClick={onOpen}
+          title={tr("查看发到群里的情况", "View group webhook status")}
+          className={`inline-flex cursor-pointer items-center gap-2 text-left hover:underline ${color}`}
+        >
           {content}
         </button>
       ) : (
@@ -97,6 +116,7 @@ export function LatestWebhookSends({ hooks, meeting, onOpen }: { hooks: Hook[]; 
 
 /** 「发到群里」弹窗：勾上要发的群，发送；每个群旁边是这场会议最近一次发到那里的情况。发送在后台进行，弹窗开着就能看到结果。 */
 export function WebhookShareDialog({ meeting, hooks, onClose }: { meeting: Meeting; hooks: Hook[]; onClose: () => void }) {
+  useLang();
   const [chosen, setChosen] = useState<string[]>([]);
   const pending = (h: Hook) => h.latest?.status === "pending";
   // 真正要发的：选了以后别人（或者自动发送）开始往那个群发了、群被删了的不算。不然复选框灰着取消不掉，发送按钮还亮着
@@ -128,9 +148,12 @@ export function WebhookShareDialog({ meeting, hooks, onClose }: { meeting: Meeti
   const repeat = hooks.some((h) => sendable.includes(h.id) && h.latest?.status === "done" && h.latest.minutes_version === meeting.minutes_version);
 
   return (
-    <Modal title="发到群里" onClose={onClose}>
+    <Modal title={tr("发到群里", "Send to group")} onClose={onClose}>
       <p className="-mt-2 text-[13px] leading-relaxed text-muted">
-        发送当前版本（第 {meeting.minutes_version} 版）纪要的摘要和待办，带着回到这场会议的链接。只能发到管理员在「设置 → 群机器人」里加好的群。
+        {tr(
+          `发送当前版本（第 ${meeting.minutes_version} 版）纪要的摘要和待办，带着回到这场会议的链接。只能发到管理员在「设置 → 群机器人」里加好的群。`,
+          `Send the summary and action items of the current minutes (v${meeting.minutes_version}) with a link back to this meeting. Only groups added by an admin under Settings → Group bots are available.`,
+        )}
       </p>
       <form onSubmit={submit} className="flex flex-col gap-4">
         <ul className="flex max-h-80 flex-col divide-y divide-line overflow-y-auto rounded-xl border border-line">
@@ -148,7 +171,7 @@ export function WebhookShareDialog({ meeting, hooks, onClose }: { meeting: Meeti
                 <span className="text-xs text-muted">{PLATFORM_LABEL[h.platform]}</span>
                 {h.latest && (
                   <span className="ml-auto">
-                    <Chip tone={SEND_STATUS[h.latest.status].tone}>{SEND_STATUS[h.latest.status].text}</Chip>
+                    <Chip tone={sendStatus(h.latest.status).tone}>{sendStatus(h.latest.status).text}</Chip>
                   </span>
                 )}
               </label>
@@ -157,11 +180,19 @@ export function WebhookShareDialog({ meeting, hooks, onClose }: { meeting: Meeti
           ))}
         </ul>
         {send.isError && <Notice tone="bad">{errorMessage(send.error)}</Notice>}
-        {send.isSuccess && <Notice tone="ok">已经开始发送，结果会显示在上面。</Notice>}
+        {send.isSuccess && <Notice tone="ok">{tr("已经开始发送，结果会显示在上面。", "Sending started — status will update above.")}</Notice>}
         <div className="flex flex-wrap items-center justify-end gap-3">
-          {repeat && <span className="mr-auto text-[13px] text-muted">这一版已经发到过选中的群，再发一次群里会多一条。</span>}
+          {repeat && (
+            <span className="mr-auto text-[13px] text-muted">
+              {tr("这一版已经发到过选中的群，再发一次群里会多一条。", "This version was already sent to a selected group; sending again will post another message.")}
+            </span>
+          )}
           <Button type="submit" variant="primary" disabled={sendable.length === 0 || send.isPending}>
-            {send.isPending ? "正在发送…" : sendable.length > 1 ? `发到 ${sendable.length} 个群` : "发送"}
+            {send.isPending
+              ? tr("正在发送…", "Sending…")
+              : sendable.length > 1
+                ? tr(`发到 ${sendable.length} 个群`, `Send to ${sendable.length} groups`)
+                : tr("发送", "Send")}
           </Button>
         </div>
       </form>
@@ -171,10 +202,11 @@ export function WebhookShareDialog({ meeting, hooks, onClose }: { meeting: Meeti
 
 /** 一个群最近一次的发送：第几版、谁发的、什么时候；失败的写上原因，还在重试的写上上一次为什么没发出去。 */
 function SendDetail({ send: s }: { send: Send }) {
+  useLang();
   return (
     <div className="flex flex-col gap-1 pl-6.5 text-[13px]">
       <span className="text-muted">
-        最近一次：第 {s.minutes_version} 版 · {s.requested_by_name || "自动发送"} · {dateTime(s.created_at)}
+        {tr(`最近一次：第 ${s.minutes_version} 版`, `Latest: v${s.minutes_version}`)} · {s.requested_by_name || tr("自动发送", "Auto-sent")} · {dateTime(s.created_at)}
       </span>
       {s.status === "failed" && s.error && <p className="leading-relaxed text-bad">{s.error}</p>}
       {s.status === "pending" && s.error && <p className="leading-relaxed text-warn">{s.error}</p>}

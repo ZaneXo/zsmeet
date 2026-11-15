@@ -6,6 +6,8 @@ import type { Meeting } from "../api/client";
 import type { components } from "../api/schema";
 import { Button, Chip, Field, Modal, Notice, Select, Spinner } from "../components/ui";
 import type { Tone } from "../components/ui";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { dateTime } from "../lib/format";
 
 // 把纪要发到飞书：会议页上「发到飞书」的弹窗（选群、发送、发送记录），和标题下面那一行（最近一次发到飞书的情况）。
@@ -14,11 +16,16 @@ type Share = components["schemas"]["FeishuShare"];
 type Shares = components["schemas"]["FeishuSharesOutputBody"];
 type Chats = components["schemas"]["FeishuChatsOutputBody"];
 
-const SHARE_STATUS: Record<Share["status"], { tone: Tone; text: string; dot: string }> = {
-  pending: { tone: "info", text: "发送中", dot: "animate-pulse bg-brand" },
-  done: { tone: "ok", text: "已发送", dot: "bg-ok" },
-  failed: { tone: "bad", text: "发送失败", dot: "bg-bad" },
-};
+function shareStatus(status: Share["status"]): { tone: Tone; text: string; dot: string } {
+  switch (status) {
+    case "pending":
+      return { tone: "info", text: tr("发送中", "Sending"), dot: "animate-pulse bg-brand" };
+    case "done":
+      return { tone: "ok", text: tr("已发送", "Sent"), dot: "bg-ok" };
+    case "failed":
+      return { tone: "bad", text: tr("发送失败", "Failed"), dot: "bg-bad" };
+  }
+}
 
 // 下拉框里「不发到群，只导入成飞书文档」那一项的值。飞书群的 ID 都以 oc_ 开头，不会和它重
 const DOC_ONLY = "doc-only";
@@ -39,6 +46,7 @@ function useShares(meetingId: string) {
  * 能发的人（传了 onOpen）看最近一次，不管成没成功，点它打开「发到飞书」看记录；其他人只看最近发成功的那一次。
  */
 export function LatestFeishuShare({ meeting, onOpen }: { meeting: Meeting; onOpen?: () => void }) {
+  useLang();
   const shares = useShares(meeting.id);
 
   // 管理员打开了自动发送的话，纪要第一次生成后会自动发到默认的群：纪要的版本变了就重新取一次记录。
@@ -54,20 +62,32 @@ export function LatestFeishuShare({ meeting, onOpen }: { meeting: Meeting; onOpe
   const s = onOpen ? items[0] : items.find((item) => item.status === "done");
   if (!s) return null;
 
-  const group = s.chat_id ? `飞书群${s.chat_name ? `「${s.chat_name}」` : ""}` : "";
+  const group = s.chat_id
+    ? isEn()
+      ? s.chat_name
+        ? `Feishu chat “${s.chat_name}”`
+        : "Feishu chat"
+      : `飞书群${s.chat_name ? `「${s.chat_name}」` : ""}`
+    : "";
   const what = {
-    pending: group ? `正在发到${group}…` : "正在导入成飞书文档…",
-    done: group ? `已发到${group}` : "已导入成飞书文档",
-    failed: group ? `发到${group}失败` : "导入飞书文档失败",
+    pending: group ? tr(`正在发到${group}…`, `Sending to ${group}…`) : tr("正在导入成飞书文档…", "Importing as Feishu doc…"),
+    done: group ? tr(`已发到${group}`, `Sent to ${group}`) : tr("已导入成飞书文档", "Imported as Feishu doc"),
+    failed: group ? tr(`发到${group}失败`, `Failed to send to ${group}`) : tr("导入飞书文档失败", "Failed to import Feishu doc"),
   }[s.status];
   // 发出去以后纪要又改过：说一声飞书上的是旧的那一版
-  const old = s.status === "done" && s.minutes_version < meeting.minutes_version ? `（第 ${s.minutes_version} 版，现在是第 ${meeting.minutes_version} 版）` : "";
+  const old =
+    s.status === "done" && s.minutes_version < meeting.minutes_version
+      ? tr(
+          `（第 ${s.minutes_version} 版，现在是第 ${meeting.minutes_version} 版）`,
+          ` (v${s.minutes_version}, current is v${meeting.minutes_version})`,
+        )
+      : "";
   const when = s.status === "pending" ? "" : ` · ${dateTime(s.created_at)}`;
-  const text = `${what}${old}${when}${s.status === "failed" ? " · 查看原因" : ""}`;
+  const text = `${what}${old}${when}${s.status === "failed" ? tr(" · 查看原因", " · View reason") : ""}`;
 
   const content = (
     <>
-      <span className={`size-1.5 shrink-0 rounded-full ${SHARE_STATUS[s.status].dot}`} aria-hidden="true" />
+      <span className={`size-1.5 shrink-0 rounded-full ${shareStatus(s.status).dot}`} aria-hidden="true" />
       {text}
     </>
   );
@@ -75,7 +95,12 @@ export function LatestFeishuShare({ meeting, onOpen }: { meeting: Meeting; onOpe
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
       {onOpen ? (
-        <button type="button" onClick={onOpen} title="查看发到飞书的记录" className={`inline-flex cursor-pointer items-center gap-2 text-left hover:underline ${color}`}>
+        <button
+          type="button"
+          onClick={onOpen}
+          title={tr("查看发到飞书的记录", "View Feishu share history")}
+          className={`inline-flex cursor-pointer items-center gap-2 text-left hover:underline ${color}`}
+        >
           {content}
         </button>
       ) : (
@@ -83,7 +108,7 @@ export function LatestFeishuShare({ meeting, onOpen }: { meeting: Meeting; onOpe
       )}
       {s.doc_url && (
         <a href={s.doc_url} target="_blank" rel="noreferrer" className="text-brand hover:text-brand-hover">
-          打开飞书文档
+          {tr("打开飞书文档", "Open Feishu doc")}
         </a>
       )}
     </div>
@@ -92,6 +117,7 @@ export function LatestFeishuShare({ meeting, onOpen }: { meeting: Meeting; onOpe
 
 /** 「发到飞书」弹窗：选群、要不要同时导入成飞书文档，发送；下面是这场会议发到飞书的记录。发送在后台进行，弹窗开着就能看到结果。 */
 export function FeishuShareDialog({ meeting, onClose }: { meeting: Meeting; onClose: () => void }) {
+  useLang();
   const chats = useQuery({
     // 和「设置 → 飞书」里的群列表是同一份，那边保存配置时会刷新它
     queryKey: ["feishu", "chats"],
@@ -101,9 +127,12 @@ export function FeishuShareDialog({ meeting, onClose }: { meeting: Meeting; onCl
   const items = shares.data?.items ?? [];
 
   return (
-    <Modal title="发到飞书" onClose={onClose}>
+    <Modal title={tr("发到飞书", "Share to Feishu")} onClose={onClose}>
       <p className="-mt-2 text-[13px] leading-relaxed text-muted">
-        发送当前版本（第 {meeting.minutes_version} 版）的纪要。发到群里的是一张卡片，上面有摘要、待办和回到这场会议的链接。
+        {tr(
+          `发送当前版本（第 ${meeting.minutes_version} 版）的纪要。发到群里的是一张卡片，上面有摘要、待办和回到这场会议的链接。`,
+          `Send the current minutes (v${meeting.minutes_version}). Posts an interactive card to the chat with the summary, action items, and a link back to this meeting.`,
+        )}
       </p>
 
       {chats.data ? (
@@ -112,17 +141,22 @@ export function FeishuShareDialog({ meeting, onClose }: { meeting: Meeting; onCl
         <div className="flex flex-col items-start gap-3">
           <Notice tone="bad">{errorMessage(chats.error)}</Notice>
           <Button size="sm" onClick={() => chats.refetch()}>
-            重试
+            {tr("重试", "Retry")}
           </Button>
         </div>
       ) : (
-        <Spinner label="正在读取飞书群…" />
+        <Spinner label={tr("正在读取飞书群…", "Loading Feishu chats…")} />
       )}
 
-      {shares.isError && <Notice tone="warn">发送记录没能刷新：{errorMessage(shares.error)}</Notice>}
+      {shares.isError && (
+        <Notice tone="warn">
+          {tr("发送记录没能刷新：", "Could not refresh share history: ")}
+          {errorMessage(shares.error)}
+        </Notice>
+      )}
       {items.length > 0 && (
         <section className="flex flex-col gap-1 border-t border-line pt-4">
-          <h3 className="text-sm font-semibold">发送记录</h3>
+          <h3 className="text-sm font-semibold">{tr("发送记录", "Share history")}</h3>
           <ul className="flex max-h-72 flex-col divide-y divide-line overflow-y-auto">
             {items.map((s) => (
               <ShareRow key={s.id} share={s} />
@@ -135,6 +169,7 @@ export function FeishuShareDialog({ meeting, onClose }: { meeting: Meeting; onCl
 }
 
 function ShareForm({ meeting, chats, shares }: { meeting: Meeting; chats: Chats; shares: Share[] }) {
+  useLang();
   // 先选上管理员设的默认群。没设（或者机器人已经不在那个群里）时让人自己选，不替他挑，免得发错群；
   // 机器人一个群都不在的话只能导入成文档
   const [chat, setChat] = useState(() => {
@@ -173,12 +208,18 @@ function ShareForm({ meeting, chats, shares }: { meeting: Meeting; chats: Chats;
   return (
     <form onSubmit={submit} className="flex flex-col gap-4">
       <Field
-        label="飞书群"
+        label={tr("飞书群", "Feishu chat")}
         htmlFor="feishu-chat"
         hint={
           chats.items.length > 0
-            ? "只能发到应用机器人所在的群。要发到别的群，先在那个群的设置里添加机器人。"
-            : "应用机器人还没有加入任何群，现在只能导入成飞书文档。在群设置里添加机器人以后，这里就能选。"
+            ? tr(
+                "只能发到应用机器人所在的群。要发到别的群，先在那个群的设置里添加机器人。",
+                "Can only send to chats where the app bot is a member. Add the bot in that chat’s settings first.",
+              )
+            : tr(
+                "应用机器人还没有加入任何群，现在只能导入成飞书文档。在群设置里添加机器人以后，这里就能选。",
+                "The app bot hasn’t been added to any chat yet, so you can only import as a Feishu doc for now. Add the bot to a chat to select it here.",
+              )
         }
       >
         <Select
@@ -190,14 +231,14 @@ function ShareForm({ meeting, chats, shares }: { meeting: Meeting; chats: Chats;
           }}
         >
           <option value="" disabled>
-            选一个群…
+            {tr("选一个群…", "Select a chat…")}
           </option>
           {chats.items.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
             </option>
           ))}
-          <option value={DOC_ONLY}>不发到群，只导入成飞书文档</option>
+          <option value={DOC_ONLY}>{tr("不发到群，只导入成飞书文档", "Don’t post to chat — import as Feishu doc only")}</option>
         </Select>
       </Field>
 
@@ -213,8 +254,13 @@ function ShareForm({ meeting, chats, shares }: { meeting: Meeting; chats: Chats;
             }}
           />
           <span className="flex flex-col gap-0.5">
-            <span className="text-sm">同时导入成飞书文档</span>
-            <span className="text-xs leading-relaxed text-muted">完整的纪要放进一篇飞书文档，卡片上附文档的链接，群里的人都能打开。</span>
+            <span className="text-sm">{tr("同时导入成飞书文档", "Also import as a Feishu doc")}</span>
+            <span className="text-xs leading-relaxed text-muted">
+              {tr(
+                "完整的纪要放进一篇飞书文档，卡片上附文档的链接，群里的人都能打开。",
+                "Imports the full minutes into a Feishu doc and attaches its link on the card so anyone in the chat can open it.",
+              )}
+            </span>
           </span>
         </label>
       )}
@@ -224,7 +270,7 @@ function ShareForm({ meeting, chats, shares }: { meeting: Meeting; chats: Chats;
       <div className="flex flex-wrap items-center justify-end gap-3">
         {repeat && <span className="mr-auto text-[13px] text-muted">{repeat}</span>}
         <Button type="submit" variant="primary" disabled={!chat || busy}>
-          {busy ? "正在发送…" : "发送"}
+          {busy ? tr("正在发送…", "Sending…") : tr("发送", "Send")}
         </Button>
       </div>
     </form>
@@ -237,26 +283,31 @@ function ShareForm({ meeting, chats, shares }: { meeting: Meeting; chats: Chats;
  */
 function repeatHint(shares: Share[], version: number, chat: string): string {
   if (chat === DOC_ONLY) {
-    return shares.some((s) => s.minutes_version === version && s.doc_url) ? "这一版已经导入过飞书文档，在下面的记录里能打开。" : "";
+    return shares.some((s) => s.minutes_version === version && s.doc_url)
+      ? tr("这一版已经导入过飞书文档，在下面的记录里能打开。", "This version has already been imported as a Feishu doc — open it from the history below.")
+      : "";
   }
   const sent = shares.some((s) => s.status === "done" && s.chat_id === chat && s.minutes_version === version);
-  return sent ? "这一版已经发到过这个群，再发一次群里会多一张卡片。" : "";
+  return sent ? tr("这一版已经发到过这个群，再发一次群里会多一张卡片。", "This version was already sent to this chat; sending again will post another card.") : "";
 }
 
 /** 发送记录里的一条：状态、发到哪个群、第几版、谁发的、什么时候，导入了文档的带上文档的链接，失败的写上原因。 */
 function ShareRow({ share: s }: { share: Share }) {
-  const status = SHARE_STATUS[s.status];
+  useLang();
+  const status = shareStatus(s.status);
   return (
     <li className="flex flex-col gap-1.5 py-2.5">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px]">
         <Chip tone={status.tone}>{status.text}</Chip>
-        <span className="font-medium">{s.chat_id ? s.chat_name || "飞书群" : s.status === "done" ? "只导入了文档" : "只导入文档"}</span>
+        <span className="font-medium">
+          {s.chat_id ? s.chat_name || tr("飞书群", "Feishu chat") : s.status === "done" ? tr("只导入了文档", "Doc imported only") : tr("只导入文档", "Doc import only")}
+        </span>
         <span className="text-muted">
-          第 {s.minutes_version} 版 · {s.requested_by_name || "自动发送"} · {dateTime(s.created_at)}
+          {tr(`第 ${s.minutes_version} 版`, `v${s.minutes_version}`)} · {s.requested_by_name || tr("自动发送", "Auto-sent")} · {dateTime(s.created_at)}
         </span>
         {s.doc_url && (
           <a href={s.doc_url} target="_blank" rel="noreferrer" className="text-brand hover:text-brand-hover">
-            打开飞书文档
+            {tr("打开飞书文档", "Open Feishu doc")}
           </a>
         )}
       </div>

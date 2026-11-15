@@ -10,6 +10,7 @@ use reqwest::header;
 use serde_json::{json, Value};
 
 use crate::core::Account;
+use crate::i18n::{self, is_en, tr};
 use crate::server;
 
 /// 一片只有几十 KB，传这么久还没完，多半是连接悄悄断了，断开重来。
@@ -181,10 +182,25 @@ fn received_seqs(body: &Value) -> Option<Vec<u32>> {
 }
 
 async fn send(req: reqwest::RequestBuilder) -> Outcome {
+    let req = req.header(header::ACCEPT_LANGUAGE, i18n::accept_language());
     let resp = match req.send().await {
         Ok(resp) => resp,
-        Err(e) if e.is_timeout() => return Outcome::Retry(SLOW.into()),
-        Err(_) => return Outcome::Retry(OFFLINE.into()),
+        Err(e) if e.is_timeout() => {
+            return Outcome::Retry(
+                tr(
+                    SLOW,
+                    "The server took too long to respond; retrying automatically shortly.",
+                )
+                .into(),
+            )
+        }
+        Err(_) => return Outcome::Retry(
+            tr(
+                OFFLINE,
+                "Cannot reach the server. Uploading will resume automatically when back online.",
+            )
+            .into(),
+        ),
     };
     let status = resp.status().as_u16();
     let success = (200..300).contains(&status);
@@ -192,8 +208,24 @@ async fn send(req: reqwest::RequestBuilder) -> Outcome {
         Ok(body) => Some(body),
         // 2xx 的回复没收全（说好多长却没给够就断开了，或者一直不给完）：和下面看不懂的回复一样，
         // 可能不是服务器回的，服务器也不一定办成了，不能当成成功
-        Err(e) if success && e.is_timeout() => return Outcome::Retry(SLOW.into()),
-        Err(_) if success => return Outcome::Retry(UNREADABLE.into()),
+        Err(e) if success && e.is_timeout() => {
+            return Outcome::Retry(
+                tr(
+                    SLOW,
+                    "The server took too long to respond; retrying automatically shortly.",
+                )
+                .into(),
+            )
+        }
+        Err(_) if success => {
+            return Outcome::Retry(
+                tr(
+                    UNREADABLE,
+                    "Received an unexpected response from the server; retrying automatically shortly. If this persists, check for a captive Wi-Fi login portal or ask an admin to check server settings.",
+                )
+                .into(),
+            )
+        }
         // 出错的回复没收全：只按状态码分类
         Err(_) => None,
     };
@@ -208,7 +240,13 @@ async fn send(req: reqwest::RequestBuilder) -> Outcome {
             .is_some_and(|b| b.iter().any(|c| !c.is_ascii_whitespace()))
             && json.is_none();
         if unreadable {
-            return Outcome::Retry(UNREADABLE.into());
+            return Outcome::Retry(
+                tr(
+                    UNREADABLE,
+                    "Received an unexpected response from the server; retrying automatically shortly. If this persists, check for a captive Wi-Fi login portal or ask an admin to check server settings.",
+                )
+                .into(),
+            );
         }
         return Outcome::Done(json.unwrap_or(Value::Null));
     }
@@ -224,18 +262,58 @@ async fn send(req: reqwest::RequestBuilder) -> Outcome {
 pub fn classify(status: u16, detail: Option<String>) -> Outcome {
     match status {
         401 => Outcome::Unauthorized,
-        403 => Outcome::Fatal(NO_PERMISSION.into()),
-        404 => Outcome::Fatal(MEETING_GONE.into()),
-        409 => Outcome::Conflict(detail.unwrap_or_else(|| ALREADY_FINISHED.into())),
-        408 | 429 => Outcome::Retry(format!("服务器很忙（返回 {status}），稍后会自动重试")),
-        500..=599 => Outcome::Retry(format!("服务器暂时出错了（返回 {status}），稍后会自动重试")),
+        403 => Outcome::Fatal(
+            tr(
+                NO_PERMISSION,
+                "You do not have permission to upload audio to this meeting.",
+            )
+            .into(),
+        ),
+        404 => Outcome::Fatal(
+            tr(
+                MEETING_GONE,
+                "This meeting was not found on the server (it may have been deleted); cannot upload.",
+            )
+            .into(),
+        ),
+        409 => Outcome::Conflict(detail.unwrap_or_else(|| {
+            tr(
+                ALREADY_FINISHED,
+                "This meeting has already finished recording and started processing; remaining audio cannot be uploaded.",
+            )
+            .into()
+        })),
+        408 | 429 => Outcome::Retry(if is_en() {
+            format!("Server is busy (HTTP {status}); retrying automatically shortly.")
+        } else {
+            format!("服务器很忙（返回 {status}），稍后会自动重试")
+        }),
+        500..=599 => Outcome::Retry(if is_en() {
+            format!("Temporary server error (HTTP {status}); retrying automatically shortly.")
+        } else {
+            format!("服务器暂时出错了（返回 {status}），稍后会自动重试")
+        }),
         // 跳转（带着令牌的请求不跟着跳，见 server::http_client）：多半是服务器的设置问题，改好了还能接着传
-        300..=399 => Outcome::Retry(format!(
-            "服务器把请求转到了别的地址（返回 {status}），请让管理员检查服务器的设置"
-        )),
+        300..=399 => Outcome::Retry(if is_en() {
+            format!("Server redirected the request (HTTP {status}); ask an admin to check server settings.")
+        } else {
+            format!("服务器把请求转到了别的地址（返回 {status}），请让管理员检查服务器的设置")
+        }),
         _ => Outcome::Fatal(match detail {
-            Some(d) => format!("服务器不接受这段录音：{d}"),
-            None => format!("服务器不接受这段录音（返回 {status}）"),
+            Some(d) => {
+                if is_en() {
+                    format!("Server rejected this recording: {d}")
+                } else {
+                    format!("服务器不接受这段录音：{d}")
+                }
+            }
+            None => {
+                if is_en() {
+                    format!("Server rejected this recording (HTTP {status}).")
+                } else {
+                    format!("服务器不接受这段录音（返回 {status}）")
+                }
+            }
         }),
     }
 }

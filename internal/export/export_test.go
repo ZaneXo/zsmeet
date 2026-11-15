@@ -7,7 +7,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
@@ -88,5 +90,27 @@ func TestTranscriptExport(t *testing.T) {
 	md := TranscriptMarkdown("产品周会", nil, segs, names)
 	if !strings.Contains(md, "**[00:00] 张敏**：今天开周会。先说结论。") {
 		t.Errorf("Markdown 转写不对：%q", md)
+	}
+}
+
+func TestTranscriptExportEnglish(t *testing.T) {
+	segs := []transcript.Segment{
+		{Start: 0, End: 2, Speaker: 0, Text: "Let's review pricing."},
+		{Start: 5, End: 7, Speaker: 1, Text: "Sounds good."},
+	}
+	names := transcript.Names{0: "Alice"}
+	info := InfoLang(i18n.EN, time.Date(2026, 11, 9, 14, 30, 0, 0, time.Local), 3900, "Alice", names)
+	text := TranscriptTextLang(i18n.EN, "Pricing Sync", info, segs, names)
+	for _, want := range []string{
+		"Time: Nov 9, 2026 14:30",
+		"Duration: 1h 5m",
+		"Created by: Alice",
+		"Speakers: Alice",
+		"[00:00] Alice: Let's review pricing.",
+		"[00:05] Speaker 2: Sounds good.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("English transcript export missing %q in:\n%s", want, text)
+		}
 	}
 }

@@ -1,5 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import createClient from "openapi-fetch";
+import { acceptLanguageHeader, isEn, tr } from "../i18n/lang";
 import { networkMode, setupApiClient } from "../platform";
 import type { components, paths } from "./schema";
 
@@ -22,6 +23,12 @@ export type Citation = components["schemas"]["Citation"];
 export type Device = components["schemas"]["Device"];
 
 export const api = createClient<paths>({ baseUrl: "", credentials: "same-origin" });
+api.use({
+  onRequest({ request }) {
+    request.headers.set("Accept-Language", acceptLanguageHeader());
+    return request;
+  },
+});
 // 桌面版：请求改发给 App 里的本地代理（见 src/platform/）
 setupApiClient(api);
 
@@ -33,7 +40,7 @@ export const queryClient = new QueryClient({
   },
 });
 
-/** 接口返回的错误。message 是后端写好的中文说明，可以直接给用户看。 */
+/** 接口返回的错误。message 是后端按界面语言写好的说明，可以直接给用户看。 */
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -48,8 +55,8 @@ function describe(status: number, problem: Problem | undefined): string {
   // detail 是后端写好的一句完整的话。参数校验没通过时，它说的是哪一项不对、该怎么改，
   // 比如「标题太长了，最多 200 个字」（errors 里是每一项的明细，给程序看的，这里不用）
   if (problem?.detail) return problem.detail;
-  if (status >= 500) return "服务器出错了，请稍后再试";
-  return `请求失败（${status}）`;
+  if (status >= 500) return tr("服务器出错了，请稍后再试", "Server error. Please try again later.");
+  return isEn() ? `Request failed (${status})` : `请求失败（${status}）`;
 }
 
 /**
@@ -62,7 +69,7 @@ export async function unwrap<T>(
   try {
     result = await call;
   } catch {
-    throw new ApiError(0, "连不上服务器，请检查网络");
+    throw new ApiError(0, tr("连不上服务器，请检查网络", "Cannot connect to the server. Please check your network."));
   }
   const { data, error, response } = result;
   if (response.ok) return data as T;

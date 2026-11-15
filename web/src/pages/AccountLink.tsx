@@ -4,6 +4,8 @@ import type { FormEvent } from "react";
 import { api, errorMessage, unwrap } from "../api/client";
 import { AppLink } from "../components/AppLink";
 import { Button, Field, Input, Notice, Spinner } from "../components/ui";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { AuthLayout } from "./Auth";
 
 /**
@@ -16,6 +18,7 @@ import { AuthLayout } from "./Auth";
  * （只有 # 后面变了，浏览器不会重新加载页面），这里会整个重来，而不是还显示上一个链接的结果。
  */
 export function AccountLinkPage({ token }: { token: string }) {
+  useLang();
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
 
@@ -40,33 +43,50 @@ export function AccountLinkPage({ token }: { token: string }) {
 
   if (!token) {
     return (
-      <Problem message="这个链接不完整，缺少后面那一长串字符。请把管理员发来的链接完整地复制到地址栏里再打开。" />
+      <Problem
+        message={tr(
+          "这个链接不完整，缺少后面那一长串字符。请把管理员发来的链接完整地复制到地址栏里再打开。",
+          "This link is incomplete and missing the token at the end. Copy the full link from your admin and paste it into the address bar.",
+        )}
+      />
     );
   }
-  if (info.isPending) return <Spinner label="正在检查链接…" />;
+  if (info.isPending) return <Spinner label={tr("正在检查链接…", "Checking link…")} />;
   if (info.isError) return <Problem message={errorMessage(info.error)} />;
 
   const link = info.data;
   const invite = link.kind === "invite";
   return (
     <AuthLayout
-      title={invite ? "加入 zsmeet" : "设置新密码"}
+      title={invite ? tr("加入 zsmeet", "Join zsmeet") : tr("设置新密码", "Set new password")}
       subtitle={
         invite
-          ? `${link.invited_by || "管理员"}邀请你加入团队的会议纪要系统。填好下面两项就能开始用。`
-          : `给 ${link.name} 的账号设置一个新密码。保存后，这个账号在其他设备上的登录会全部退出，已登录的 App 也会退出。`
+          ? isEn()
+            ? `${link.invited_by || "Your admin"} invited you to join the team's meeting minutes workspace. Fill in the details below to get started.`
+            : `${link.invited_by || "管理员"}邀请你加入团队的会议纪要系统。填好下面两项就能开始用。`
+          : isEn()
+            ? `Set a new password for ${link.name}'s account. Saving will sign out all other browsers and signed-in desktop apps for this account.`
+            : `给 ${link.name} 的账号设置一个新密码。保存后，这个账号在其他设备上的登录会全部退出，已登录的 App 也会退出。`
       }
     >
       <form onSubmit={submit} className="flex flex-col gap-4">
-        <Field label="邮箱" htmlFor="link-email" hint={invite ? "以后用这个邮箱登录" : undefined}>
+        <Field label={tr("邮箱", "Email")} htmlFor="link-email" hint={invite ? tr("以后用这个邮箱登录", "Use this email to sign in later") : undefined}>
           <Input id="link-email" type="email" value={link.email} readOnly disabled autoComplete="username" />
         </Field>
         {invite && (
-          <Field label="姓名" htmlFor="link-name" hint="同事会在会议和纪要的修改记录里看到这个名字">
+          <Field
+            label={tr("姓名", "Name")}
+            htmlFor="link-name"
+            hint={tr("同事会在会议和纪要的修改记录里看到这个名字", "Teammates will see this name on meetings and minutes revisions")}
+          >
             <Input id="link-name" value={name} onChange={(e) => setName(e.target.value)} required maxLength={50} autoComplete="name" autoFocus />
           </Field>
         )}
-        <Field label={invite ? "设置密码" : "新密码"} htmlFor="link-password" hint="至少 8 位">
+        <Field
+          label={invite ? tr("设置密码", "Set password") : tr("新密码", "New password")}
+          htmlFor="link-password"
+          hint={tr("至少 8 位", "At least 8 characters")}
+        >
           <Input
             id="link-password"
             type="password"
@@ -80,7 +100,11 @@ export function AccountLinkPage({ token }: { token: string }) {
         </Field>
         {accept.isError && <Notice tone="bad">{errorMessage(accept.error)}</Notice>}
         <Button type="submit" variant="primary" disabled={accept.isPending || accept.isSuccess}>
-          {accept.isPending || accept.isSuccess ? "请稍候…" : invite ? "加入" : "保存并登录"}
+          {accept.isPending || accept.isSuccess
+            ? tr("请稍候…", "Please wait…")
+            : invite
+              ? tr("加入", "Join")
+              : tr("保存并登录", "Save & sign in")}
         </Button>
       </form>
     </AuthLayout>
@@ -89,12 +113,13 @@ export function AccountLinkPage({ token }: { token: string }) {
 
 /** 链接用不了时的说明页。 */
 function Problem({ message }: { message: string }) {
+  useLang();
   return (
-    <AuthLayout title="这个链接用不了">
+    <AuthLayout title={tr("这个链接用不了", "Link unavailable")}>
       <div className="flex flex-col gap-4">
         <Notice tone="warn">{message}</Notice>
         <AppLink to="/" className="text-center text-sm font-medium text-brand hover:text-brand-hover">
-          打开 zsmeet
+          {tr("打开 zsmeet", "Open zsmeet")}
         </AppLink>
       </div>
     </AuthLayout>

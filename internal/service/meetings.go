@@ -16,6 +16,7 @@ import (
 
 	"github.com/ZaneXo/zsmeet/internal/audio"
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/minutes"
 	"github.com/ZaneXo/zsmeet/internal/queue"
 	"github.com/ZaneXo/zsmeet/internal/search"
@@ -90,7 +91,11 @@ func (s *Service) CreateMeeting(ctx context.Context, user sqlc.User, in NewMeeti
 		return Meeting{}, err
 	}
 	if title == "" {
-		title = time.Now().Format("1月2日 15:04") + " 的会议"
+		if i18n.FromContext(ctx) == i18n.EN {
+			title = time.Now().Format("Jan 2 15:04") + " Meeting"
+		} else {
+			title = time.Now().Format("1月2日 15:04") + " 的会议"
+		}
 	}
 	// desktop 是桌面版录的电脑声音和麦克风；feishu 只由后台从飞书拉取时创建
 	if in.Source != "upload" && in.Source != "record" && in.Source != "desktop" {

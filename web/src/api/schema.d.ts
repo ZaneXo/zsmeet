@@ -3492,6 +3492,8 @@ export interface operations {
                 what?: "minutes" | "transcript";
                 /** @description Word、Markdown 或纯文本（纯文本只用于转写，纪要选它时给 Markdown） */
                 format?: "docx" | "md" | "txt";
+                /** @description 导出文件里元信息的语言（zh 或 en，不传时按请求头 Accept-Language） */
+                lang?: string;
             };
             header?: never;
             path: {

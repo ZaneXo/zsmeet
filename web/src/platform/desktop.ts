@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { Middleware } from "openapi-fetch";
 import { useSyncExternalStore } from "react";
 // 引用别的文件里的值要带 .ts 后缀：updater.test.ts 用 Node 直接跑 startDesktop，它不会自己补后缀
+import { acceptLanguageHeader, getLang, subscribeLang, tr } from "../i18n/lang.ts";
 import { noteResponse } from "./offline.ts";
 import { SSEParser } from "./sse.ts";
 import type { SSEEvent } from "./sse";
@@ -79,6 +80,10 @@ export function startDesktop(): Promise<void> {
     // 自动更新的消息最先订阅：App 打开 10 秒左右查到的新版本只推这一次，Tauri 不替还没订阅的界面留着，
     // 那时可能还没有显示更新的界面（还在「正在启动」、连服务器、出错的画面上）。见 updater.ts
     await startUpdater();
+    await invoke("set_language", { lang: getLang() }).catch(() => {});
+    subscribeLang(() => {
+      void invoke("set_language", { lang: getLang() }).catch(() => {});
+    });
     await listen<DesktopState>("zsmeet://state", (e) => setState(e.payload));
     await listen<string>("zsmeet://login-error", (e) => setLoginError(e.payload));
     setState(await invoke<DesktopState>("app_state"));
@@ -97,7 +102,7 @@ export function useLoginError(): string {
 }
 
 function current(): DesktopState {
-  if (!state) throw new Error("zsmeet 还在启动，请稍后再试");
+  if (!state) throw new Error(tr("zsmeet 还在启动，请稍后再试", "zsmeet is still starting. Please try again in a moment."));
   return state;
 }
 
@@ -109,17 +114,19 @@ export async function setServer(url: string) {
 
 /**
  * 正在退出登录或者切换服务器。两个都会先结束录音、再退出这台服务器上的登录，改的是同一份登录状态，
- * 一起做的话谁后做完界面就停在谁那里。所以一次只做一个：正在做的时候再要做直接报错（SIGNING_OUT）。
+ * 一起做的话谁后做完界面就停在谁那里。所以一次只做一个：正在做的时候再要做直接报错（signingOutMessage）。
  * 这时也不能「在浏览器里登录」：退出时 Rust 会丢掉正在等的登录，刚登录上的也会被一起退出。
  * 界面上这时把这些按钮都变灰：导航栏、账号页、登录页上的都看 useSigningOut。
  */
 let signingOut = false;
 
 /** 正在退出登录、切换服务器时，再点退出登录、切换服务器或者登录得到的原因。 */
-export const SIGNING_OUT = "正在退出登录，请稍等";
+export function signingOutMessage(): string {
+  return tr("正在退出登录，请稍等", "Signing out, please wait");
+}
 
 async function signOutWith(command: "logout" | "switch_server") {
-  if (signingOut) throw new Error(SIGNING_OUT);
+  if (signingOut) throw new Error(signingOutMessage());
   signingOut = true;
   try {
     setLoginError(""); // 顺带通知了界面：按钮变灰
@@ -141,7 +148,7 @@ export function switchServer(): Promise<void> {
 }
 
 export async function loginStart() {
-  if (signingOut) throw new Error(SIGNING_OUT);
+  if (signingOut) throw new Error(signingOutMessage());
   setLoginError("");
   setState(await invoke<DesktopState>("login_start"));
 }
@@ -181,7 +188,7 @@ export function proxyUrl(path: string): string {
 }
 
 export function proxyHeaders(): Record<string, string> {
-  return { "X-Zsmeet-App": current().secret };
+  return { "X-Zsmeet-App": current().secret, "Accept-Language": acceptLanguageHeader() };
 }
 
 /** <audio> 加不了请求头，录音的地址把 secret 放在查询参数 _s 里（本地代理只对录音接口认这个）。 */
@@ -197,6 +204,7 @@ export const apiMiddleware: Middleware = {
     const url = new URL(request.url);
     const headers = new Headers(request.headers);
     headers.set("X-Zsmeet-App", s.secret);
+    headers.set("Accept-Language", acceptLanguageHeader());
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     return new Request(s.proxy + url.pathname + url.search, {
       method: request.method,

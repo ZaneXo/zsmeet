@@ -94,11 +94,11 @@ type ChatFunc func(ctx context.Context, system, user string) (string, error)
 const defaultMaxChars = 20_000
 
 const rules = `要求：
-1. 只写转写里有依据的内容，不要编造。没提到的负责人、时间写“未定”。
+1. 只写转写里有依据的内容，不要编造。没提到的负责人、时间写“未定”（英文纪要写“TBD”）。
 2. 转写来自语音识别，会有错别字和同音字，请结合上下文理解。%s
-3. 说话人沿用转写里的称呼（如“说话人 1”）。能从对话里确定名字时，写成“说话人 1（张敏）”。
+3. 说话人沿用转写里的称呼（如“说话人 1”，英文纪要可写“Speaker 1”）。能从对话里确定名字时，写成“说话人 1（张敏）”或“Speaker 1 (Alice)”。
 4. 提到具体讨论内容时，在句首标注它在转写里的时间点，格式和转写一致，如 [12:34]。
-5. 用转写的主要语言书写。`
+5. 用转写的主要语言书写，各节标题也译成该语言（例如英文转写把模板里的“摘要/结论/讨论要点/待办”写成对应的英文标题）。`
 
 // markTag 标在转写某一段的末尾，表示开会的人在这个时间点标记了重点。
 func markTag(t float64) string {
@@ -489,8 +489,8 @@ func unwrapFence(s string) string {
 	return s
 }
 
-// 纪要里对说话人的称呼：「说话人 3」，后面可能跟着括号里的名字「说话人 3（张敏）」
-var speakerRef = regexp.MustCompile(`说话人 ?(\d+)(（[^）\n]{0,20}）|\([^)\n]{0,20}\))?`)
+// 纪要里对说话人的称呼：「说话人 3」「Speaker 3」，后面可能跟着括号里的名字「说话人 3（张敏）」「Speaker 3 (Alice)」
+var speakerRef = regexp.MustCompile(`(?:说话人|(?i:\bSpeaker)) ?(\d+)(?:（[^）\n]{0,20}）| ?\([^)\n]{0,20}\))?`)
 
 // RenameSpeakers 把纪要里对说话人的称呼换成新名字。before 是这次改之前各说话人的名字，
 // renamed 是这次改的：编号 → [以前的名字, 新名字]。

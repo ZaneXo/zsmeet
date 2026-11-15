@@ -1,9 +1,12 @@
 // 桌面版自动更新的界面逻辑：把 App（desktop/src-tauri）报的新版本、下载进度，加上录音的情况，换成界面上的话。
 // 不依赖 React 和 Tauri，方便单独测试（updateView.test.ts）。
 // 引用别的文件里的值要带 .ts 后缀：测试用 Node 直接跑，它不会自己补后缀
+import { isEn, tr } from "../i18n/lang.ts";
 import type { RecorderState, UploadStatus } from "./recorder";
 import { BUSY_LABEL, sentence } from "./recorderView.ts";
 import type { UpdateCheck, UpdateInfo, UpdateProgress } from "./updater";
+
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // ---- 整理 App 报过来的东西：Rust 那边和界面的版本对不上时，界面也不至于出错 ----
 
@@ -42,12 +45,17 @@ export function releaseDate(date: string | null): string {
   if (!date) return "";
   const d = new Date(date);
   if (Number.isNaN(d.getTime())) return "";
+  if (isEn()) return `${MONTHS_SHORT[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
 /** 新版本提示的标题，和下面一行小字（现在用的版本、发布日期，不知道的不写）。 */
 export function updateHeadline(info: UpdateInfo, current: string): { title: string; detail: string } {
   const date = releaseDate(info.date);
+  if (isEn()) {
+    const detail = [current ? `Current: ${current}` : "", date ? `Released ${date}` : ""].filter(Boolean).join(" · ");
+    return { title: `zsmeet ${info.version} is available`, detail };
+  }
   const detail = [current ? `现在用的是 ${current}` : "", date ? `${date}发布` : ""].filter(Boolean).join(" · ");
   return { title: `zsmeet 有新版本 ${info.version}`, detail };
 }
@@ -62,11 +70,13 @@ export function notesText(notes: string): string {
 
 /** 手动检查以后没有新版本。 */
 export function upToDateText(current: string): string {
+  if (isEn()) return current ? `zsmeet is up to date (${current}).` : "zsmeet is up to date.";
   return current ? `已经是最新版本（${current}）。` : "已经是最新版本。";
 }
 
-/** 没能检查更新。App 给的原因是完整的一句中文，已经说了怎么办（比如连不上 GitHub、检查一下网络），照着说，不再自己补。 */
+/** 没能检查更新。App 给的原因是完整的一句说明，照着说，不再自己补。 */
 export function checkFailedText(error: string): string {
+  if (isEn()) return error.trim() ? `Could not check for updates: ${sentence(error)}` : "Could not check for updates. Please try again later.";
   return error.trim() ? `没能检查更新：${sentence(error)}` : "没能检查更新，稍后再试一次。";
 }
 
@@ -75,14 +85,17 @@ export function checkFailedText(error: string): string {
 /** 还没传完的录音：更新要重启 zsmeet，传到一半会断开。 */
 const UNSENT: readonly UploadStatus[] = ["recording", "uploading", "waiting", "completing"];
 
-/**
- * 现在能不能更新。更新要重启 zsmeet：正在录音（包括正在开始、正在结束）、还有录音没传完时，App 不装
- * （update_install 会拒绝，条件和 desktop/src-tauri 的 RecorderState::update_blocker 一样），「更新并重启」按钮变灰，
- * 下面说明为什么。能更新时是空字符串。
- * 中断了、传不上去了的录音不算：它要等人来处理，不能一直挡着更新，重启以后它还在。
- * App 那边还是拒绝了的话（比如刚好开始了录音），照它给的原因说（DesktopUpdate.tsx）。
- */
 export function updateBlocker(state: RecorderState): string {
+  if (isEn()) {
+    if (state.status === "stopping") return "Recording is stopping. Updating restarts zsmeet — wait until all chunks finish uploading.";
+    if (state.status !== "idle") return `${BUSY_LABEL[state.status]}. Updating restarts zsmeet and would interrupt recording — stop recording and wait for upload to finish first.`;
+    const unsent = state.uploads.filter((u) => UNSENT.includes(u.status)).length;
+    if (unsent === 0) return "";
+    const waiting = state.uploads.filter((u) => u.status === "waiting").length;
+    if (waiting === 0) return `${unsent} recording${unsent === 1 ? " is" : "s are"} still uploading. Wait until upload finishes before updating.`;
+    const stuck = waiting === unsent ? `${unsent} recording${unsent === 1 ? " is" : "s are"} waiting to upload` : `${unsent} recordings pending (${waiting} paused)`;
+    return `${stuck} and retrying automatically. Check your network and update once uploads finish.`;
+  }
   if (state.status === "stopping") return "录音正在结束。更新要重启 zsmeet，等录好的都传完以后再更新。";
   if (state.status !== "idle") return `${BUSY_LABEL[state.status]}。更新要重启 zsmeet，会打断录音：结束录音、等录好的都传完以后再更新。`;
   const unsent = state.uploads.filter((u) => UNSENT.includes(u.status)).length;
@@ -105,35 +118,66 @@ export function size(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/**
- * 更新时的进度：一句话，加上进度条（0 到 1；不知道一共多大时是 null，只说下载了多少）。
- * 没在更新（idle、failed）时是 null。
- */
 export function installView(phase: InstallPhase, progress: UpdateProgress | null): { text: string; value: number | null } | null {
-  if (phase === "installed") return { text: "新版本装好了，zsmeet 正在重新打开。没有自己打开的话，退出 zsmeet（⌘Q）再打开。", value: 1 };
+  if (phase === "installed") {
+    return {
+      text: tr(
+        "新版本装好了，zsmeet 正在重新打开。没有自己打开的话，退出 zsmeet（⌘Q）再打开。",
+        "Update installed — zsmeet is relaunching. If it does not reopen automatically, quit (⌘Q) and open zsmeet again.",
+      ),
+      value: 1,
+    };
+  }
   if (phase !== "installing") return null;
-  if (!progress) return { text: "正在准备下载新版本…", value: null };
-  if (progress.total === null) return { text: `正在下载新版本：已下载 ${size(progress.downloaded)}`, value: null };
-  if (progress.downloaded >= progress.total) return { text: "下载好了，正在核对和安装，装好以后 zsmeet 会自动重新打开…", value: 1 };
-  return { text: `正在下载新版本：${size(progress.downloaded)} / ${size(progress.total)}`, value: progress.downloaded / progress.total };
+  if (!progress) return { text: tr("正在准备下载新版本…", "Preparing update download…"), value: null };
+  if (progress.total === null) {
+    return { text: isEn() ? `Downloading update: ${size(progress.downloaded)}` : `正在下载新版本：已下载 ${size(progress.downloaded)}`, value: null };
+  }
+  if (progress.downloaded >= progress.total) {
+    return {
+      text: tr(
+        "下载好了，正在核对和安装，装好以后 zsmeet 会自动重新打开…",
+        "Download complete — verifying and installing. zsmeet will relaunch automatically…",
+      ),
+      value: 1,
+    };
+  }
+  return {
+    text: isEn()
+      ? `Downloading update: ${size(progress.downloaded)} / ${size(progress.total)}`
+      : `正在下载新版本：${size(progress.downloaded)} / ${size(progress.total)}`,
+    value: progress.downloaded / progress.total,
+  };
 }
 
-/**
- * 正在更新时录音页上的说明。录音优先：还在下载的时候照样能开始录音，App 下载完看到在录音就不装了
- * （desktop/src-tauri 的 update.rs）；下载完、在安装、装好了等重新打开的时候，App 不让开始录音（会被重启打断），
- * 这时开始录音的按钮也变灰（blocks）。没在更新时是 null。
- */
 export function recordUpdateNote(phase: InstallPhase, progress: UpdateProgress | null): { text: string; blocks: boolean } | null {
-  if (phase === "installed") return { text: "zsmeet 的新版本装好了，正在重新打开，打开以后再开始录音。", blocks: true };
+  if (phase === "installed") {
+    return {
+      text: tr("zsmeet 的新版本装好了，正在重新打开，打开以后再开始录音。", "Update installed — zsmeet is relaunching. Start recording after it reopens."),
+      blocks: true,
+    };
+  }
   if (phase !== "installing") return null;
   if (progress?.total != null && progress.downloaded >= progress.total) {
-    return { text: "正在安装 zsmeet 的新版本，装好以后会自动重新打开，请稍等一下再开始录音。", blocks: true };
+    return {
+      text: tr(
+        "正在安装 zsmeet 的新版本，装好以后会自动重新打开，请稍等一下再开始录音。",
+        "Installing a new version of zsmeet — it will relaunch automatically. Please wait before starting a recording.",
+      ),
+      blocks: true,
+    };
   }
-  return { text: "正在下载 zsmeet 的新版本。现在开始录音的话，这次先不装，录完、传完以后再点「更新并重启」。", blocks: false };
+  return {
+    text: tr(
+      "正在下载 zsmeet 的新版本。现在开始录音的话，这次先不装，录完、传完以后再点「更新并重启」。",
+      "Downloading a zsmeet update. If you start recording now, installation will wait until you finish and click \"Update & Relaunch\".",
+    ),
+    blocks: false,
+  };
 }
 
-/** 没装上。App 给的原因（下载失败、签名对不上、正在录音……）是完整的一句中文，照着说。 */
 export function installFailedText(error: string): string {
+  if (isEn()) return error.trim() ? `Update failed: ${sentence(error)}` : "Update failed. Please try again later.";
   return error.trim() ? `没能更新：${sentence(error)}` : "没能更新，稍后再试一次。";
 }
 

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import type { Segment } from "../api/client";
 import { Input, Spinner } from "../components/ui";
+import { tr, useLang } from "../i18n/react";
 import { clock, needsSpace, speakerColor, speakerName } from "../lib/format";
 
 /** 段落里相邻两句隔得超过这么多秒，就另起一段 */
@@ -62,6 +63,7 @@ export function TranscriptPane({
   /** 给说话人起的名字 */
   names?: Record<string, string>;
 }) {
+  useLang();
   const [q, setQ] = useState("");
   const keyword = q.trim();
   const refs = useRef(new Map<number, HTMLElement>());
@@ -72,9 +74,13 @@ export function TranscriptPane({
     if (focused >= 0) refs.current.get(focused)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [focused, focusTick, segments.length]);
 
-  if (loading) return <Spinner label="正在加载转写…" />;
+  if (loading) return <Spinner label={tr("正在加载转写…", "Loading transcript…")} />;
   if (segments.length === 0) {
-    return <p className="px-6 py-10 text-center text-sm text-muted">还没有转写。识别完成后会出现在这里。</p>;
+    return (
+      <p className="px-6 py-10 text-center text-sm text-muted">
+        {tr("还没有转写。识别完成后会出现在这里。", "No transcript yet. It will appear here once recognition completes.")}
+      </p>
+    );
   }
 
   const speakers = new Set(segments.map((s) => s.speaker).filter((s) => s >= 0)).size;
@@ -84,7 +90,7 @@ export function TranscriptPane({
     const className = `rounded-md px-0.5 transition-colors ${active ? "bg-brand-tint" : index === focused ? "bg-[#fff3c4]" : ""} ${
       canSeek ? "cursor-pointer hover:bg-canvas" : ""
     } ${seg.orig ? "underline decoration-line decoration-dotted underline-offset-4" : ""}`;
-    const original = seg.orig ? `识别原文：${seg.orig}` : undefined;
+    const original = seg.orig ? tr(`识别原文：${seg.orig}`, `Original recognition: ${seg.orig}`) : undefined;
     const seek = () => onSeek(seg.start);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -100,7 +106,7 @@ export function TranscriptPane({
           else refs.current.delete(index);
         }}
         className={className}
-        title={canSeek ? [`从 ${clock(seg.start)} 开始播放`, original].filter(Boolean).join("\n") : original}
+        title={canSeek ? [tr(`从 ${clock(seg.start)} 开始播放`, `Play from ${clock(seg.start)}`), original].filter(Boolean).join("\n") : original}
         {...(canSeek ? { role: "button", tabIndex: 0, onClick: seek, onKeyDown: onKey } : {})}
       >
         <Highlight text={seg.text} keyword={keyword} />
@@ -113,16 +119,23 @@ export function TranscriptPane({
   return (
     <div className="flex flex-col gap-2 px-4 pb-6 pt-4">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-2">
-        <Input type="search" className="max-w-xs" placeholder="在转写里搜索" aria-label="在转写里搜索" value={q} onChange={(e) => setQ(e.target.value)} />
+        <Input
+          type="search"
+          className="max-w-xs"
+          placeholder={tr("在转写里搜索", "Search transcript")}
+          aria-label={tr("在转写里搜索", "Search transcript")}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
         <span className="text-xs text-muted">
-          {speakers > 0 ? `识别出 ${speakers} 位说话人。` : ""}
-          {canSeek ? "点任意一句从那里开始播放。" : ""}
+          {speakers > 0 ? tr(`识别出 ${speakers} 位说话人。`, `${speakers} speaker${speakers === 1 ? "" : "s"} detected. `) : ""}
+          {canSeek ? tr("点任意一句从那里开始播放。", "Click any sentence to play from there.") : ""}
         </span>
       </div>
 
       {keyword ? (
         shown.length === 0 ? (
-          <p className="px-2 py-6 text-sm text-muted">转写里没有「{keyword}」。</p>
+          <p className="px-2 py-6 text-sm text-muted">{tr(`转写里没有「${keyword}」。`, `No matches for “${keyword}” in transcript.`)}</p>
         ) : (
           shown.map(({ seg, index }) => (
             <Row key={index} speaker={seg.speaker} start={seg.start} names={names}>
@@ -151,6 +164,7 @@ export function TranscriptPane({
 }
 
 function Row({ speaker, start, names, children }: { speaker: number; start: number; names?: Record<string, string>; children: ReactNode }) {
+  useLang();
   return (
     <div className="flex gap-3 px-3 py-2.5">
       <span className="w-12 shrink-0 pt-0.5 text-xs tabular-nums text-muted">{clock(start)}</span>

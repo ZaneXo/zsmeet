@@ -3,6 +3,8 @@
 //   /app/authorize?client=desktop&device=<电脑名>&challenge=<S256(code_verifier)>&state=<state>
 // 用户点「允许」后网页拿到一次性的授权码，跳到 zsmeet://auth?code=…&state=…；点「取消」跳到 zsmeet://auth?error=denied&state=…
 
+import { isEn, tr } from "../i18n/lang.ts";
+
 /** 授权页的地址。 */
 export const APP_AUTHORIZE_PATH = "/app/authorize";
 
@@ -10,7 +12,11 @@ export const APP_AUTHORIZE_PATH = "/app/authorize";
 const APP_CALLBACK = "zsmeet://auth";
 
 /** 认识的 App 和它在页面上的名字。 */
-export const APP_NAMES = { desktop: "zsmeet 桌面版" } as const;
+export const APP_NAMES = {
+  get desktop() {
+    return tr("zsmeet 桌面版", "zsmeet Desktop");
+  },
+};
 export type AppClient = keyof typeof APP_NAMES;
 
 export type AppAuthorizeRequest = { client: AppClient; device: string; challenge: string; state: string };
@@ -23,25 +29,44 @@ const MAX_STATE = 512;
 // 控制字符（换行之类）：设备名里不该有
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
-const RETRY = "请回到 zsmeet 桌面版，重新点「在浏览器里登录」，不要手动改链接。";
+const RETRY_ZH = "请回到 zsmeet 桌面版，重新点「在浏览器里登录」，不要手动改链接。";
+const RETRY_EN = "Return to zsmeet Desktop and click \"Sign in with browser\" again without editing the link.";
 
 /** 读出地址里的参数并检查。不对时返回给人看的说明。 */
 export function parseAppAuthorize(params: URLSearchParams): { request: AppAuthorizeRequest } | { error: string } {
+  const en = isEn();
+  const retry = en ? RETRY_EN : RETRY_ZH;
   const client = params.get("client") ?? "";
   if (!Object.hasOwn(APP_NAMES, client)) {
-    return { error: client ? `这个登录链接来自不认识的 App（${client}），没法继续。${RETRY}` : `这个登录链接不完整（没有说明是哪个 App）。${RETRY}` };
+    return {
+      error: en
+        ? client
+          ? `This sign-in link comes from an unknown app (${client}). ${retry}`
+          : `This sign-in link is incomplete (missing app client). ${retry}`
+        : client
+          ? `这个登录链接来自不认识的 App（${client}），没法继续。${retry}`
+          : `这个登录链接不完整（没有说明是哪个 App）。${retry}`,
+    };
   }
   const device = (params.get("device") ?? "").trim();
   if (!device || [...device].length > MAX_DEVICE || CONTROL_RE.test(device)) {
-    return { error: `这个登录链接里的电脑名不对（不能为空，最长 ${MAX_DEVICE} 个字）。${RETRY}` };
+    return {
+      error: en
+        ? `Invalid device name in sign-in link (must be 1–${MAX_DEVICE} characters). ${retry}`
+        : `这个登录链接里的电脑名不对（不能为空，最长 ${MAX_DEVICE} 个字）。${retry}`,
+    };
   }
   const challenge = params.get("challenge") ?? "";
   if (!CHALLENGE_RE.test(challenge)) {
-    return { error: `这个登录链接不完整（校验码不对）。${RETRY}` };
+    return {
+      error: en ? `Incomplete sign-in link (invalid PKCE challenge). ${retry}` : `这个登录链接不完整（校验码不对）。${retry}`,
+    };
   }
   const state = params.get("state") ?? "";
   if (!state || state.length > MAX_STATE) {
-    return { error: `这个登录链接不完整（缺少 state）。${RETRY}` };
+    return {
+      error: en ? `Incomplete sign-in link (missing state). ${retry}` : `这个登录链接不完整（缺少 state）。${retry}`,
+    };
   }
   return { request: { client: client as AppClient, device, challenge, state } };
 }

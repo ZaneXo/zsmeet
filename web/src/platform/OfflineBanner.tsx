@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { queryClient } from "../api/client";
 import { Button } from "../components/ui";
+import { tr, useLang } from "../i18n/react";
 import { useOffline } from "./offline";
 
 /** 连不上服务器时每隔多久试一次。 */
@@ -11,6 +12,7 @@ const PROBE_MS = 15_000;
  * 离线期间定时重新取一次状态，连上了就把所有数据重新取一遍，提示条自己消失。
  */
 export function OfflineBanner() {
+  useLang();
   const offline = useOffline();
   const was = useRef(offline);
 
@@ -25,9 +27,9 @@ export function OfflineBanner() {
   if (!offline) return null;
   return (
     <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-warn-tint px-4 py-3 text-sm leading-relaxed text-warn">
-      <span>离线，显示的是上次同步的内容。连上服务器以后会自动更新。</span>
+      <span>{tr("离线，显示的是上次同步的内容。连上服务器以后会自动更新。", "Offline — showing last synced content. Will update automatically once reconnected.")}</span>
       <Button size="sm" onClick={() => void queryClient.invalidateQueries()}>
-        重新连接
+        {tr("重新连接", "Reconnect")}
       </Button>
     </div>
   );

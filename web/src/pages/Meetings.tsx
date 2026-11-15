@@ -5,6 +5,8 @@ import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Meeting, MeetingListItem, SearchHit } from "../api/client";
 import { Button, buttonClass, Chip, Icon, Input, Notice, Spinner } from "../components/ui";
 import type { Tone } from "../components/ui";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { clock, dateTime, dayGroup, duration, snippet, SOURCE_LABEL, speakerName, STAGE_LABEL } from "../lib/format";
 import { jumpParam } from "../lib/jump";
 import { waitingForRecording } from "../lib/meetingStatus";
@@ -21,26 +23,37 @@ export function meetingChip(m: Meeting): { tone: Tone; text: string } {
   switch (m.status) {
     case "uploading":
       // 边录边传的会议：最近还有分片传上来就算在录，录音的网页关掉了、电脑断网了、暂停着就不算（和会议页面上一样）
-      if (m.source === "record") return chunksFlowing(m, Date.now()) ? { tone: "info", text: "录音中" } : { tone: "mute", text: "录音未传完" };
+      if (m.source === "record") {
+        return chunksFlowing(m, Date.now())
+          ? { tone: "info", text: tr("录音中", "Recording") }
+          : { tone: "mute", text: tr("录音未传完", "Recording incomplete") };
+      }
       // 桌面版录的：录音从那台电脑传上来，断网时联网后接着传
-      if (m.source === "desktop") return chunksFlowing(m, Date.now()) ? { tone: "info", text: "电脑录音中" } : { tone: "mute", text: "等电脑传完录音" };
-      return { tone: "mute", text: "上传未完成" };
+      if (m.source === "desktop") {
+        return chunksFlowing(m, Date.now())
+          ? { tone: "info", text: tr("电脑录音中", "Recording on Mac") }
+          : { tone: "mute", text: tr("等电脑传完录音", "Waiting for Mac upload") };
+      }
+      return { tone: "mute", text: tr("上传未完成", "Upload incomplete") };
     case "queued":
-      return { tone: "mute", text: "排队中" };
+      return { tone: "mute", text: tr("排队中", "Queued") };
     case "processing": {
       const pct = m.progress > 0 && m.progress < 1 ? ` ${Math.round(m.progress * 100)}%` : "";
       return { tone: "info", text: `${STAGE_LABEL[m.stage]}${pct}` };
     }
     case "failed":
-      return { tone: "bad", text: "处理失败" };
+      return { tone: "bad", text: tr("处理失败", "Failed") };
     case "done":
-      return m.minutes_version > 0 ? { tone: "ok", text: "已完成" } : { tone: "warn", text: "已转写，还没有纪要" };
+      return m.minutes_version > 0
+        ? { tone: "ok", text: tr("已完成", "Completed") }
+        : { tone: "warn", text: tr("已转写，还没有纪要", "Transcribed, no minutes yet") };
   }
 }
 
 const isActive = (m: Meeting) => m.status === "queued" || m.status === "processing";
 
 export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
+  useLang();
   const [input, setInput] = useState("");
   // 「问会议」的面板开着没有
   const [asking, setAsking] = useState(false);
@@ -93,10 +106,11 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
     <div className="mx-auto flex max-w-5xl flex-col gap-5">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1.5">
-          <h1 className="text-[26px] font-bold">会议</h1>
+          <h1 className="text-[26px] font-bold">{tr("会议", "Meetings")}</h1>
           <p className="text-sm text-muted">
-            {isDesktop ? "录下电脑里会议软件的声音和麦克风" : "在网页上录音"}
-            ，或者上传录音文件，自动转写、区分说话人并生成纪要。会议默认团队里的人都能看到，创建者可以改成只给指定的人看。
+            {isEn()
+              ? `${isDesktop ? "Record computer audio and your microphone" : "Record in your browser"} or upload audio files to automatically transcribe, diarize speakers, and generate minutes. Meetings are shared with your team by default; creators can restrict access.`
+              : `${isDesktop ? "录下电脑里会议软件的声音和麦克风" : "在网页上录音"}，或者上传录音文件，自动转写、区分说话人并生成纪要。会议默认团队里的人都能看到，创建者可以改成只给指定的人看。`}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
@@ -104,30 +118,42 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
             <span className="pointer-events-none absolute left-3 top-[11px] text-muted">
               <Icon name="search" />
             </span>
-            <Input type="search" className="pl-10" placeholder="搜索标题、纪要、转写原文" aria-label="搜索会议" value={input} onChange={(e) => setInput(e.target.value)} maxLength={100} />
+            <Input
+              type="search"
+              className="pl-10"
+              placeholder={tr("搜索标题、纪要、转写原文", "Search titles, minutes, transcripts")}
+              aria-label={tr("搜索会议", "Search meetings")}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              maxLength={100}
+            />
           </label>
           {llmReady && (
-            <Button aria-expanded={asking} onClick={() => setAsking(!asking)} title="用一句话提问，大模型根据会议记录回答并给出出处">
+            <Button
+              aria-expanded={asking}
+              onClick={() => setAsking(!asking)}
+              title={tr("用一句话提问，大模型根据会议记录回答并给出出处", "Ask a question in plain language; the LLM answers with citations from your meetings")}
+            >
               <Icon name="ask" />
-              问会议
+              {tr("问会议", "Ask meetings")}
             </Button>
           )}
           <AppLink to="/record" className={buttonClass("primary")}>
             <Icon name="mic" />
-            开始录音
+            {tr("开始录音", "Record")}
           </AppLink>
           <Button onClick={() => setUploading(true)}>
             <Icon name="upload" />
-            上传录音
+            {tr("上传录音", "Upload")}
           </Button>
         </div>
       </div>
 
       {llmReady && asking && (
-        <section aria-label="问会议" className="flex flex-col gap-3 rounded-2xl border border-line bg-white px-5 py-4">
+        <section aria-label={tr("问会议", "Ask meetings")} className="flex flex-col gap-3 rounded-2xl border border-line bg-white px-5 py-4">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-base font-semibold">问会议</h2>
-            <Button variant="ghost" size="sm" aria-label="收起" onClick={() => setAsking(false)}>
+            <h2 className="text-base font-semibold">{tr("问会议", "Ask meetings")}</h2>
+            <Button variant="ghost" size="sm" aria-label={tr("收起", "Collapse")} onClick={() => setAsking(false)}>
               <Icon name="close" />
             </Button>
           </div>
@@ -138,12 +164,12 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
       <div role="tablist" className="flex border-b border-line">
         {(
           [
-            [false, "全部"],
-            [true, "我创建的"],
+            [false, tr("全部", "All")],
+            [true, tr("我创建的", "Created by me")],
           ] as const
         ).map(([value, label]) => (
           <button
-            key={label}
+            key={String(value)}
             type="button"
             role="tab"
             aria-selected={!trash && mine === value}
@@ -167,7 +193,7 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
             trash ? "border-ink font-semibold text-ink" : "border-transparent text-muted hover:text-ink"
           }`}
         >
-          回收站
+          {tr("回收站", "Trash")}
         </button>
       </div>
 
@@ -178,15 +204,25 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
 
       {retry.isError && <Notice tone="bad">{errorMessage(retry.error)}</Notice>}
       {meetings.isError && <Notice tone="bad">{errorMessage(meetings.error)}</Notice>}
-      {meetings.isPending && <Spinner label="正在加载会议…" />}
+      {meetings.isPending && <Spinner label={tr("正在加载会议…", "Loading meetings…")} />}
 
       {meetings.isSuccess && q && (
         <p className="text-[13px] leading-relaxed text-muted">
-          在{mine ? "你创建的会议的" : ""}标题、纪要和转写原文里找到 {items.length} 场会议。
-          {expanded.length > 0 && <>同时搜了{expanded.map((e) => `「${e}」`).join("")}：会议的术语表里记着它们是同一个词的不同写法（转写有时会听错）。</>}
-          {items.some((m) => m.hits.length > 0) && "点下面的句子，从会上说这句话的地方开始听。"}
-          {items.some((m) => m.hits.some((h) => h.fuzzy)) && "标着「近似」的是错了一个字的写法，可能是转写听错了，也可能是别的词。"}
-          {meetings.data?.partial && "「错一个字」的近似匹配只查了最近的一部分会议。"}
+          {isEn()
+            ? `Found ${items.length} meeting${items.length === 1 ? "" : "s"} matching titles, minutes, and transcripts${mine ? " in meetings created by you" : ""}. `
+            : `在${mine ? "你创建的会议的" : ""}标题、纪要和转写原文里找到 ${items.length} 场会议。`}
+          {expanded.length > 0 &&
+            (isEn() ? (
+              <>Also searched {expanded.map((e) => `"${e}"`).join(", ")} from meeting glossaries. </>
+            ) : (
+              <>同时搜了{expanded.map((e) => `「${e}」`).join("")}：会议的术语表里记着它们是同一个词的不同写法（转写有时会听错）。</>
+            ))}
+          {items.some((m) => m.hits.length > 0) &&
+            tr("点下面的句子，从会上说这句话的地方开始听。", "Click a snippet below to jump directly to that moment in the recording. ")}
+          {items.some((m) => m.hits.some((h) => h.fuzzy)) &&
+            tr("标着「近似」的是错了一个字的写法，可能是转写听错了，也可能是别的词。", "Matches tagged \"Fuzzy\" differ by one character to catch transcription typos. ")}
+          {meetings.data?.partial &&
+            tr("「错一个字」的近似匹配只查了最近的一部分会议。", "Fuzzy matching checked only the most recent meetings.")}
         </p>
       )}
 
@@ -194,24 +230,37 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
         <div className="rounded-2xl border border-dashed border-line-strong bg-white px-5 py-14 text-center text-sm leading-relaxed text-muted">
           {q && mine ? (
             <div className="flex flex-col items-center gap-4">
-              <span>你创建的会议里没有找到包含「{q}」的。别人创建的会议在「全部」里。</span>
-              <Button onClick={() => setMine(false)}>在全部会议里找</Button>
+              <span>
+                {isEn()
+                  ? `No meetings created by you match "${q}". Meetings created by teammates appear under "All".`
+                  : `你创建的会议里没有找到包含「${q}」的。别人创建的会议在「全部」里。`}
+              </span>
+              <Button onClick={() => setMine(false)}>{tr("在全部会议里找", "Search all meetings")}</Button>
             </div>
           ) : q ? (
-            <>没有找到包含「{q}」的会议。试试换个关键词，或者搜会上有人说过的原话。</>
+            <>
+              {isEn()
+                ? `No meetings found matching "${q}". Try another keyword or search for an exact phrase spoken in the meeting.`
+                : `没有找到包含「${q}」的会议。试试换个关键词，或者搜会上有人说过的原话。`}
+            </>
           ) : mine ? (
-            <>你还没有创建过会议。别人创建的会议在「全部」里。</>
+            <>{tr("你还没有创建过会议。别人创建的会议在「全部」里。", "You haven't created any meetings yet. Teammates' meetings appear under \"All\".")}</>
           ) : (
             <div className="flex flex-col items-center gap-4">
-              <span>还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。</span>
+              <span>
+                {tr(
+                  "还没有会议。开一场会录下来，或者上传一段会议录音，几分钟后就能看到转写和纪要。",
+                  "No meetings yet. Record a live meeting or upload an audio file to get transcripts and minutes in minutes.",
+                )}
+              </span>
               <span className="flex flex-wrap justify-center gap-2.5">
                 <AppLink to="/record" className={buttonClass("primary")}>
                   <Icon name="mic" />
-                  开始录音
+                  {tr("开始录音", "Record")}
                 </AppLink>
                 <Button onClick={() => setUploading(true)}>
                   <Icon name="upload" />
-                  上传录音
+                  {tr("上传录音", "Upload")}
                 </Button>
               </span>
             </div>
@@ -242,7 +291,7 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
                   {m.status === "failed" && m.can_edit && (
                     <Button size="sm" disabled={retry.isPending} onClick={() => retry.mutate(m.id)}>
                       <Icon name="retry" size={15} />
-                      重试
+                      {tr("重试", "Retry")}
                     </Button>
                   )}
                 </div>
@@ -263,6 +312,7 @@ export function MeetingsPage({ llmReady }: { llmReady: boolean }) {
 
 /** 搜索时一场会议里命中的句子：时间、谁说的、那句话（命中的字高亮）。点了从那附近开始播放。 */
 function Hits({ meetingId, hits, names }: { meetingId: string; hits: SearchHit[]; names: Record<string, string> }) {
+  useLang();
   return (
     <ul className="-mx-2 flex basis-full flex-col gap-0.5 border-t border-line pt-2.5">
       {hits.map((h, i) => {
@@ -276,7 +326,7 @@ function Hits({ meetingId, hits, names }: { meetingId: string; hits: SearchHit[]
               className="flex gap-3 rounded-lg px-2 py-1.5 text-[13px] leading-relaxed hover:bg-canvas"
             >
               <span className="w-11 shrink-0 tabular-nums text-brand">{h.start >= 0 ? clock(h.start) : ""}</span>
-              <span className="w-14 shrink-0 truncate text-muted">{h.source === "minutes" ? "纪要" : speakerName(h.speaker, names)}</span>
+              <span className="w-16 shrink-0 truncate text-muted">{h.source === "minutes" ? tr("纪要", "Minutes") : speakerName(h.speaker, names)}</span>
               <span className="min-w-0 text-ink-2">
                 {parts.map((p, j) =>
                   // 片段的顺序固定，用下标当 key 没问题
@@ -288,7 +338,7 @@ function Hits({ meetingId, hits, names }: { meetingId: string; hits: SearchHit[]
                     <span key={j}>{p.text}</span>
                   ),
                 )}
-                {h.fuzzy && <span className="ml-1.5 rounded bg-canvas px-1 py-px text-[11px] text-muted">近似</span>}
+                {h.fuzzy && <span className="ml-1.5 rounded bg-canvas px-1 py-px text-[11px] text-muted">{tr("近似", "Fuzzy")}</span>}
               </span>
             </AppLink>
           </li>

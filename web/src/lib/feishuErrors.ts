@@ -3,6 +3,8 @@
 // 地址里只放代号、不放文字：那样谁都能编一个带着任意说明的 zsmeet 链接发给别人。
 // 这里不依赖 React，方便单独测试（feishuErrors.test.ts）。
 
+import { isEn } from "../i18n/lang.ts";
+
 /** 在哪个页面上显示：登录页，还是账号页上的「关联飞书」。说明里让人重新点的按钮不一样 */
 type Where = "login" | "account";
 
@@ -44,8 +46,50 @@ const MESSAGES: Record<string, (action: string) => string> = {
   retry: (action) => `这次飞书授权已经用过或者超时了，请重新点「${action}」。`,
 };
 
+const MESSAGES_EN: Record<string, (action: string) => string> = {
+  unavailable: () => "Feishu sign-in is currently unavailable: it is disabled or not yet configured by an admin. Sign in with email and password, or contact an admin.",
+  expired: (action) =>
+    `This Feishu sign-in session expired (over 10 minutes or opened in a different browser). Click "${action}" again. ` +
+    "If this keeps happening, open zsmeet using the public URL configured in Feishu settings.",
+  signed_out: () => "Your session expired. Sign in again, then go to Settings → Account and click \"Link Feishu\".",
+  link_password: () => "Identity verification is required to link Feishu: enter your current password under Feishu Account in Settings → Account, then click \"Link Feishu\".",
+  password_changed: () =>
+    "Your password was changed after starting the link flow, invalidating this request (changing your password also unlinks Feishu). " +
+    "Enter your new password in Settings → Account and click \"Link Feishu\" again.",
+  denied: (action) => `You declined authorization in Feishu. Click "${action}" again and approve in Feishu if needed.`,
+  account_disabled: () => "This account has been deactivated. Please contact an admin.",
+  user_linked_other: () =>
+    "The zsmeet account matching your work email is already linked to another Feishu account. If that was your old Feishu account, sign in with email and password, " +
+    "unlink it in Settings → Account, and click \"Link Feishu\"; otherwise ask an admin to unlink it in Settings → Members.",
+  invite_unusable: () => "The invitation sent to your work email has expired. Ask an admin to regenerate an invite link in Settings → Members, then sign in with Feishu.",
+  contact_email_member: () =>
+    "Your email in Feishu Contacts matches an existing zsmeet account, but that email is unverified in Feishu and cannot sign in directly. " +
+    "Sign in with email and password first, then click \"Link Feishu\" in Settings → Account.",
+  contact_email_invite: () =>
+    "An admin has invited the email in your Feishu Contacts. Open the invite link from your admin to create your account, " +
+    "then link Feishu in Settings → Account.",
+  not_member: () =>
+    "Your Feishu account is not a zsmeet member yet. Ask an admin to invite you in Settings → Members, then link Feishu in Settings → Account after creating your account.",
+  no_email: () =>
+    "Feishu did not provide your email address, so an account could not be created automatically. Ask an admin to enable contact:user.employee:readonly and contact:user.email:readonly permissions in the Feishu developer console, or invite you in Settings → Members.",
+  linked_elsewhere: () =>
+    "This Feishu account is already linked to another zsmeet account. Sign in to that account and unlink it in Settings → Account, or ask an admin to unlink it in Settings → Members.",
+  already_linked: () => "Your account is already linked to another Feishu account. Unlink it first before linking a new one.",
+  busy: (action) => `The previous Feishu request is still being processed. Click "${action}" again.`,
+  app_credentials: () => "Invalid Feishu App ID or App Secret. Ask an admin to check Settings → Feishu.",
+  redirect_mismatch: () => "The redirect URL configured in the Feishu app does not match zsmeet's public URL. Ask an admin to update it as shown in Settings → Feishu.",
+  out_of_scope: () => "You are outside the availability scope of this Feishu app. Ask an admin to add you in the Feishu admin console.",
+  retry: (action) => `This Feishu authorization code was already used or timed out. Click "${action}" again.`,
+};
+
 /** 把地址里的错误代号换成说明。不认识的代号（比如服务器出错）给一句笼统的。 */
 export function feishuErrorText(code: string, where: Where): string {
+  if (isEn()) {
+    const action = where === "login" ? "Sign in with Feishu" : "Link Feishu";
+    const message = Object.hasOwn(MESSAGES_EN, code) ? MESSAGES_EN[code] : undefined;
+    if (message) return message(action);
+    return `${action} failed. Please try again later, or contact an admin if the problem persists.`;
+  }
   const action = where === "login" ? "用飞书登录" : "关联飞书";
   // 代号来自地址栏，谁都能改：只认上面列出的，__proto__、toString 这类对象自带的属性不算
   const message = Object.hasOwn(MESSAGES, code) ? MESSAGES[code] : undefined;

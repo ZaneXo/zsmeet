@@ -12,6 +12,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
+use crate::i18n::{self, is_en, tr};
+
 /// App 需要的最低接口版本（`/api/status` 里的 `api`）。
 pub const MIN_API: i64 = 1;
 
@@ -26,7 +28,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub fn candidates(input: &str) -> Result<Vec<String>, String> {
     let input = input.trim();
     if input.is_empty() {
-        return Err("请填写服务器地址，比如 https://meet.example.com".into());
+        return Err(tr(
+            "请填写服务器地址，比如 https://meet.example.com",
+            "Please enter your server URL, e.g. https://meet.example.com",
+        )
+        .into());
     }
     let has_scheme = input.contains("://");
     let raw: Vec<String> = if has_scheme {
@@ -38,17 +44,30 @@ pub fn candidates(input: &str) -> Result<Vec<String>, String> {
 }
 
 fn normalize(raw: &str) -> Result<String, String> {
-    let bad =
-        || format!("「{raw}」不是有效的服务器地址，请填写像 https://meet.example.com 这样的地址");
+    let bad = || {
+        if is_en() {
+            format!("\"{raw}\" is not a valid server URL. Enter an address like https://meet.example.com")
+        } else {
+            format!("「{raw}」不是有效的服务器地址，请填写像 https://meet.example.com 这样的地址")
+        }
+    };
     let mut url = Url::parse(raw).map_err(|_| bad())?;
     if url.scheme() != "http" && url.scheme() != "https" {
-        return Err("服务器地址要以 http:// 或 https:// 开头".into());
+        return Err(tr(
+            "服务器地址要以 http:// 或 https:// 开头",
+            "Server URL must start with http:// or https://",
+        )
+        .into());
     }
     if url.host_str().is_none_or(str::is_empty) {
         return Err(bad());
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("服务器地址里不要带用户名和密码".into());
+        return Err(tr(
+            "服务器地址里不要带用户名和密码",
+            "Do not include a username or password in the server URL",
+        )
+        .into());
     }
     url.set_query(None);
     url.set_fragment(None);
@@ -140,8 +159,11 @@ enum RedirectRefused {
 impl std::fmt::Display for RedirectRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            RedirectRefused::TooMany => "跳转的次数太多了",
-            RedirectRefused::Downgrade => "把 https 跳转到了不加密的 http，zsmeet 不会这样连接",
+            RedirectRefused::TooMany => tr("跳转的次数太多了", "redirected too many times"),
+            RedirectRefused::Downgrade => tr(
+                "把 https 跳转到了不加密的 http，zsmeet 不会这样连接",
+                "redirected HTTPS to unencrypted HTTP, which zsmeet refuses to follow",
+            ),
         })
     }
 }
@@ -177,7 +199,11 @@ pub async fn check_server(input: &str) -> Result<String, String> {
             Err(e) => e,
         };
         if let Some(refused) = redirect_refused(&e) {
-            return Err(format!("{server} {refused}，请检查服务器的设置"));
+            return Err(if is_en() {
+                format!("{server} {refused}. Check the server configuration.")
+            } else {
+                format!("{server} {refused}，请检查服务器的设置")
+            });
         }
         let last = i + 1 == candidates.len();
         // 没写协议、https 不行时退回 http：只限填的本来就是内网、本机的地址（内网的服务器常常只有 http）。
@@ -201,11 +227,17 @@ pub async fn check_server(input: &str) -> Result<String, String> {
         let message = unreachable_message(server, e.is_timeout(), lan);
         return Err(if last {
             message
+        } else if is_en() {
+            format!("{message}. If this server only supports HTTP, prefix the address with http://")
         } else {
             format!("{message}。如果这台服务器只支持 http，请在地址前面写上 http://")
         });
     }
-    Err("请填写服务器地址，比如 https://meet.example.com".into())
+    Err(tr(
+        "请填写服务器地址，比如 https://meet.example.com",
+        "Please enter your server URL, e.g. https://meet.example.com",
+    )
+    .into())
 }
 
 /// 看 `/api/status` 的结果，返回服务器地址。
@@ -218,15 +250,35 @@ async fn read_status(requested: &str, resp: reqwest::Response) -> Result<String,
             .and_then(|v| v.to_str().ok())
             .and_then(|l| resp.url().join(l).ok());
         return Err(match to {
-            Some(to) => format!(
-                "{requested} 跳转到了另一台服务器 {}。如果这就是你们的 zsmeet 服务器，请直接填写这个地址",
-                suggested_address(&to)
-            ),
-            None => format!("{requested} 不是 zsmeet 服务器，请检查地址"),
+            Some(to) => {
+                let suggested = suggested_address(&to);
+                if is_en() {
+                    format!(
+                        "{requested} redirected to another server {suggested}. If that is your zsmeet server, enter that address directly."
+                    )
+                } else {
+                    format!(
+                        "{requested} 跳转到了另一台服务器 {suggested}。如果这就是你们的 zsmeet 服务器，请直接填写这个地址"
+                    )
+                }
+            }
+            None => {
+                if is_en() {
+                    format!("{requested} is not a zsmeet server. Check the URL.")
+                } else {
+                    format!("{requested} 不是 zsmeet 服务器，请检查地址")
+                }
+            }
         });
     }
     let server = landed_server(requested, resp.url())?;
-    let not_zsmeet = || format!("{server} 不是 zsmeet 服务器，请检查地址");
+    let not_zsmeet = || {
+        if is_en() {
+            format!("{server} is not a zsmeet server. Check the URL.")
+        } else {
+            format!("{server} 不是 zsmeet 服务器，请检查地址")
+        }
+    };
     if !resp.status().is_success() {
         return Err(not_zsmeet());
     }
@@ -235,14 +287,20 @@ async fn read_status(requested: &str, resp: reqwest::Response) -> Result<String,
         return Err(not_zsmeet());
     };
     if !initialized {
-        return Err(format!(
-            "这台服务器还没完成初始化：请先在浏览器里打开 {server}，创建管理员账号"
-        ));
+        return Err(if is_en() {
+            format!(
+                "This server has not been initialized yet: open {server} in a web browser first to create an admin account."
+            )
+        } else {
+            format!("这台服务器还没完成初始化：请先在浏览器里打开 {server}，创建管理员账号")
+        });
     }
     if status.api.unwrap_or(0) < MIN_API {
-        return Err(
-            "这台服务器的 zsmeet 版本太旧，还不支持桌面版。请让管理员把服务器升级到最新版本".into(),
-        );
+        return Err(tr(
+            "这台服务器的 zsmeet 版本太旧，还不支持桌面版。请让管理员把服务器升级到最新版本",
+            "This server's zsmeet version is too old to support the desktop app. Ask an admin to upgrade the server to the latest version.",
+        )
+        .into());
     }
     Ok(server)
 }
@@ -252,14 +310,24 @@ async fn read_status(requested: &str, resp: reqwest::Response) -> Result<String,
 /// 从 https 跳到 http 不接受。
 fn landed_server(requested: &str, landed: &Url) -> Result<String, String> {
     if requested.starts_with("https://") && landed.scheme() != "https" {
-        return Err(format!(
-            "{requested} 把 https 跳转到了不加密的 http，zsmeet 不会这样连接。请检查服务器的设置"
-        ));
+        return Err(if is_en() {
+            format!(
+                "{requested} redirected HTTPS to unencrypted HTTP, which zsmeet refuses to follow. Check the server configuration."
+            )
+        } else {
+            format!(
+                "{requested} 把 https 跳转到了不加密的 http，zsmeet 不会这样连接。请检查服务器的设置"
+            )
+        });
     }
     let Some(base) = landed.path().strip_suffix("/api/status") else {
-        return Err(format!(
-            "{requested} 跳转到了 {landed}，不像是 zsmeet 服务器，请检查地址"
-        ));
+        return Err(if is_en() {
+            format!(
+                "{requested} redirected to {landed}, which does not look like a zsmeet server. Check the URL."
+            )
+        } else {
+            format!("{requested} 跳转到了 {landed}，不像是 zsmeet 服务器，请检查地址")
+        });
     };
     let mut url = landed.clone();
     url.set_path(base);
@@ -281,25 +349,44 @@ fn suggested_address(to: &Url) -> String {
 
 /// 局域网里的服务器连不上，多半是没允许 zsmeet 访问本地网络（macOS 15 起要用户允许）。
 pub const LOCAL_NETWORK_HINT: &str = "如果服务器在局域网里，还要允许 zsmeet 访问本地网络：打开「系统设置 → 隐私与安全性 → 本地网络」，打开 zsmeet 的开关，再试一次";
+const LOCAL_NETWORK_HINT_EN: &str = "If the server is on your local network, also allow zsmeet to access the local network in System Settings → Privacy & Security → Local Network, then try again";
+
+pub fn local_network_hint() -> &'static str {
+    tr(LOCAL_NETWORK_HINT, LOCAL_NETWORK_HINT_EN)
+}
 
 /// 连不上服务器时给用户看的话。timeout：等了太久；lan：服务器在局域网里，提醒看看「本地网络」权限。
 fn unreachable_message(server: &str, timeout: bool, lan: bool) -> String {
-    let mut message = if timeout {
+    let mut message = if is_en() {
+        if timeout {
+            format!("{server} took too long to respond. Check the URL and your network")
+        } else {
+            format!(
+                "Cannot reach {server}. Check the URL and your network, or confirm the server is running"
+            )
+        }
+    } else if timeout {
         format!("{server} 很久都没有响应，请检查地址和网络")
     } else {
         format!("连不上 {server}，请检查地址和网络，或者确认服务器正在运行")
     };
     if lan {
-        message.push('。');
-        message.push_str(LOCAL_NETWORK_HINT);
+        message.push_str(if is_en() { ". " } else { "。" });
+        message.push_str(local_network_hint());
     }
     message
 }
 
 fn certificate_message(server: &str) -> String {
-    format!(
-        "{server} 的 https 证书不受信任，zsmeet 不能安全地连接它。如果是公司内部签发的证书，请先把它的根证书装进「钥匙串访问」并设为信任"
-    )
+    if is_en() {
+        format!(
+            "The HTTPS certificate of {server} is not trusted, so zsmeet cannot connect securely. If your organization uses an internal CA, install and trust its root certificate in Keychain Access first."
+        )
+    } else {
+        format!(
+            "{server} 的 https 证书不受信任，zsmeet 不能安全地连接它。如果是公司内部签发的证书，请先把它的根证书装进「钥匙串访问」并设为信任"
+        )
+    }
 }
 
 /// https 证书的问题。rustls 的错误藏在好几层 source 里，Debug 文本里都有，看它最省事。
@@ -468,7 +555,13 @@ pub enum Answer {
 }
 
 pub fn parse_callback(link: &str) -> Result<Callback, String> {
-    let bad = || "收到的登录链接不完整，请回到 zsmeet 重新点「在浏览器里登录」".to_string();
+    let bad = || {
+        tr(
+            "收到的登录链接不完整，请回到 zsmeet 重新点「在浏览器里登录」",
+            "The sign-in callback link is incomplete. Return to zsmeet and click \"Sign in with browser\" again.",
+        )
+        .to_string()
+    };
     let url = Url::parse(link).map_err(|_| bad())?;
     if url.scheme() != "zsmeet" || url.host_str() != Some("auth") {
         return Err(bad());
@@ -497,9 +590,17 @@ pub fn parse_callback(link: &str) -> Result<Callback, String> {
 /// 网页说没登录（`error=…`）时给用户看的话。
 fn refused_message(error: &str) -> String {
     if error == "denied" {
-        "你在浏览器里点了「取消」，没有登录。要登录的话，请重新点「在浏览器里登录」".into()
+        tr(
+            "你在浏览器里点了「取消」，没有登录。要登录的话，请重新点「在浏览器里登录」",
+            "You clicked \"Cancel\" in the browser, so sign-in was cancelled. Click \"Sign in with browser\" to try again.",
+        )
+        .into()
     } else {
-        "浏览器里的登录没有完成，请重新点「在浏览器里登录」".into()
+        tr(
+            "浏览器里的登录没有完成，请重新点「在浏览器里登录」",
+            "Browser sign-in did not complete. Click \"Sign in with browser\" again.",
+        )
+        .into()
     }
 }
 
@@ -523,20 +624,33 @@ pub async fn exchange(
 ) -> Result<(String, Value), String> {
     let resp = client
         .post(format!("{server}/api/apps/token"))
+        .header(reqwest::header::ACCEPT_LANGUAGE, i18n::accept_language())
         .timeout(REQUEST_TIMEOUT)
         .json(&serde_json::json!({ "code": code, "code_verifier": verifier }))
         .send()
         .await
-        .map_err(|_| format!("连不上 {server}，登录没有完成。请检查网络后重新登录"))?;
+        .map_err(|_| {
+            if is_en() {
+                format!("Cannot reach {server}; sign-in did not complete. Check your network and try again.")
+            } else {
+                format!("连不上 {server}，登录没有完成。请检查网络后重新登录")
+            }
+        })?;
     if resp.status().is_redirection() {
         // 不跟着跳（见 http_client）：code_verifier 不能发到别的地方去
-        return Err(format!(
-            "登录没有完成：服务器把登录请求转到了别的地址（返回 {}），请让管理员检查服务器的设置",
-            resp.status().as_u16()
-        ));
+        let code = resp.status().as_u16();
+        return Err(if is_en() {
+            format!(
+                "Sign-in did not complete: server redirected the token request (HTTP {code}). Ask an admin to check server settings."
+            )
+        } else {
+            format!(
+                "登录没有完成：服务器把登录请求转到了别的地址（返回 {code}），请让管理员检查服务器的设置"
+            )
+        });
     }
     if !resp.status().is_success() {
-        let status = resp.status();
+        let status = resp.status().as_u16();
         let detail = resp
             .json::<Problem>()
             .await
@@ -544,19 +658,37 @@ pub async fn exchange(
             .and_then(|p| p.detail)
             .filter(|d| !d.is_empty());
         return Err(match detail {
-            Some(d) => format!("登录没有完成：{d}。请重新点「在浏览器里登录」"),
-            None => format!(
-                "登录没有完成（服务器返回 {}），请重新点「在浏览器里登录」",
-                status.as_u16()
-            ),
+            Some(d) => {
+                if is_en() {
+                    format!("Sign-in did not complete: {d}. Click \"Sign in with browser\" again.")
+                } else {
+                    format!("登录没有完成：{d}。请重新点「在浏览器里登录」")
+                }
+            }
+            None => {
+                if is_en() {
+                    format!(
+                        "Sign-in did not complete (server returned {status}). Click \"Sign in with browser\" again."
+                    )
+                } else {
+                    format!("登录没有完成（服务器返回 {status}），请重新点「在浏览器里登录」")
+                }
+            }
         });
     }
-    let body: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|_| "服务器返回的登录结果看不懂，请确认服务器是最新版本后重新登录".to_string())?;
+    let body: TokenResponse = resp.json().await.map_err(|_| {
+        tr(
+            "服务器返回的登录结果看不懂，请确认服务器是最新版本后重新登录",
+            "Could not parse the sign-in response from the server. Make sure the server is up to date and sign in again.",
+        )
+        .to_string()
+    })?;
     if body.token.is_empty() || user_id(&body.user).is_none() {
-        return Err("服务器返回的登录结果不完整，请确认服务器是最新版本后重新登录".into());
+        return Err(tr(
+            "服务器返回的登录结果不完整，请确认服务器是最新版本后重新登录",
+            "Incomplete sign-in response from the server. Make sure the server is up to date and sign in again.",
+        )
+        .into());
     }
     Ok((body.token, body.user))
 }

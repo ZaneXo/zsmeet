@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/validation"
+
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 )
 
 // 这个文件把 huma 自己产生的错误换成中文：参数校验没通过、请求内容不是 JSON、内容太大……
@@ -179,12 +182,25 @@ var goErrorDetails = map[string]string{
 	"unable to marshal response": "没法按要求的格式返回结果，请在请求头 Accept 里接受 application/json",
 }
 
-// localizeProblem 在错误响应发出去之前把 huma 写的英文换成中文（huma 的 Transformer）。
-// 接口自己返回的错误（toHTTP、huma.Error404NotFound……）本来就是中文，原样不动。
-func localizeProblem(_ huma.Context, _ string, v any) (any, error) {
+// localizeProblem 在错误响应发出去之前按请求头里的语言（Accept-Language）把错误说明换成中文或英文（huma 的 Transformer）。
+// 默认是中文；请求头优先要英文时返回英文。
+func localizeProblem(ctx huma.Context, _ string, v any) (any, error) {
 	p, ok := v.(*huma.ErrorModel)
 	if !ok {
 		return v, nil
+	}
+	lang := i18n.ZH
+	if ctx != nil {
+		if q := strings.TrimSpace(ctx.Query("lang")); q != "" {
+			lang = i18n.ParseAcceptLanguage(q)
+		} else if h := ctx.Header("Accept-Language"); h != "" {
+			lang = i18n.ParseAcceptLanguage(h)
+		} else {
+			lang = i18n.FromContext(ctx.Context())
+		}
+	}
+	if lang == i18n.EN {
+		return localizeProblemEN(p), nil
 	}
 	out := *p
 	if p.Detail == "validation failed" {
@@ -333,4 +349,256 @@ func join(subject, reason string) string {
 
 func isWordChar(r rune) bool {
 	return r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r))
+}
+
+// ---- 英文错误响应（Accept-Language: en） ----
+
+var goErrorDetailsEN = map[string]string{
+	"cannot read request body":   "Could not finish reading request body; please check your network and retry",
+	"unexpected error occurred":  "Internal server error, please try again later",
+	"unable to marshal response": "Cannot format response as requested; include application/json in the Accept header",
+}
+
+var readDetailsEN = map[string]string{
+	"request body is required":  "Request body is empty; please resubmit",
+	"request body read timeout": "Request body upload timed out; please check your network and retry",
+}
+
+var paramMessagesEN = map[string]string{
+	"invalid integer":         "must be an integer",
+	"invalid float":           "must be a number",
+	"invalid floating value":  "must be a number",
+	"invalid boolean":         "must be true or false",
+	"invalid url.URL value":   "is not a valid URL",
+	"unknown query parameter": "is an unrecognized parameter",
+
+	"required path parameter is missing":   "is required",
+	"required query parameter is missing":  "is required",
+	"required header parameter is missing": "is required",
+	"required cookie parameter is missing": "is required",
+	"required form parameter is missing":   "is required",
+
+	"expected at most one value, but received multiple values":        "accepts only a single value",
+	"expected value to match exactly one schema but matched multiple": "matches multiple schemas ambiguously",
+}
+
+var paramPrefixesEN = []struct{ raw, en string }{
+	{"invalid date/time for format ", "is not a valid date/time"},
+	{"invalid value: ", "has an invalid value"},
+	{"invalid JSON: ", "is not valid JSON"},
+	{"cannot read multipart form: ", "could not parse uploaded form; please upload again"},
+}
+
+var validationStaticEN = map[string]string{
+	"是不认识的字段，请去掉":                                     "is an unrecognized field; please remove it",
+	"不是有效的时间，请写成 2006-01-02T15:04:05+08:00 这样的格式":     "is not a valid date-time (expected 2006-01-02T15:04:05+08:00)",
+	"不是有效的时间，请写成 Mon, 02 Jan 2006 15:04:05 GMT 这样的格式": "is not a valid date-time (expected Mon, 02 Jan 2006 15:04:05 GMT)",
+	"不是有效的日期，请写成 2006-01-02 这样的格式":                    "is not a valid date (expected 2006-01-02)",
+	"不是有效的时间，请写成 15:04:05 这样的格式":                      "is not a valid time (expected 15:04:05)",
+	"格式不对，应该是 name@example.com 这样的邮箱地址":               "is not a valid email address (e.g. name@example.com)",
+	"只填邮箱地址本身，不要带名字，比如 name@example.com":              "must be a bare email address without a display name (e.g. name@example.com)",
+	"不是有效的主机名，请检查有没有写错":                               "is not a valid hostname",
+	"不是有效的 IPv4 地址，应该像 192.168.1.10 这样":               "is not a valid IPv4 address (e.g. 192.168.1.10)",
+	"不是有效的 IPv6 地址，请检查有没有写错":                          "is not a valid IPv6 address",
+	"不是有效的 IP 地址，请检查有没有写错":                            "is not a valid IP address",
+	"不是有效的网址，请检查有没有写错":                                "is not a valid URL",
+	"要写完整的网址，以 https:// 这样的协议开头":                      "must be a full URL starting with a scheme such as https://",
+	"格式不对，应该是一串 UUID，请检查是否完整":                         "must be a valid UUID",
+	"不是有效的 URI 模板，请检查有没有写错":                           "is not a valid URI template",
+	"不是有效的 JSON Pointer，应该像 /a/b 这样":                  "is not a valid JSON Pointer (e.g. /a/b)",
+	"不是有效的相对 JSON Pointer，应该像 0/a 这样":                 "is not a valid relative JSON Pointer (e.g. 0/a)",
+	"不是有效的正则表达式，请检查有没有写错":                             "is not a valid regular expression",
+	"不符合任何一种允许的写法，请对照接口文档修改":                          "does not match any allowed format",
+	"不能用这种写法，请对照接口文档修改":                               "uses a disallowed format",
+	"没有填，请补上":          "is required",
+	"应该是 true 或 false": "must be true or false",
+	"应该是 null":         "must be null",
+	"不是有效的时长，应该像 1h30m、90s 这样": "is not a valid duration (e.g. 1h30m or 90s)",
+	"应该是数字":            "must be a number",
+	"应该是整数":            "must be an integer",
+	"应该是字符串":           "must be a string",
+	"应该是 Base64 编码的内容": "must be Base64-encoded",
+	"应该是数组":            "must be an array",
+	"应该是 JSON 对象":      "must be a JSON object",
+	"里有重复的项，请去掉重复的":    "contains duplicate items",
+	"类型不对，请对照接口文档修改":   "has an invalid type",
+}
+
+var validationPatternsEN = []struct {
+	re *regexp.Regexp
+	fn func(m []string) string
+}{
+	{regexp.MustCompile(`^取值不对，只能是 (.+) 中的一个$`), func(m []string) string { return fmt.Sprintf("must be one of: %s", m[1]) }},
+	{regexp.MustCompile(`^取值不对，只能是 (.+)$`), func(m []string) string { return fmt.Sprintf("must be %s", m[1]) }},
+	{regexp.MustCompile(`^太小了，不能小于 (.+)$`), func(m []string) string { return fmt.Sprintf("must be at least %s", m[1]) }},
+	{regexp.MustCompile(`^太小了，要大于 (.+)$`), func(m []string) string { return fmt.Sprintf("must be greater than %s", m[1]) }},
+	{regexp.MustCompile(`^太大了，不能大于 (.+)$`), func(m []string) string { return fmt.Sprintf("must be at most %s", m[1]) }},
+	{regexp.MustCompile(`^太大了，要小于 (.+)$`), func(m []string) string { return fmt.Sprintf("must be less than %s", m[1]) }},
+	{regexp.MustCompile(`^要是 (.+) 的整数倍$`), func(m []string) string { return fmt.Sprintf("must be a multiple of %s", m[1]) }},
+	{regexp.MustCompile(`^至少要 (\d+) 个字$`), func(m []string) string { return fmt.Sprintf("must be at least %s character(s)", m[1]) }},
+	{regexp.MustCompile(`^太长了，最多 (\d+) 个字$`), func(m []string) string { return fmt.Sprintf("is too long (at most %s characters)", m[1]) }},
+	{regexp.MustCompile(`^格式不对，要求：(.+)$`), func(m []string) string { return fmt.Sprintf("is invalid (expected: %s)", m[1]) }},
+	{regexp.MustCompile(`^格式不对，要符合正则表达式 (.+)$`), func(m []string) string { return fmt.Sprintf("must match pattern %s", m[1]) }},
+	{regexp.MustCompile(`^至少要 (\d+) 项$`), func(m []string) string { return fmt.Sprintf("must contain at least %s item(s)", m[1]) }},
+	{regexp.MustCompile(`^太多了，最多 (\d+) 项$`), func(m []string) string { return fmt.Sprintf("contains too many items (at most %s)", m[1]) }},
+	{regexp.MustCompile(`^缺少「(.+)」，请补上$`), func(m []string) string { return fmt.Sprintf("is missing required field %q", m[1]) }},
+	{regexp.MustCompile(`^缺少「(.+)」：有「(.+)」时它也要填$`), func(m []string) string {
+		return fmt.Sprintf("is missing %q (required when %q is provided)", m[1], m[2])
+	}},
+	{regexp.MustCompile(`^服务器的接口定义有问题（找不到 (.+)），请联系管理员$`), func(m []string) string {
+		return fmt.Sprintf("has an unresolved schema reference (%s); please contact an admin", m[1])
+	}},
+	{regexp.MustCompile(`^不是合法的 JSON，第 (\d+) 个字符附近有错，请检查格式$`), func(m []string) string {
+		return fmt.Sprintf("is not valid JSON (syntax error near character %s)", m[1])
+	}},
+	{regexp.MustCompile(`^有一项类型不对或者超出了范围：「(.+)」，请检查$`), func(m []string) string {
+		return fmt.Sprintf("has an invalid type or out-of-range value for %q", m[1])
+	}},
+}
+
+var fieldNamesEN = map[string]string{
+	"email":            "Email",
+	"name":             "Name",
+	"password":         "Password",
+	"current_password": "Current password",
+	"new_password":     "New password",
+	"title":            "Title",
+	"hotwords":         "Hotwords",
+	"speaker_count":    "Speaker count",
+	"content":          "Minutes content",
+	"question":         "Question",
+	"q":                "Search query",
+	"guide":            "Template guide",
+	"base_url":         "Base URL",
+	"provider":         "ASR provider",
+	"model":            "Model",
+	"api_key":          "API Key",
+	"audio_days":       "Audio retention days",
+	"url":              "URL",
+	"site_url":         "Site URL",
+	"secret":           "Secret",
+	"app_id":           "App ID",
+	"app_secret":       "App Secret",
+	"doc_folder":       "Folder URL",
+}
+
+func localizeProblemEN(p *huma.ErrorModel) *huma.ErrorModel {
+	out := *p
+	if p.Detail == "validation failed" {
+		out.Errors = localizeDetailsEN(p.Errors)
+		out.Detail = summarizeEN(out.Errors)
+		return &out
+	}
+	if en, ok := goErrorDetailsEN[p.Detail]; ok {
+		if p.Detail == "unexpected error occurred" {
+			for _, e := range p.Errors {
+				if e != nil {
+					slog.Error("接口内部错误", "err", e.Message)
+				}
+			}
+		}
+		out.Detail, out.Errors = en, nil
+		return &out
+	}
+	en, ok := readDetailsEN[p.Detail]
+	if strings.HasPrefix(p.Detail, "request body is too large") {
+		en, ok = tooLargeEN(p.Detail), true
+	}
+	if ok {
+		out.Errors = localizeDetailsEN(p.Errors)
+		out.Detail = en
+		if len(out.Errors) > 0 {
+			out.Detail = summarizeEN(out.Errors) + "; " + en
+		}
+		return &out
+	}
+	out.Detail = i18n.TranslateMessage(i18n.EN, p.Detail)
+	return &out
+}
+
+func localizeDetailsEN(errs []*huma.ErrorDetail) []*huma.ErrorDetail {
+	out := make([]*huma.ErrorDetail, 0, len(errs))
+	for _, e := range errs {
+		if e != nil {
+			out = append(out, &huma.ErrorDetail{Message: reasonEN(e.Message), Location: e.Location})
+		}
+	}
+	return out
+}
+
+func reasonEN(msg string) string {
+	if en, ok := validationStaticEN[msg]; ok {
+		return en
+	}
+	if en, ok := paramMessagesEN[msg]; ok {
+		return en
+	}
+	if ct, ok := strings.CutPrefix(msg, huma.ErrUnknownContentType.Error()+": "); ok {
+		return "has unsupported Content-Type (" + ct + "); please submit JSON (Content-Type: application/json)"
+	}
+	for _, p := range paramPrefixesEN {
+		if strings.HasPrefix(msg, p.raw) {
+			return p.en
+		}
+	}
+	for _, p := range validationPatternsEN {
+		if m := p.re.FindStringSubmatch(msg); m != nil {
+			return p.fn(m)
+		}
+	}
+	return i18n.TranslateMessage(i18n.EN, msg)
+}
+
+func summarizeEN(errs []*huma.ErrorDetail) string {
+	if len(errs) == 0 {
+		return "Invalid request; please check your input and retry"
+	}
+	subj := subjectEN(errs[0].Location)
+	s := errs[0].Message
+	if subj != "" {
+		s = subj + " " + s
+	}
+	if n := len(errs) - 1; n > 0 {
+		s += fmt.Sprintf(" (plus %d more error(s))", n)
+	}
+	return s
+}
+
+func subjectEN(location string) string {
+	where, field, _ := strings.Cut(location, ".")
+	if name, ok := fieldNamesEN[field]; ok && (where == "body" || where == "query") {
+		return name
+	}
+	switch {
+	case location == "":
+		return ""
+	case location == "body":
+		return "Request body"
+	case where == "body":
+		return fmt.Sprintf("%q", field)
+	case where == "path" || where == "query":
+		return "Parameter " + field
+	case where == "header":
+		return "Header " + field
+	}
+	return fmt.Sprintf("%q", location)
+}
+
+func tooLargeEN(detail string) string {
+	var limit int64
+	if _, err := fmt.Sscanf(detail, "request body is too large limit=%d bytes", &limit); err != nil || limit <= 0 {
+		return "Request body is too large; please reduce size and retry"
+	}
+	return fmt.Sprintf("Request body is too large (limit %s); please reduce size and retry", byteSizeEN(limit))
+}
+
+func byteSizeEN(n int64) string {
+	size, unit := float64(n), "bytes"
+	switch {
+	case n >= 1<<20:
+		size, unit = size/(1<<20), "MB"
+	case n >= 1<<10:
+		size, unit = size/(1<<10), "KB"
+	}
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", size), ".0") + " " + unit
 }

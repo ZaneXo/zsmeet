@@ -210,7 +210,11 @@ func plain(line string) string {
 
 // Summary 取纪要的摘要：「摘要」一节的文字；没有这一节时取正文的第一段。
 func Summary(minutes string) string {
-	lines := section(minutes, func(h string) bool { return strings.Contains(h, "摘要") || strings.Contains(h, "总结") })
+	lines := section(minutes, func(h string) bool {
+		low := strings.ToLower(h)
+		return strings.Contains(h, "摘要") || strings.Contains(h, "总结") ||
+			strings.Contains(low, "summary") || strings.Contains(low, "overview")
+	})
 	if lines == nil {
 		// 没有摘要一节：取正文的第一段（跳过标题，到空行或者下一个标题为止）
 		for line := range strings.SplitSeq(minutes, "\n") {
@@ -236,7 +240,10 @@ func Summary(minutes string) string {
 // Todos 取纪要里的待办：标题里有「待办」「跟进」「行动项」的那一节的每一条（列表或者表格）。
 func Todos(minutes string) []string {
 	lines := section(minutes, func(h string) bool {
-		return strings.Contains(h, "待办") || strings.Contains(h, "跟进") || strings.Contains(h, "行动项")
+		low := strings.ToLower(h)
+		return strings.Contains(h, "待办") || strings.Contains(h, "跟进") || strings.Contains(h, "行动项") ||
+			strings.Contains(low, "action item") || strings.Contains(low, "todo") || strings.Contains(low, "to-do") ||
+			strings.Contains(low, "follow-up") || strings.Contains(low, "follow up") || strings.Contains(low, "next step")
 	})
 	var out []string
 	header := true
@@ -260,7 +267,7 @@ func Todos(minutes string) []string {
 				out = append(out, strings.Join(cells, " · "))
 			}
 		case listItem.MatchString(t):
-			if p := plain(t); p != "" && p != "无" && p != "暂无" {
+			if p := plain(t); p != "" && p != "无" && p != "暂无" && !strings.EqualFold(p, "none") && !strings.EqualFold(p, "n/a") {
 				out = append(out, p)
 			}
 		}

@@ -4644,6 +4644,16 @@
               ],
               "type": "string"
             }
+          },
+          {
+            "description": "导出文件里元信息的语言（zh 或 en，不传时按请求头 Accept-Language）",
+            "explode": false,
+            "in": "query",
+            "name": "lang",
+            "schema": {
+              "description": "导出文件里元信息的语言（zh 或 en，不传时按请求头 Accept-Language）",
+              "type": "string"
+            }
           }
         ],
         "responses": {

@@ -3,6 +3,8 @@
 // 录音每 10 秒切一片，每一片先存在这里再上传。断网、服务器暂时连不上时分片留在这里，恢复后补传；
 // 页面关掉、浏览器崩溃以后，下次打开还能把没传完的接着传上去。传完、交给服务器处理以后删掉。
 
+import { tr } from "../../i18n/lang";
+
 /** 一段存在这台电脑上的录音。分片另外存，按序号取。 */
 export type LocalRecording = {
   meetingId: string;
@@ -49,8 +51,8 @@ function open(): Promise<IDBDatabase> {
       };
       resolve(db);
     };
-    req.onerror = () => reject(req.error ?? new Error("打不开浏览器的本地存储"));
-    req.onblocked = () => reject(new Error("浏览器的本地存储被别的标签页占着"));
+    req.onerror = () => reject(req.error ?? new Error(tr("打不开浏览器的本地存储", "Cannot open browser local storage")));
+    req.onblocked = () => reject(new Error(tr("浏览器的本地存储被别的标签页占着", "Browser local storage is blocked by another tab")));
   });
   // 打开失败的话下次再试，不把失败缓存下来
   opening.catch(() => {
@@ -69,8 +71,8 @@ async function run<T>(stores: string[], mode: IDBTransactionMode, fn: (tx: IDBTr
     const tx = db.transaction(stores, mode, { durability: "strict" });
     const req = fn(tx);
     tx.oncomplete = () => resolve(req ? req.result : (undefined as T));
-    tx.onerror = () => reject(tx.error ?? new Error("浏览器的本地存储出错了"));
-    tx.onabort = () => reject(tx.error ?? new Error("浏览器的本地存储写入被中止了（可能是空间不够）"));
+    tx.onerror = () => reject(tx.error ?? new Error(tr("浏览器的本地存储出错了", "Browser local storage error")));
+    tx.onabort = () => reject(tx.error ?? new Error(tr("浏览器的本地存储写入被中止了（可能是空间不够）", "Browser local storage write aborted (disk may be full)")));
   });
 }
 

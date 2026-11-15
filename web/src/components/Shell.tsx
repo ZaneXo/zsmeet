@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from "react-router";
 import { AppLink } from "./AppLink";
 import { api, errorMessage, unwrap } from "../api/client";
 import type { User } from "../api/client";
+import { tr, useLang } from "../i18n/react";
 import { hms } from "../lib/format";
 import { session, useRecording } from "../lib/recording/session";
 import { useTicker } from "../lib/useTicker";
@@ -19,6 +20,7 @@ import { Icon } from "./ui";
 
 /** 登录后的整体框架：左边导航，右边内容。窄屏时导航排到上面。 */
 export function Shell({ user, children }: { user: User; children: ReactNode }) {
+  useLang();
   const logout = useMutation({
     // 桌面版：App 通知服务器作废这台电脑的令牌，再回到登录页（缓存的数据由 platform 清掉）
     mutationFn: isDesktop ? desktopLogout : () => unwrap(api.POST("/api/logout")),
@@ -44,24 +46,24 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
 
   return (
     <div className="flex min-h-full flex-col md:flex-row">
-      <nav aria-label="主导航" className="flex shrink-0 flex-row items-center gap-1 border-b border-line bg-white px-3 py-2 md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-3.5 md:py-5">
+      <nav aria-label={tr("主导航", "Primary navigation")} className="flex shrink-0 flex-row items-center gap-1 border-b border-line bg-white px-3 py-2 md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-3.5 md:py-5">
         <div className="flex items-center gap-2.5 px-3 md:pb-4">
-          <div className="flex size-7 items-center justify-center rounded-lg bg-ink text-sm font-bold text-white">记</div>
+          <div className="flex size-7 items-center justify-center rounded-lg bg-ink text-sm font-bold text-white">{tr("记", "Z")}</div>
           <span className="text-[15px] font-bold">zsmeet</span>
         </div>
         <AppLink to="/" className={navClass(section === "meetings")} aria-current={section === "meetings" ? "page" : undefined}>
           <Icon name="list" />
-          会议
+          {tr("会议", "Meetings")}
         </AppLink>
         {/* 桌面版是 App 自己的录音（录电脑里会议软件的声音和麦克风），网页版是浏览器录音 */}
         <AppLink to="/record" className={navClass(section === "record")} aria-current={section === "record" ? "page" : undefined}>
           <Icon name="mic" />
-          {isDesktop ? "录音" : "网页录音"}
+          {isDesktop ? tr("录音", "Record") : tr("网页录音", "Web Record")}
           {isDesktop ? <DesktopRecordingBadge /> : <RecordingBadge />}
         </AppLink>
         <AppLink to="/settings" className={navClass(section === "settings")} aria-current={section === "settings" ? "page" : undefined}>
           <Icon name="settings" />
-          设置
+          {tr("设置", "Settings")}
         </AppLink>
         <div className="flex-1" />
         <div className="md:border-t md:border-line md:pt-3">
@@ -71,16 +73,16 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
             </div>
             <div className="hidden min-w-0 flex-1 md:block">
               <div className="truncate text-[13px] font-semibold">{user.name}</div>
-              <div className="text-xs text-muted">{user.role === "admin" ? "管理员" : "成员"}</div>
+              <div className="text-xs text-muted">{user.role === "admin" ? tr("管理员", "Admin") : tr("成员", "Member")}</div>
             </div>
             <button
               type="button"
-              title={signingOut ? "正在退出登录…" : "退出登录"}
-              aria-label="退出登录"
+              title={signingOut ? tr("正在退出登录…", "Signing out…") : tr("退出登录", "Sign out")}
+              aria-label={tr("退出登录", "Sign out")}
               disabled={signingOut}
               onClick={() => {
                 // 桌面版正在录音、有录音没传完：先到账号页，说清楚退出以后录音会怎样，再确认退出
-                if (isDesktop && signOutNote(recorderState(), "退出登录")) navigate("/settings?logout=1");
+                if (isDesktop && signOutNote(recorderState(), tr("退出登录", "signing out"))) navigate("/settings?logout=1");
                 else logout.mutate();
               }}
               className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-muted hover:bg-subtle hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
@@ -119,14 +121,15 @@ export function Shell({ user, children }: { user: User; children: ReactNode }) {
 
 /** 导航栏上的「正在录音」：红点加已录时长，在别的页面也看得到。 */
 function RecordingBadge() {
+  useLang();
   const rec = useRecording();
   const live = rec.phase === "recording" || rec.phase === "paused";
   useTicker(1000, live);
   if (!live && rec.phase !== "finishing") return null;
   return (
-    <span className="ml-auto flex items-center gap-1.5 text-xs font-normal tabular-nums text-bad" title={live ? "正在录音" : "录音正在上传"}>
+    <span className="ml-auto flex items-center gap-1.5 text-xs font-normal tabular-nums text-bad" title={live ? tr("正在录音", "Recording") : tr("录音正在上传", "Uploading recording")}>
       <span className={`size-2 rounded-full ${rec.phase === "recording" ? "animate-pulse bg-bad" : "bg-muted"}`} aria-hidden="true" />
-      {live ? hms(session.elapsed()) : "上传中"}
+      {live ? hms(session.elapsed()) : tr("上传中", "Uploading")}
     </span>
   );
 }

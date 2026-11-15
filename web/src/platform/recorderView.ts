@@ -1,6 +1,7 @@
 // 桌面版录音的界面逻辑：把 Rust 推过来的录音状态（recorder.ts 的 RecorderState）换成界面上的话和按钮。
 // 不依赖 React 和 Tauri，方便单独测试（recorderView.test.ts）。
 // 引用别的文件里的值要带 .ts 后缀：测试用 Node 直接跑，它不会自己补后缀
+import { isEn, tr } from "../i18n/lang.ts";
 import { DESKTOP_CHUNK_MS } from "../lib/unfinishedRecording.ts";
 import type { EchoMode, MicGainMode, Microphone, RecorderEcho, RecorderState, RecorderStatus, RecorderUpload, RecorderWarning } from "./recorder";
 
@@ -64,10 +65,18 @@ export function isBusy(status: RecorderStatus): boolean {
 
 /** 页面顶部「正在录音」提示条、会议页面上的说法。 */
 export const BUSY_LABEL: Record<Exclude<RecorderStatus, "idle">, string> = {
-  starting: "正在开始录音",
-  recording: "正在录音",
-  paused: "录音已暂停",
-  stopping: "正在结束录音",
+  get starting() {
+    return tr("正在开始录音", "Starting recording");
+  },
+  get recording() {
+    return tr("正在录音", "Recording");
+  },
+  get paused() {
+    return tr("录音已暂停", "Recording paused");
+  },
+  get stopping() {
+    return tr("正在结束录音", "Stopping recording");
+  },
 };
 
 /** 去掉句末的标点，好接在别的话里（Rust 那边给的说明可能带着句号）。 */
@@ -78,12 +87,19 @@ function clause(text: string): string {
 /** 写成完整的一句：没有句末标点的补上句号，好在后面接着说别的。 */
 export function sentence(text: string): string {
   const t = text.trim();
+  if (isEn()) return /[.!?]$/u.test(t) ? t : `${clause(t)}.`;
   return /[。！？!?]$/u.test(t) ? t : `${clause(t)}。`;
 }
 
 /** 录下了多少片，说成大概多长时间（每片约 10 秒，和会议页面上估算服务器收到了多长一样）。 */
 export function recordedLength(chunks: number): string {
   const minutes = Math.round((chunks * DESKTOP_CHUNK_MS) / 60_000);
+  if (isEn()) {
+    if (minutes < 1) return "under 1 minute";
+    if (minutes < 60) return `about ${minutes} min`;
+    const rest = minutes % 60;
+    return `about ${Math.floor(minutes / 60)} hr${rest ? ` ${rest} min` : ""}`;
+  }
   if (minutes < 1) return "不到 1 分钟";
   if (minutes < 60) return `大约 ${minutes} 分钟`;
   const rest = minutes % 60;
@@ -119,6 +135,13 @@ export function parseSources(raw: string | null): Sources {
 /** 选麦克风的下拉框：系统默认的、电脑上的每一个、不录麦克风。 */
 export function micOptions(devices: readonly Microphone[]): { value: string; label: string }[] {
   const current = devices.find((d) => d.default);
+  if (isEn()) {
+    return [
+      { value: DEFAULT_MIC, label: current ? `System default microphone (${current.name})` : "System default microphone" },
+      ...devices.map((d) => ({ value: d.uid, label: d.name })),
+      { value: NO_MIC, label: "Do not record microphone" },
+    ];
+  }
   return [
     { value: DEFAULT_MIC, label: current ? `系统默认的麦克风（现在是 ${current.name}）` : "系统默认的麦克风" },
     ...devices.map((d) => ({ value: d.uid, label: d.name })),
@@ -139,7 +162,7 @@ export function micArg(mic: string): string | null {
 
 /** 开始前的检查：麦克风和电脑里的声音至少要录一种。没问题时是空字符串。 */
 export function sourcesProblem(sources: Sources): string {
-  return sources.mic === NO_MIC && !sources.system ? "麦克风和电脑里的声音至少要录一种。" : "";
+  return sources.mic === NO_MIC && !sources.system ? tr("麦克风和电脑里的声音至少要录一种。", "Select at least one audio source (microphone or system audio).") : "";
 }
 
 // ---- 外放时去掉回声（实验功能，docs/desktop.md 的「回声消除」） ----
@@ -182,6 +205,24 @@ export type EchoLabel = { text: string; tone: "ok" | "mute" | "warn" };
 export function echoLabel(state: RecorderState): EchoLabel | null {
   const echo = state.echo;
   if (!echo || echo.mode === "off" || state.mic === null) return null;
+  if (isEn()) {
+    if (echo.mode === "unavailable") {
+      return { text: "Echo cancellation: unavailable (speaker audio may be recorded twice; wear headphones to avoid)", tone: "warn" };
+    }
+    if (echo.active) return { text: "Echo cancellation: on", tone: "ok" };
+    switch (echo.reason) {
+      case null:
+        return echo.mode === "auto" ? { text: "Echo cancellation: automatic on speakers", tone: "mute" } : { text: "Echo cancellation: on", tone: "ok" };
+      case "headphones":
+        return { text: "Echo cancellation: off (wearing headphones — no echo)", tone: "mute" };
+      case "airplay":
+        return { text: "Echo cancellation: off (not supported over AirPlay)", tone: "mute" };
+      case "no_reference":
+        return { text: state.system ? "Echo cancellation: paused (no system audio stream)" : "Echo cancellation: off (system audio unavailable)", tone: "mute" };
+      default:
+        return { text: "Echo cancellation: off", tone: "mute" };
+    }
+  }
   if (echo.mode === "unavailable") {
     return { text: "回声消除：不可用（没能打开，外放的会议声音可能会录两遍，戴耳机可以避免）", tone: "warn" };
   }
@@ -208,7 +249,9 @@ export function echoLabel(state: RecorderState): EchoLabel | null {
  * 可能会很小。在调（auto）、不调（off）、不录麦克风、录音程序没报（旧版本）时不显示，是 null。
  */
 export function micGainLabel(state: RecorderState): string | null {
-  return state.micGain === "unavailable" && state.mic !== null ? "自动调音量没能打开，录的是原来的音量" : null;
+  return state.micGain === "unavailable" && state.mic !== null
+    ? tr("自动调音量没能打开，录的是原来的音量", "Automatic gain control is unavailable; recording raw microphone volume")
+    : null;
 }
 
 /** 看最近多长时间（录到的秒数，不算暂停）的麦克风音量。 */
@@ -266,6 +309,10 @@ export function micTooQuiet(levels: MicLevels): boolean {
 
 /** 麦克风的声音一直很小时，录音页上的提示：怎么办。自动调大过了（auto）的话也说一声，免得以为还能自己变大。 */
 export function quietMicHint(micGain: MicGainMode | null): string {
+  if (isEn()) {
+    const tried = micGain === "auto" ? " even with automatic gain boost" : "";
+    return `Microphone volume has been very low${tried}, which may cause missed words in transcription. Move closer to the microphone or raise input volume in System Settings → Sound → Input.`;
+  }
   const tried = micGain === "auto" ? "，自动调大了也还不够" : "";
   return `麦克风录到的声音一直很小${tried}，转写可能会漏掉一些话。把电脑挪到离说话的人近一些的地方，或者在「系统设置 → 声音 → 输入」里把输入音量调大。`;
 }
@@ -305,7 +352,41 @@ const WARNINGS: Record<string, { message: string; help: string }> = {
  * desktop/recorder 的 RecordSession.swift），照着显示，不再重复；没给说明时用这里的。
  * 没有权限时一定要说清楚去哪里打开：说明里没提「系统设置」的，补上打开方法。
  */
+const WARNINGS_EN: Record<string, { message: string; help: string }> = {
+  mic_denied: {
+    message: "zsmeet does not have microphone permission; your voice cannot be recorded. ",
+    help: "Enable zsmeet in System Settings → Privacy & Security → Microphone, then start recording again.",
+  },
+  system_denied: {
+    message: "zsmeet does not have system audio permission; other participants' voices cannot be recorded. ",
+    help: "Enable zsmeet under \"System Audio Recording Only\" in System Settings → Privacy & Security → Screen & System Audio Recording, then start recording again.",
+  },
+  mic_unavailable: {
+    message: "Microphone is unavailable; your voice cannot be recorded. ",
+    help: "Check whether the microphone is connected or in use by another app, or select another microphone before recording.",
+  },
+  system_unavailable: {
+    message: "Cannot capture system audio. ",
+    help: "Quit and reopen zsmeet, or restart your Mac if the issue persists.",
+  },
+  mic_silent: {
+    message: "No sound has been detected from the microphone for a while; your speech may not be recorded. ",
+    help: "Check your mute switch and selected microphone. If a meeting app is holding exclusive access to the mic, stop this recording and switch to another microphone.",
+  },
+  echo_unavailable: {
+    message: "Echo cancellation could not be opened; speaker audio may be recorded twice. ",
+    help: "Wear headphones to avoid echo.",
+  },
+};
+
 export function warningText(w: RecorderWarning): string {
+  if (isEn()) {
+    const known = WARNINGS_EN[w.code];
+    const message = w.message.trim();
+    if (!message) return known ? `${known.message}${known.help}` : "A recording warning occurred.";
+    if (known && w.code.endsWith("_denied") && !message.includes("System Settings")) return `${sentence(message)} ${known.help}`;
+    return message;
+  }
   const known = WARNINGS[w.code];
   const message = w.message.trim();
   if (!message) return known ? `${known.message}${known.help}` : "录音出了点问题。";
@@ -320,12 +401,13 @@ export function warningText(w: RecorderWarning): string {
  * （mic_unavailable），分不出现在还录不录得到，所以不说「录不到」。
  */
 export function sourceLabels(state: RecorderState): { mic: string; system: string } {
+  const en = isEn();
   const label = (recording: string | null, prefix: string) => {
     const warned = state.warnings.some((w) => w.code.startsWith(prefix));
-    if (recording === null) return warned ? "录不到（见下面的提示）" : "不录";
-    return warned ? `${recording}（见下面的提示）` : recording;
+    if (recording === null) return warned ? (en ? "Unavailable (see notice below)" : "录不到（见下面的提示）") : en ? "Off" : "不录";
+    return warned ? (en ? `${recording} (see notice below)` : `${recording}（见下面的提示）`) : recording;
   };
-  return { mic: label(state.mic, "mic_"), system: label(state.system ? "正在录" : null, "system_") };
+  return { mic: label(state.mic, "mic_"), system: label(state.system ? (en ? "Recording" : "正在录") : null, "system_") };
 }
 
 /**
@@ -337,6 +419,23 @@ export function liveUpload(u: RecorderUpload | undefined): { text: string; troub
   const uploaded = u?.uploaded ?? 0;
   const pending = Math.max(0, (u?.recorded ?? 0) - uploaded);
   const error = u?.error ?? "";
+  if (isEn()) {
+    const progress = `${uploaded} chunk${uploaded === 1 ? "" : "s"} uploaded${pending > 0 ? ` · ${pending} pending` : ""}`;
+    if (u?.status === "failed") {
+      return {
+        text: `${progress} · Upload failed`,
+        trouble: `${sentence(error || "Cannot upload audio for this meeting")} New audio cannot be uploaded either — consider stopping this recording and starting a new meeting.`,
+        tone: "bad",
+      };
+    }
+    const stuck = u?.status === "waiting" || !!error;
+    const text = `${progress} · ${stuck ? "Upload paused" : "Uploading live"}`;
+    if (!stuck) return { text, trouble: "", tone: "warn" };
+    const trouble = error
+      ? `Upload paused: ${sentence(error)} Recording continues and chunks are saved locally on this Mac.`
+      : "Upload paused. Recording continues and chunks are saved locally on this Mac; uploading will resume automatically.";
+    return { text, trouble, tone: "warn" };
+  }
   const progress = `已上传 ${uploaded} 片${pending > 0 ? ` · 待上传 ${pending} 片` : ""}`;
   if (u?.status === "failed") {
     return {
@@ -356,6 +455,18 @@ export function liveUpload(u: RecorderUpload | undefined): { text: string; troub
 
 /** 会议页面上：这场会议正在这台电脑上录音时的说明。elapsed 是写好的时长（00:12:34）。 */
 export function liveMeetingText(status: Exclude<RecorderStatus, "idle">, elapsed: string): string {
+  if (isEn()) {
+    switch (status) {
+      case "starting":
+        return "Starting recording for this meeting on this Mac…";
+      case "recording":
+        return `Recording on this Mac (${elapsed} elapsed). Processing will start automatically once you stop recording and upload finishes.`;
+      case "paused":
+        return `Recording on this Mac — currently paused (${elapsed} elapsed).`;
+      case "stopping":
+        return "Stopping recording; processing will start automatically once upload finishes.";
+    }
+  }
   switch (status) {
     case "starting":
       return "正在这台电脑上开始录这场会议…";
@@ -403,6 +514,11 @@ export function endedUpload(state: RecorderState, ended: Ended): RecorderUpload 
 
 /** 刚结束的那一场在这台电脑上已经没有了：标题和说明。 */
 export function endedGone(ended: Ended): { title: string; text: string } {
+  if (isEn()) {
+    return ended.empty
+      ? { title: "Nothing was recorded", text: "Recording stopped right after starting and nothing was captured; no minutes will be generated. You can start another recording." }
+      : { title: "Recording deleted", text: "The local recording on this Mac was deleted and will not be uploaded. You can delete the empty meeting on the meeting page if no longer needed." };
+  }
   return ended.empty
     ? { title: "什么也没有录下来", text: "录音刚开始就结束了，什么也没有录下来，不会生成纪要。可以再录一场。" }
     : { title: "录音已删除", text: "这台电脑上的这段录音已经删掉了，不会再上传，这场会议也不会生成纪要。不需要这场会议的话，可以在会议页面上删掉它。" };
@@ -437,10 +553,58 @@ export type UploadWhere = "banner" | "meeting" | "record";
  * 有原因时照着它说，不再自己补一句，免得说法打架。
  */
 export function uploadView(u: RecorderUpload, { where, canStart }: { where: UploadWhere; canStart: boolean }): UploadView {
-  const subject = where === "banner" ? `「${u.title}」的录音` : where === "meeting" ? "这台电脑上的录音" : "录音";
   const progress = u.recorded > 0 ? Math.min(1, u.uploaded / u.recorded) : 0;
   const left = Math.max(0, u.recorded - u.uploaded);
   const base = { progress: null, spinning: false, actions: [] as UploadAction[] };
+  if (isEn()) {
+    const subject = where === "banner" ? `Recording for "${u.title}"` : where === "meeting" ? "Local recording on this Mac" : "Recording";
+    switch (u.status) {
+      case "recording":
+      case "uploading":
+        return { ...base, tone: "info", text: `${subject} is uploading: ${u.uploaded} / ${u.recorded} chunks sent.`, progress };
+      case "waiting":
+        if (left === 0) {
+          const text = u.error
+            ? `${subject} finished uploading, waiting to start processing: ${sentence(u.error)}`
+            : `${subject} finished uploading; processing will start automatically once connected.`;
+          return { ...base, tone: "warn", text };
+        }
+        return {
+          ...base,
+          tone: "warn",
+          text: u.error
+            ? `${subject} has ${left} chunk${left === 1 ? "" : "s"} remaining: ${sentence(u.error)}`
+            : `${subject} has ${left} chunk${left === 1 ? "" : "s"} remaining; uploading will resume automatically once connected.`,
+          progress,
+        };
+      case "completing":
+        return { ...base, tone: "info", text: `${subject} uploaded, starting server processing…`, spinning: true };
+      case "completed":
+        return { ...base, tone: "ok", text: `${subject} uploaded; transcribing and generating minutes.`, actions: where === "banner" ? ["view", "dismiss"] : [] };
+      case "interrupted": {
+        const actions: UploadAction[] = [];
+        if (canStart) actions.push("continue");
+        if (u.recorded > 0) actions.push("finish");
+        actions.push("discard");
+        if (u.recorded === 0) return { ...base, tone: "warn", text: `${subject} was interrupted right after starting and nothing was recorded.`, actions };
+        const length = recordedLength(u.recorded);
+        const text = u.error
+          ? `${subject} was interrupted (${length} recorded). ${sentence(u.error)}`
+          : `${subject} was interrupted (${length} recorded). You can resume recording or upload what was captured to generate minutes.`;
+        return { ...base, tone: "warn", text: canStart ? text : `${text} Finish the active recording first if you want to resume this one.`, actions };
+      }
+      case "failed":
+        return {
+          ...base,
+          tone: "bad",
+          text: u.error
+            ? `${subject}: ${sentence(u.error)}`
+            : `${subject} cannot be uploaded: the server no longer accepts audio for this meeting (it may have been deleted or you lost access).`,
+          actions: ["discard"],
+        };
+    }
+  }
+  const subject = where === "banner" ? `「${u.title}」的录音` : where === "meeting" ? "这台电脑上的录音" : "录音";
   switch (u.status) {
     case "recording":
     case "uploading":
@@ -485,6 +649,11 @@ export function uploadView(u: RecorderUpload, { where, canStart }: { where: Uplo
 
 /** 删除一段录音前的确认。 */
 export function discardConfirm(u: RecorderUpload): string {
+  if (isEn()) {
+    return u.status === "interrupted" && u.recorded > 0
+      ? "Delete this local recording? Captured audio on this Mac will be permanently removed and no minutes will be generated."
+      : "Delete this local recording from this Mac? This cannot be undone.";
+  }
   return u.status === "interrupted" && u.recorded > 0
     ? "确定删除吗？这台电脑上录下的部分会被删掉，不能恢复，这场会议也不会生成纪要（不需要的话可以在会议页面上删掉它）。"
     : "确定删除这台电脑上的这段录音吗？删掉以后不能恢复。";
@@ -514,6 +683,14 @@ export function signOutNote(state: RecorderState, action: string): string {
   const unsent = state.uploads.filter(
     (u) => ["uploading", "waiting", "completing", "interrupted"].includes(u.status) && !(live && u.meetingId === state.meetingId),
   ).length;
+  if (isEn()) {
+    const later = "and will resume uploading next time you sign in to this server with this account";
+    if (live) {
+      const kept = unsent > 0 ? `This recording and ${unsent} other unfinished recording${unsent === 1 ? "" : "s"}` : "Recorded audio";
+      return `A recording is in progress — ${action} will stop it first. ${kept} will remain on this Mac ${later}.`;
+    }
+    return unsent > 0 ? `${unsent} unfinished recording${unsent === 1 ? "" : "s"} on this Mac will pause after ${action} ${later}.` : "";
+  }
   const later = "以后用这个账号登录这台服务器时接着上传";
   if (live) {
     const kept = unsent > 0 ? `这一场和另外 ${unsent} 段没传完的录音` : "录好的部分";

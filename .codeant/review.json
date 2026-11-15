@@ -2,10 +2,11 @@
   "rules": [
     {
       "id": "user-facing-chinese",
-      "description": "给用户看的文字（报错、提示、界面文案）要写成能照着处理的中文，不把内部报错直接抛给用户。",
+      "description": "给用户看的文字（报错、提示、界面文案）支持简体中文和英文（按请求头 Accept-Language、前端 web/src/i18n 或桌面端 desktop/src-tauri/src/i18n.rs 选择），两种语言都要写成能照着处理的自然说明，不把数据库、网络或标准库的内部报错直接抛给用户。",
       "files": [
         "**/*.go",
-        "web/src/**/*.{ts,tsx}"
+        "web/src/**/*.{ts,tsx}",
+        "desktop/src-tauri/src/**/*.rs"
       ],
       "scope": [
         "pr",

@@ -1,5 +1,6 @@
 import { api, ApiError, errorMessage, unwrap } from "../../api/client";
 import type { Meeting } from "../../api/client";
+import { isEn, tr } from "../../i18n/lang";
 import { sendChunk } from "../upload";
 import { deleteRecording, getChunk, SLICE_MS } from "./store";
 import type { LocalRecording } from "./store";
@@ -66,7 +67,7 @@ export class Uploader {
   async drained(): Promise<void> {
     for (;;) {
       if (this.fatal) throw this.fatal;
-      if (this.stopped) throw new ApiError(0, "上传已经停止");
+      if (this.stopped) throw new ApiError(0, tr("上传已经停止", "Upload stopped"));
       if (this.uploaded >= this.available) return;
       await new Promise<void>((resolve) => this.waiters.push(resolve));
     }
@@ -98,11 +99,19 @@ export class Uploader {
         try {
           body = await this.read(seq);
         } catch (e) {
-          this.fatal = new ApiError(0, `读不出这台电脑上存的第 ${seq + 1} 片录音：${errorMessage(e)}`);
+          this.fatal = new ApiError(
+            0,
+            isEn()
+              ? `Cannot read local audio chunk #${seq + 1}: ${errorMessage(e)}`
+              : `读不出这台电脑上存的第 ${seq + 1} 片录音：${errorMessage(e)}`,
+          );
           break;
         }
         if (!body) {
-          this.fatal = new ApiError(0, `第 ${seq + 1} 片录音在这台电脑上找不到了`);
+          this.fatal = new ApiError(
+            0,
+            isEn() ? `Local audio chunk #${seq + 1} is missing on this computer` : `第 ${seq + 1} 片录音在这台电脑上找不到了`,
+          );
           break;
         }
         let failure: ApiError | undefined;
@@ -179,7 +188,9 @@ export async function complete(meetingId: string, chunks: number, marks: number[
 }
 
 /** 开始录音以后网页很快就关掉了，什么也没存下来。 */
-export const NOTHING_SAVED = "这段录音什么也没存下来（开始录音后网页很快就关掉了），只能放弃。";
+export function nothingSavedText(): string {
+  return tr("这段录音什么也没存下来（开始录音后网页很快就关掉了），只能放弃。", "Nothing was saved from this recording (the tab closed right after starting). You can only discard it.");
+}
 
 /**
  * 接着上传一段之前没传完的录音（录音的网页关掉了、浏览器崩溃了），传完交给服务器处理，然后删掉本机的缓存。
@@ -192,7 +203,7 @@ export async function resumeUpload(rec: LocalRecording, onProgress: (uploaded: n
   while (have.has(prefix)) prefix++;
   // 本机存下的片数一般不会比服务器上的少；万一少了（比如本机存储中途出了问题），以服务器为准
   const total = Math.max(rec.chunks, prefix);
-  if (total === 0) throw new ApiError(0, NOTHING_SAVED);
+  if (total === 0) throw new ApiError(0, nothingSavedText());
 
   const uploader: Uploader = new Uploader(
     rec.meetingId,

@@ -3,6 +3,8 @@ import { useState } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { components } from "../api/schema";
 import { Button, Icon, Notice, Spinner } from "../components/ui";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { dateTime, duration, SOURCE_LABEL } from "../lib/format";
 
 type Trashed = components["schemas"]["TrashedMeeting"];
@@ -14,17 +16,22 @@ function refresh() {
 
 /** 回收站：删除的会议放在这里，过期前可以恢复，也可以立即彻底删除。 */
 export function TrashList() {
+  useLang();
   const trash = useQuery({ queryKey: ["trash"], queryFn: () => unwrap(api.GET("/api/trash")) });
-  if (trash.isPending) return <Spinner label="正在加载回收站…" />;
+  if (trash.isPending) return <Spinner label={tr("正在加载回收站…", "Loading trash…")} />;
   if (trash.isError) return <Notice tone="bad">{errorMessage(trash.error)}</Notice>;
   const { items, days } = trash.data;
   return (
     <div className="flex flex-col gap-2.5">
       <p className="text-[13px] leading-relaxed text-muted">
-        删除的会议在这里放 {days} 天，可以恢复；过期后连同录音、转写和纪要一起彻底删除。管理员看得到所有人删除的会议，其他人只看得到自己创建的。
+        {isEn()
+          ? `Deleted meetings stay here for ${days} days and can be restored; once expired, audio, transcripts, and minutes are permanently deleted. Admins see all deleted meetings; members see only their own.`
+          : `删除的会议在这里放 ${days} 天，可以恢复；过期后连同录音、转写和纪要一起彻底删除。管理员看得到所有人删除的会议，其他人只看得到自己创建的。`}
       </p>
       {items.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-line-strong bg-white px-5 py-14 text-center text-sm text-muted">回收站是空的。</div>
+        <div className="rounded-2xl border border-dashed border-line-strong bg-white px-5 py-14 text-center text-sm text-muted">
+          {tr("回收站是空的。", "Trash is empty.")}
+        </div>
       ) : (
         items.map((item) => <TrashRow key={item.id} item={item} />)
       )}
@@ -33,6 +40,7 @@ export function TrashList() {
 }
 
 function TrashRow({ item }: { item: Trashed }) {
+  useLang();
   const [confirming, setConfirming] = useState(false);
   const path = { params: { path: { id: item.id } } };
   const restore = useMutation({ mutationFn: () => unwrap(api.POST("/api/trash/{id}/restore", path)), onSuccess: refresh });
@@ -52,31 +60,44 @@ function TrashRow({ item }: { item: Trashed }) {
             <span>{item.owner_name}</span>
           </div>
           <div className="text-[13px] text-muted">
-            {item.deleted_by_name || "有人"}在 {dateTime(item.deleted_at)} 删除 ·{" "}
-            <span className={daysLeft <= 3 ? "text-bad" : ""}>{daysLeft > 0 ? `${daysLeft} 天后彻底删除` : "马上就会彻底删除"}</span>
+            {isEn()
+              ? `Deleted by ${item.deleted_by_name || "someone"} on ${dateTime(item.deleted_at)} · `
+              : `${item.deleted_by_name || "有人"}在 ${dateTime(item.deleted_at)} 删除 · `}
+            <span className={daysLeft <= 3 ? "text-bad" : ""}>
+              {daysLeft > 0
+                ? isEn()
+                  ? `permanently deleted in ${daysLeft} day${daysLeft === 1 ? "" : "s"}`
+                  : `${daysLeft} 天后彻底删除`
+                : tr("马上就会彻底删除", "permanently deleted soon")}
+            </span>
           </div>
         </div>
         {item.can_manage && !confirming && (
           <span className="flex gap-2">
             <Button size="sm" disabled={busy} onClick={() => restore.mutate()}>
               <Icon name="retry" size={15} />
-              恢复
+              {tr("恢复", "Restore")}
             </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(true)}>
-              彻底删除
+              {tr("彻底删除", "Delete permanently")}
             </Button>
           </span>
         )}
       </div>
       {confirming && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-bad-tint/60 px-4 py-3 text-sm">
-          <span className="text-ink-2">彻底删除以后，录音、转写和纪要都没了，不能恢复。已经发到飞书群的卡片和导入的飞书文档不会跟着删除。</span>
+          <span className="text-ink-2">
+            {tr(
+              "彻底删除以后，录音、转写和纪要都没了，不能恢复。已经发到飞书群的卡片和导入的飞书文档不会跟着删除。",
+              "Permanently deletes audio, transcript, and minutes — cannot be undone. Cards or Feishu Docs already shared externally are not removed.",
+            )}
+          </span>
           <span className="flex gap-2">
             <Button size="sm" variant="danger" disabled={busy} onClick={() => purge.mutate()}>
-              确定彻底删除
+              {tr("确定彻底删除", "Delete permanently")}
             </Button>
             <Button size="sm" onClick={() => setConfirming(false)}>
-              取消
+              {tr("取消", "Cancel")}
             </Button>
           </span>
         </div>

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
@@ -79,6 +80,7 @@ func LoadWith(p models.Paths, threads int, language string, params Params) (*Eng
 // 它的方法不能并发调用。
 type Transcriber struct {
 	recognizer *sherpa.OfflineRecognizer
+	config     sherpa.OfflineRecognizerConfig
 	vad        sherpa.VadModelConfig
 }
 
@@ -89,8 +91,8 @@ func NewTranscriber(m Model, vadModel string) (*Transcriber, error) {
 
 // NewTranscriberWith 和 NewTranscriber 一样，只是语音检测用指定的参数。
 func NewTranscriberWith(m Model, vadModel string, params Params) (*Transcriber, error) {
-	t := &Transcriber{}
-	if t.recognizer = sherpa.NewOfflineRecognizer(&m.config); t.recognizer == nil {
+	t := &Transcriber{config: m.config}
+	if t.recognizer = sherpa.NewOfflineRecognizer(&t.config); t.recognizer == nil {
 		return nil, modelError("识别模型", m.file())
 	}
 	t.vad.SileroVad.Model = vadModel
@@ -103,6 +105,24 @@ func NewTranscriberWith(m Model, vadModel string, params Params) (*Transcriber, 
 	t.vad.NumThreads = 1
 	t.vad.Provider = "cpu"
 	return t, nil
+}
+
+func (t *Transcriber) isSenseVoice() bool {
+	return t.config.ModelConfig.SenseVoice.Model != ""
+}
+
+// SetLanguage 切换 SenseVoice 的识别语言（"auto"、"zh"、"en"、"yue"、"ja"、"ko"）。
+// sherpa-onnx 直接更新识别器内部的语言选项（耗时几微秒），不重新加载模型权重。
+func (t *Transcriber) SetLanguage(lang string) {
+	if !t.isSenseVoice() {
+		return
+	}
+	lang = cmp.Or(strings.TrimSpace(lang), "auto")
+	if t.config.ModelConfig.SenseVoice.Language == lang {
+		return
+	}
+	t.config.ModelConfig.SenseVoice.Language = lang
+	t.recognizer.SetConfig(&t.config)
 }
 
 // Close 释放识别模型。进程里一直用着的 Engine 不用调。
@@ -154,15 +174,57 @@ func (t *Transcriber) Transcribe(ctx context.Context, samples []float32, progres
 // TranscribeDetailed 找出有人说话的区间，逐段识别成带时间的字和句子。progress 的参数是 0 到 1。
 // 在线识别用它的区间来切录音、用它每个字的时间给远端返回的文字定时间（见 internal/cloudasr）。
 func (t *Transcriber) TranscribeDetailed(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Speech, error) {
-	var out []transcript.Speech
+	type chunkMeta struct {
+		from, end float64
+		samples   []float32
+		lang      string
+	}
+	useAuto := t.isSenseVoice() && t.config.ModelConfig.SenseVoice.Language == "auto"
+	var (
+		out    []transcript.Speech
+		chunks []chunkMeta
+	)
 	err := t.detectSpeech(ctx, samples, progress, func(start int, speech []float32) {
 		from := float64(start) / audio.SampleRate
 		end := from + float64(len(speech))/audio.SampleRate
-		tokens, segs := t.recognize(speech, from, end)
+		tokens, segs, lang := t.recognize(speech, from, end)
 		out = append(out, transcript.Speech{Start: from, End: end, Tokens: tokens, Segments: segs})
+		if useAuto {
+			var raw []float32
+			if start >= 0 && start+len(speech) <= len(samples) {
+				raw = samples[start : start+len(speech)]
+			} else {
+				raw = slices.Clone(speech)
+			}
+			chunks = append(chunks, chunkMeta{from: from, end: end, samples: raw, lang: lang})
+		}
 	})
 	if err != nil {
 		return nil, err
+	}
+	if useAuto && len(out) > 0 {
+		items := make([]autoSegment, len(out))
+		for i, sp := range out {
+			items[i] = autoSegment{
+				dur:  chunks[i].end - chunks[i].from,
+				lang: chunks[i].lang,
+				text: joinSegmentText(sp.Segments),
+			}
+		}
+		if fallback, indices := planAutoRedecode(items); len(indices) > 0 {
+			cfg := t.config
+			cfg.ModelConfig.SenseVoice.Language = fallback
+			t.recognizer.SetConfig(&cfg)
+			defer t.recognizer.SetConfig(&t.config)
+			for _, idx := range indices {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				ch := chunks[idx]
+				tokens, segs, _ := t.recognize(ch.samples, ch.from, ch.end)
+				out[idx] = transcript.Speech{Start: ch.from, End: ch.end, Tokens: tokens, Segments: segs}
+			}
+		}
 	}
 	return out, nil
 }
@@ -200,25 +262,166 @@ func (t *Transcriber) detectSpeech(ctx context.Context, samples []float32, progr
 	return nil
 }
 
-// recognize 识别一小段录音（start 到 end 秒），返回每个字的时间（从这一小段开头算）和按标点切出的句子。
+// recognize 识别一小段录音（start 到 end 秒），返回每个字的时间（从这一小段开头算）、按标点切出的句子和识别出的语言标签。
 // 模型没给出每个字的时间时（正常不会发生），整段算一句，tokens 为 nil。
-func (t *Transcriber) recognize(samples []float32, start, end float64) ([]transcript.Token, []transcript.Segment) {
+func (t *Transcriber) recognize(samples []float32, start, end float64) ([]transcript.Token, []transcript.Segment, string) {
 	stream := sherpa.NewOfflineStream(t.recognizer)
 	defer sherpa.DeleteOfflineStream(stream)
 	stream.AcceptWaveform(audio.SampleRate, samples)
 	t.recognizer.Decode(stream)
 	result := stream.GetResult()
+	lang := normalizeLangTag(result.Lang)
 	if len(result.Tokens) > 0 && len(result.Timestamps) == len(result.Tokens) {
 		tokens := make([]transcript.Token, len(result.Tokens))
 		for i, text := range result.Tokens {
 			tokens[i] = transcript.Token{Text: text, Start: float64(result.Timestamps[i])}
 		}
-		return tokens, transcript.Sentences(tokens, start, end)
+		return tokens, transcript.Sentences(tokens, start, end), lang
 	}
 	if text := strings.TrimSpace(result.Text); text != "" {
-		return nil, []transcript.Segment{{Start: start, End: end, Speaker: -1, Text: text}}
+		return nil, []transcript.Segment{{Start: start, End: end, Speaker: -1, Text: text}}, lang
 	}
-	return nil, nil
+	return nil, nil, lang
+}
+
+func normalizeLangTag(tag string) string {
+	return strings.ToLower(strings.Trim(tag, "<|> \t"))
+}
+
+func joinSegmentText(segs []transcript.Segment) string {
+	if len(segs) == 0 {
+		return ""
+	}
+	if len(segs) == 1 {
+		return segs[0].Text
+	}
+	var b strings.Builder
+	for _, s := range segs {
+		b.WriteString(s.Text)
+	}
+	return b.String()
+}
+
+// autoSegment 是 SenseVoice 在 auto 模式下第一遍识别出一小段语音的摘要，用来判断哪些片段属于误判、需要按会议主语言重算。
+type autoSegment struct {
+	dur  float64
+	lang string
+	text string
+}
+
+var langOrder = []string{"zh", "en", "yue", "ja", "ko"}
+
+// planAutoRedecode 根据整场录音各语种的分布，挑出在 SenseVoice auto 模式下被误判成外语的片段下标，以及重算时用的主语言。
+//
+// SenseVoice 的 auto 对正常长度的普通话、粤语、英语、日语、韩语和中英混合都很准，但遇到孤立的短语气词（「嗯」「哦」「是」）
+// 或底噪切段时，容易把它们判成日文（「うん。」「四？」）、韩文（「분.」「하늘튀 왜种这种。」）或单个英文词（「O.」「The.」）：
+//   - 整场里没有成句的日文时，所有判成 ja 或带假名的片段都按主语言重算（包括没有假名的日文汉字幻觉如「四？」）；
+//   - 整场里没有成句的韩文时，所有判成 ko 或带谚文的片段都按主语言重算（包括夹着汉字的噪声段）；
+//   - 整场主语言明确（长段占比 ≥ 70%）时，不到 1.5 秒且该语种在长段里几乎没出现过的超短异语种语气词也按主语言重算，
+//     而 ≥ 1.5 秒的独立外语整句和句内中英夹杂原样保留。
+func planAutoRedecode(items []autoSegment) (fallback string, indices []int) {
+	var (
+		totalDur, totalLongDur   float64
+		jaCleanDur, koCleanDur   float64
+		jaCleanSegs, koCleanSegs int
+		totalKana, totalHangul   int
+	)
+	totalByLang := map[string]float64{}
+	longByLang := map[string]float64{}
+
+	for _, it := range items {
+		if strings.TrimSpace(it.text) == "" {
+			continue
+		}
+		totalDur += it.dur
+		kana, hangul, han := countScripts(it.text)
+		totalKana += kana
+		totalHangul += hangul
+
+		// 韩文识别正常只出谚文和字母数字，混着汉字（如「하늘튀 왜种这种。」）或没有谚文的 ko 标签属于噪声幻觉；
+		// 日文成句必然带假名（助词、词尾），短段判成 ja 却一个假名都没有（如「四？」）也是语气词误判
+		koHalluc := (it.lang == "ko" && hangul == 0) || (hangul > 0 && han > 0)
+		jaHalluc := it.lang == "ja" && kana == 0 && it.dur < 3.0
+		if !koHalluc && !jaHalluc && slices.Contains(langOrder, it.lang) {
+			totalByLang[it.lang] += it.dur
+			if it.dur >= 1.8 {
+				longByLang[it.lang] += it.dur
+				totalLongDur += it.dur
+			}
+		}
+		if it.lang == "ja" && kana >= 2 && it.dur >= 1.8 {
+			jaCleanDur += it.dur
+			jaCleanSegs++
+		}
+		if it.lang == "ko" && hangul >= 3 && han == 0 && it.dur >= 1.8 {
+			koCleanDur += it.dur
+			koCleanSegs++
+		}
+	}
+
+	dom := dominantLang(longByLang)
+	if dom == "" {
+		dom = dominantLang(totalByLang)
+		if totalDur < 1.5 {
+			if (dom == "ja" && totalKana <= 2) || (dom == "ko" && totalHangul <= 1) {
+				dom = "zh"
+			}
+		}
+	}
+	if dom == "" {
+		dom = "zh"
+	}
+
+	jaActive := dom == "ja" || (jaCleanDur >= 4.0 && (jaCleanDur >= 0.03*totalDur || jaCleanSegs >= 3))
+	koActive := dom == "ko" || (koCleanDur >= 4.0 && (koCleanDur >= 0.03*totalDur || koCleanSegs >= 3))
+	if (dom == "ja" && !jaActive) || (dom == "ko" && !koActive) {
+		dom = "zh"
+	}
+	fallback = dom
+
+	domStrong := totalLongDur >= 5.0 && longByLang[dom] >= 0.70*totalLongDur
+	for i, it := range items {
+		if strings.TrimSpace(it.text) == "" {
+			continue
+		}
+		kana, hangul, _ := countScripts(it.text)
+		switch {
+		case !jaActive && (it.lang == "ja" || kana > 0):
+			indices = append(indices, i)
+		case !koActive && (it.lang == "ko" || hangul > 0):
+			indices = append(indices, i)
+		case domStrong && it.dur < 1.5 && it.lang != "" && it.lang != dom:
+			if longByLang[it.lang] < 4.0 && longByLang[it.lang] < 0.05*totalLongDur {
+				indices = append(indices, i)
+			}
+		}
+	}
+	return fallback, indices
+}
+
+func dominantLang(byLang map[string]float64) string {
+	best := ""
+	bestDur := 0.0
+	for _, l := range langOrder {
+		if d := byLang[l]; d > bestDur {
+			best, bestDur = l, d
+		}
+	}
+	return best
+}
+
+func countScripts(s string) (kana, hangul, han int) {
+	for _, r := range s {
+		switch {
+		case unicode.In(r, unicode.Hiragana, unicode.Katakana):
+			kana++
+		case unicode.Is(unicode.Hangul, r):
+			hangul++
+		case unicode.Is(unicode.Han, r):
+			han++
+		}
+	}
+	return kana, hangul, han
 }
 
 // 算一个人的声纹时用他最长的几段话，加起来最多这么多秒：再多也不会更准，只是更慢

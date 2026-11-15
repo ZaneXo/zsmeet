@@ -34,8 +34,8 @@ type Config struct {
 	Concurrency int
 	// 识别用几个 CPU 线程
 	ASRThreads int
-	// 识别的语言：zh（默认，中文会议里夹着英文也能认）、en、ja、ko、yue，或者 auto（每一小段自动判断）。
-	// auto 会把很短的「嗯」「哦」认成日文，中文团队不要用
+	// 默认的识别语言：auto（默认，自动识别普通话、粤语、英语、日语、韩语及混合语音，并抑制短语气词误判）、
+	// zh、en、yue、ja 或 ko。管理员在「设置 → 语音识别」里改过以后按网页上的设置走
 	ASRLanguage string
 	// 只通过 HTTPS 访问时设为 true，Cookie 会带 Secure
 	SecureCookie bool
@@ -94,7 +94,7 @@ func LoadASR() (ASR, error) {
 		ModelsDir:   cmp.Or(os.Getenv("ZSMEET_MODELS_DIR"), "./models"),
 		ModelMirror: cmp.Or(os.Getenv("ZSMEET_MODEL_MIRROR"), "https://huggingface.co"),
 		Threads:     envInt("ZSMEET_ASR_THREADS", min(runtime.NumCPU(), 4)),
-		Language:    cmp.Or(os.Getenv("ZSMEET_ASR_LANGUAGE"), "zh"),
+		Language:    cmp.Or(os.Getenv("ZSMEET_ASR_LANGUAGE"), "auto"),
 	}
 	if !slices.Contains([]string{"zh", "en", "ja", "ko", "yue", "auto"}, a.Language) {
 		return a, errors.New("ZSMEET_ASR_LANGUAGE 只能是 zh、en、ja、ko、yue 或 auto")

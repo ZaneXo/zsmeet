@@ -56,8 +56,9 @@ const system = `你是会议转写的校对员。下面是语音识别出的会�
 1. 只改认错的字词。不要润色，不要换说法，不要删语气词和重复的话，不要补充内容，不要合并或拆分句子。
 2. 拿不准的不改。读起来别扭但可能就是原话的，不改。
 3. 人名、产品名、项目名优先用会议信息里给出的写法。
-4. 标点、数字的写法保持原样，除非它们本身就是认错的一部分。
-5. 只输出 JSON，不要输出别的话：{"fixes": [{"id": 句子编号, "text": "改正后的整句"}]}。
+4. 保持每句话原有的语言（普通话、粤语、英语、日语、韩语，以及中英夹杂等混合表达）：不要翻译成别的语言，不要把粤语口语（如「喺」「唔」「嘅」）改成书面普通话。
+5. 标点、数字的写法保持原样，除非它们本身就是认错的一部分。
+6. 只输出 JSON，不要输出别的话：{"fixes": [{"id": 句子编号, "text": "改正后的整句"}]}。
    只列出改过的句子，text 是改正后的完整一句（不带编号和说话人）；没有要改的就输出 {"fixes": []}。`
 
 const pinyinHint = `每句下面一行「拼音：」是按识别出的字注的音（不带声调）。认错的字往往和正确的字同音或近音，
@@ -120,8 +121,10 @@ func LLM(ctx context.Context, chat ChatFunc, segs []transcript.Segment, in Input
 			}
 		}
 		for id, text := range r.fixes {
-			// 模型有时把行首的说话人也抄了回来
-			text = strings.TrimSpace(strings.TrimPrefix(text, in.Speakers.Of(segs[id].Speaker)+"："))
+			// 模型有时把行首的说话人也抄了回来（全角或半角冒号）
+			speaker := in.Speakers.Of(segs[id].Speaker)
+			text = strings.TrimPrefix(text, speaker+"：")
+			text = strings.TrimSpace(strings.TrimPrefix(text, speaker+":"))
 			if text == segs[id].Text {
 				continue
 			}

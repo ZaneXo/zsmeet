@@ -72,6 +72,9 @@ func Homophones(segs []transcript.Segment, hotwords []string) int {
 	cache := map[rune]readings{}
 	changed := 0
 	for i := range segs {
+		if hasKana(segs[i].Text) {
+			continue // 日文里的汉字不按普通话拼音换同音词
+		}
 		text := []rune(segs[i].Text)
 		out := make([]rune, 0, len(text))
 		for pos := 0; pos < len(text); {
@@ -118,6 +121,9 @@ var firstReading = pinyin.Args{Style: pinyin.Normal, Fallback: func(rune, pinyin
 // pinyinOf 给一句话注音：汉字换成拼音（不带声调），字母数字照抄，标点和空白去掉，用空格隔开。
 // 没有汉字时为空，这句不用注音。
 func pinyinOf(s string) string {
+	if hasKana(s) {
+		return ""
+	}
 	var parts []string
 	var word []rune
 	han := false
@@ -148,4 +154,13 @@ func pinyinOf(s string) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+func hasKana(s string) bool {
+	for _, r := range s {
+		if unicode.In(r, unicode.Hiragana, unicode.Katakana) {
+			return true
+		}
+	}
+	return false
 }

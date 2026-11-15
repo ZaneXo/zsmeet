@@ -69,6 +69,7 @@ func TestHomophones(t *testing.T) {
 		"长沙的张敏和长敏都在。",      // 「长」是多音字（zhang），长敏 → 张敏；长沙的「长沙」对不上「张敏」
 		"智能体平台叫知能体平台。",     // 最长的热词优先：智能体平台 已经对，知能体平台 → 智能体平台
 		"Feishu 和 zsmeet。", // 没有汉字，不动
+		"本日の非書会議を始めます。",    // 含日文假名的句子不按普通话拼音换同音词
 	)
 	n := Homophones(in, []string{"飞书", "张敏", "智能体平台", "智能", "zsmeet", "敏"})
 	want := []string{
@@ -79,6 +80,7 @@ func TestHomophones(t *testing.T) {
 		"长沙的张敏和张敏都在。",
 		"智能体平台叫智能体平台。",
 		"Feishu 和 zsmeet。",
+		"本日の非書会議を始めます。",
 	}
 	if got := texts(in); !slices.Equal(got, want) {
 		t.Fatalf("Homophones:\n got %q\nwant %q", got, want)
@@ -194,8 +196,8 @@ func TestLLM(t *testing.T) {
 		}
 		answers := map[int]string{
 			0: "我们把纪要发到飞书群里。",
-			1: "这件事下周再讨论",         // 改写，不采用
-			2: "说话人 1：张敏你来说一下进度。", // 把说话人也抄回来了
+			1: "这件事下周再讨论",          // 改写，不采用
+			2: "说话人 1: 张敏你来说一下进度。", // 把说话人连半角冒号也抄回来了
 			3: "这句没错。",
 		}
 		var fixes []string

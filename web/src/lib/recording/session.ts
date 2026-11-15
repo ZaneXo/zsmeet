@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { api, ApiError, errorMessage, queryClient, unwrap } from "../../api/client";
 import { isEn, tr } from "../../i18n/lang";
+import type { MeetingASRLanguage } from "../format";
 import * as store from "./store";
 import { SLICE_MS } from "./store";
 import type { LocalRecording } from "./store";
@@ -94,6 +95,8 @@ export type StartOptions = {
   visibility: "team" | "private";
   // 有几个人说话：0 是按声音自动区分
   speakerCount: number;
+  // 识别语言：留空跟随团队默认设置
+  language?: MeetingASRLanguage;
   source: Source;
 };
 
@@ -387,6 +390,7 @@ class RecordingSession {
             hotwords: opts.hotwords,
             visibility: opts.visibility,
             speaker_count: opts.speakerCount,
+            language: opts.language || undefined,
           },
         }),
       );

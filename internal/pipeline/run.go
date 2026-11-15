@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -258,6 +259,8 @@ func (r *run) recognize(ctx context.Context, samples []float32) ([]transcript.Se
 		useOnline = true
 	}
 
+	lang := cmp.Or(r.m.Language, asrCfg.EffectiveLanguage())
+
 	if !useOnline {
 		w.cpu.Lock()
 		defer w.cpu.Unlock()
@@ -268,6 +271,7 @@ func (r *run) recognize(ctx context.Context, samples []float32) ([]transcript.Se
 		if err != nil {
 			return nil, nil, "", "", err
 		}
+		engine.SetLanguage(lang)
 		segs, err := engine.Transcribe(ctx, samples, func(p float64) { r.report(ctx, StageTranscribe, p) })
 		if err != nil {
 			return nil, nil, "", "", err
@@ -314,6 +318,7 @@ func (r *run) recognize(ctx context.Context, samples []float32) ([]transcript.Se
 		if err != nil {
 			return nil, false, err
 		}
+		engine.SetLanguage(lang)
 		speeches, err := engine.TranscribeDetailed(ctx, samples, func(p float64) {
 			r.report(ctx, StageTranscribe, p*0.5)
 		})

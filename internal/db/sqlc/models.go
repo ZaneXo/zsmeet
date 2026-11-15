@@ -122,6 +122,7 @@ type Meeting struct {
 	SpeakerCount   int32
 	AsrEngine      string
 	AsrWarning     string
+	Language       string
 }
 
 type MeetingMember struct {

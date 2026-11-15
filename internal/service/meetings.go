@@ -20,6 +20,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/minutes"
 	"github.com/ZaneXo/zsmeet/internal/queue"
 	"github.com/ZaneXo/zsmeet/internal/search"
+	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/storage"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
@@ -71,6 +72,8 @@ type NewMeeting struct {
 	Visibility string
 	// 有几个人说话：0 是自动区分，1 到 MaxSpeakerCount 是按这个人数区分说话人
 	SpeakerCount int
+	// 这场会议指定的识别语言：为空时跟随团队默认设置，否则是 settings.ASRLanguages 里的一种
+	Language string
 }
 
 // MaxSpeakerCount 是「有几个人说话」最多能填多少。
@@ -82,6 +85,14 @@ func checkSpeakerCount(n int) error {
 		return invalid("说话人数要在 1 到 %d 之间；不确定有几个人时选「自动区分」", MaxSpeakerCount)
 	}
 	return nil
+}
+
+func checkLanguage(lang string) (string, error) {
+	lang = strings.TrimSpace(lang)
+	if lang != "" && !slices.Contains(settings.ASRLanguages, lang) {
+		return "", invalid("识别语言只能选跟随团队默认、自动识别（多语种混合）、中文（普通话）、英语、粤语、日语或韩语")
+	}
+	return lang, nil
 }
 
 // CreateMeeting 新建一场等待上传的会议。
@@ -121,13 +132,17 @@ func (s *Service) CreateMeeting(ctx context.Context, user sqlc.User, in NewMeeti
 	if err := checkSpeakerCount(in.SpeakerCount); err != nil {
 		return Meeting{}, err
 	}
+	lang, err := checkLanguage(in.Language)
+	if err != nil {
+		return Meeting{}, err
+	}
 
 	var m sqlc.Meeting
 	err = s.tx(ctx, func(_ pgx.Tx, q *sqlc.Queries) error {
 		var err error
 		m, err = q.CreateMeeting(ctx, sqlc.CreateMeetingParams{
 			OwnerID: user.ID, Title: title, Source: in.Source, Template: in.Template, Hotwords: hotwords, Visibility: in.Visibility,
-			SpeakerCount: int32(in.SpeakerCount),
+			SpeakerCount: int32(in.SpeakerCount), Language: lang,
 		})
 		if err != nil {
 			return err
@@ -556,10 +571,17 @@ var errAudioGone = conflict("这场会议的录音已经不在了（可能过了
 
 // Retranscribe 用现在的识别模型重新转写一场会议（换了识别模型，或者转写有问题时用），
 // 转完会重新生成纪要，作为一个新版本，之前的版本都保留。
-// speakerCount 不为 nil 时先改掉这场会议有几个人说话（0 是自动区分），这次转写就按它区分说话人；为 nil 时照旧。
-func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID, speakerCount *int) (Meeting, error) {
+// speakerCount 不为 nil 时先改掉这场会议有几个人说话（0 是自动区分）；language 不为 nil 时先改掉这场会议指定的识别语言（"" 是跟随团队默认）。
+func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID, speakerCount *int, language *string) (Meeting, error) {
 	if speakerCount != nil {
 		if err := checkSpeakerCount(*speakerCount); err != nil {
+			return Meeting{}, err
+		}
+	}
+	var cleanedLang string
+	if language != nil {
+		var err error
+		if cleanedLang, err = checkLanguage(*language); err != nil {
 			return Meeting{}, err
 		}
 	}
@@ -585,9 +607,14 @@ func (s *Service) Retranscribe(ctx context.Context, user sqlc.User, id uuid.UUID
 		if queued.AudioDeletedAt != nil {
 			return errAudioGone
 		}
-		// 排上队以后才改人数：会议正在处理时不改，免得这次处理到一半换了人数
+		// 排上队以后才改人数和语言：会议正在处理时不改，免得这次处理到一半变了设置
 		if speakerCount != nil {
 			if err := q.SetMeetingSpeakerCount(ctx, sqlc.SetMeetingSpeakerCountParams{ID: id, SpeakerCount: int32(*speakerCount)}); err != nil {
+				return err
+			}
+		}
+		if language != nil {
+			if err := q.SetMeetingLanguage(ctx, sqlc.SetMeetingLanguageParams{ID: id, Language: cleanedLang}); err != nil {
 				return err
 			}
 		}

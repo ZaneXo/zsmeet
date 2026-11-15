@@ -221,6 +221,7 @@ type CreateMeetingInput struct {
 		// 指定具体的人要在建好以后用「谁能看」接口设置
 		Visibility   string `json:"visibility,omitempty" enum:"team,private" doc:"谁能看：团队所有人（默认）或者只有自己（管理员也能看）"`
 		SpeakerCount int    `json:"speaker_count,omitzero" minimum:"0" maximum:"30" doc:"有几个人说话：0 或不填是按声音自动区分；1 到 30 是按这个人数区分说话人"`
+		Language     string `json:"language,omitempty" enum:",auto,zh,en,yue,ja,ko" doc:"这场会议的识别语言：留空跟随团队默认设置，auto 是自动识别多语种与混合语音，其余是固定单种语言"`
 	}
 }
 
@@ -238,7 +239,7 @@ var createMeetingOp = huma.Operation{
 func (h *Handlers) CreateMeeting(ctx context.Context, in *CreateMeetingInput) (*MeetingOutput, error) {
 	m, err := h.svc.CreateMeeting(ctx, currentUser(ctx), service.NewMeeting{
 		Title: in.Body.Title, Source: in.Body.Source, Template: in.Body.Template, Hotwords: in.Body.Hotwords,
-		Visibility: in.Body.Visibility, SpeakerCount: in.Body.SpeakerCount,
+		Visibility: in.Body.Visibility, SpeakerCount: in.Body.SpeakerCount, Language: in.Body.Language,
 	})
 	if err != nil {
 		return nil, toHTTP(err)
@@ -508,9 +509,10 @@ func meetingChanged(cur, last Meeting) bool {
 
 type RetranscribeInput struct {
 	MeetingID
-	// 可以不带：照原来的人数（或自动区分）转写
+	// 可以不带：照原来的人数（或自动区分）和识别语言转写
 	Body *struct {
-		SpeakerCount *int `json:"speaker_count,omitempty" minimum:"0" maximum:"30" doc:"这次按几个人区分说话人：0 是按声音自动区分，1 到 30 是按这个人数；不填就照原来的设置"`
+		SpeakerCount *int    `json:"speaker_count,omitempty" minimum:"0" maximum:"30" doc:"这次按几个人区分说话人：0 是按声音自动区分，1 到 30 是按这个人数；不填就照原来的设置"`
+		Language     *string `json:"language,omitempty" enum:",auto,zh,en,yue,ja,ko" doc:"这次用的识别语言：空字符串是跟随团队默认，auto 是自动识别多语种与混合语音，其余是固定单种语言；不填就照原来的设置"`
 	}
 }
 
@@ -530,10 +532,12 @@ func (h *Handlers) Retranscribe(ctx context.Context, in *RetranscribeInput) (*Me
 		return nil, err
 	}
 	var speakerCount *int
+	var language *string
 	if in.Body != nil {
 		speakerCount = in.Body.SpeakerCount
+		language = in.Body.Language
 	}
-	m, err := h.svc.Retranscribe(ctx, currentUser(ctx), id, speakerCount)
+	m, err := h.svc.Retranscribe(ctx, currentUser(ctx), id, speakerCount, language)
 	if err != nil {
 		return nil, toHTTP(err)
 	}

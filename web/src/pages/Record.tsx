@@ -8,11 +8,12 @@ import { Button, buttonClass, Card, Field, Icon, Input, Notice, Select } from ".
 import { isEn } from "../i18n/lang";
 import { tr, useLang } from "../i18n/react";
 import { hms } from "../lib/format";
+import type { MeetingASRLanguage } from "../lib/format";
 import { canRecordTab, microphones, session, SLICE_MS, unsupportedReason, useRecording } from "../lib/recording/session";
 import type { Snapshot, Source } from "../lib/recording/session";
 import type { Trouble } from "../lib/recording/upload";
 import { useTicker } from "../lib/useTicker";
-import { SpeakerCountField, useTemplates, VisibilityField } from "./UploadDialog";
+import { ASRLanguageField, SpeakerCountField, useTemplates, VisibilityField } from "./UploadDialog";
 
 const SLICE_SEC = SLICE_MS / 1000;
 
@@ -69,6 +70,7 @@ function Setup({ user, rec }: { user: User; rec: Snapshot }) {
   const [hotwords, setHotwords] = useState("");
   const [visibility, setVisibility] = useState<"team" | "private">("team");
   const [speakerCount, setSpeakerCount] = useState(0);
+  const [language, setLanguage] = useState<MeetingASRLanguage>("");
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState("");
   const [micError, setMicError] = useState("");
@@ -106,7 +108,7 @@ function Setup({ user, rec }: { user: User; rec: Snapshot }) {
   const submit = (e: FormEvent) => {
     e.preventDefault();
     // 直接在提交（点击）里调用：选标签页的窗口只能由用户的点击触发
-    void session.start({ userId: user.id, title, template, hotwords, visibility, speakerCount, source });
+    void session.start({ userId: user.id, title, template, hotwords, visibility, speakerCount, language, source });
   };
 
   if (unsupported) return <Notice tone="warn">{unsupported}</Notice>;
@@ -208,6 +210,7 @@ function Setup({ user, rec }: { user: User; rec: Snapshot }) {
             />
           </Field>
         </div>
+        <ASRLanguageField id="rec-language" value={language} onChange={setLanguage} disabled={starting} />
         <SpeakerCountField id="rec-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={starting} />
         <VisibilityField id="rec-visibility" value={visibility} onChange={setVisibility} disabled={starting} />
 

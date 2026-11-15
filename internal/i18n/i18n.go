@@ -415,6 +415,8 @@ var exactEN = map[string]string{
 	"上下文长度只能从列表里选（8K 到 200K），不知道的话选 32K":                               "Context length must be one of the listed options (8K to 200K); choose 32K if unsure",
 	"接口地址要以 http:// 或 https:// 开头，例如 https://api.openai.com/v1":        "Base URL must start with http:// or https://, e.g. https://api.openai.com/v1",
 	"识别方式只能选「本机识别」或「DeepSeek 在线识别」":                                    "ASR provider must be \"Local\" or \"DeepSeek Online\"",
+	"识别语言只能选自动识别（多语种混合）、中文（普通话）、英语、粤语、日语或韩语":                           "Recognition language must be Auto (multilingual), Chinese (Mandarin), English, Cantonese, Japanese, or Korean",
+	"识别语言只能选跟随团队默认、自动识别（多语种混合）、中文（普通话）、英语、粤语、日语或韩语":                    "Recognition language must be Team default, Auto (multilingual), Chinese (Mandarin), English, Cantonese, Japanese, or Korean",
 	"打开 DeepSeek 在线识别需要填写 API Key":                                     "An API key is required to enable DeepSeek Online ASR",
 	"请先填写 DeepSeek 的 API Key":                                          "Please enter a DeepSeek API key first",
 	"zsmeet 的访问地址要以 http:// 或 https:// 开头，例如 https://meet.example.com": "zsmeet site URL must start with http:// or https://, e.g. https://meet.example.com",

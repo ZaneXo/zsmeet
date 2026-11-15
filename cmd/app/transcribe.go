@@ -21,6 +21,7 @@ import (
 	"github.com/ZaneXo/zsmeet/internal/config"
 	"github.com/ZaneXo/zsmeet/internal/models"
 	"github.com/ZaneXo/zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
 
@@ -60,6 +61,7 @@ func transcribeFile(ctx context.Context, args []string) error {
 	fs.Var(float32Flag{&params.MinSilence}, "min-silence", "安静多少`秒`算一句话说完了")
 	fs.Var(float32Flag{&params.MinSpeech}, "min-speech", "短于多少`秒`的声音不算说话")
 	fs.Var(float32Flag{&params.MaxSpeech}, "max-speech", "一句话最长多少`秒`，再长就切开")
+	language := fs.String("language", cfg.Language, "识别的`语言`：auto（多语种与混合语音）、zh、en、yue、ja、ko")
 	diarize := fs.Bool("diarize", true, "区分说话人（-diarize=false 时不区分，快一些）")
 	speakerCount := fs.Int("speakers", 0, "有几个人说话：大于 0 时按这个`人数`区分说话人（和会议上选了说话人数一样），0 是按声音自动估计人数")
 	speakerModel := fs.String("speaker-model", "", "区分说话人用的声纹模型`文件`，比较模型用（默认用模型目录里的）")
@@ -81,6 +83,9 @@ func transcribeFile(ctx context.Context, args []string) error {
 	}
 	if *speakerCount < 0 || *speakerCount > service.MaxSpeakerCount {
 		return fmt.Errorf("-speakers 要在 0 到 %d 之间", service.MaxSpeakerCount)
+	}
+	if !slices.Contains(settings.ASRLanguages, *language) {
+		return fmt.Errorf("-language 只能是 %s", strings.Join(settings.ASRLanguages, "、"))
 	}
 	speechFilter, playbackFilter := pickFilter(*speech, audio.SpeechFilter), pickFilter(*playback, audio.PlaybackFilter)
 
@@ -121,7 +126,7 @@ func transcribeFile(ctx context.Context, args []string) error {
 	convertTook := time.Since(started)
 
 	started = time.Now()
-	engine, err := asr.LoadWith(models.Paths{Dir: cfg.ModelsDir}, cfg.Threads, cfg.Language, params)
+	engine, err := asr.LoadWith(models.Paths{Dir: cfg.ModelsDir}, cfg.Threads, *language, params)
 	if err == nil && *speakerModel != "" {
 		err = engine.SetSpeakerModel(*speakerModel)
 	}
@@ -160,6 +165,7 @@ func transcribeFile(ctx context.Context, args []string) error {
 	out := bufio.NewWriter(os.Stdout)
 	defer out.Flush()
 	fmt.Fprintf(out, "录音：%s，%.1f 秒\n", file, duration)
+	fmt.Fprintf(out, "识别语言：%s\n", *language)
 	fmt.Fprintf(out, "识别前的处理：%s\n", cmp.Or(speechFilter, "不处理"))
 	fmt.Fprintf(out, "回放用的录音的处理：%s\n", cmp.Or(playbackFilter, "不处理"))
 	fmt.Fprintf(out, "语音检测：阈值 %g，安静 %g 秒算一句说完，短于 %g 秒的不要，长于 %g 秒的切开\n\n",

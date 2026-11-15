@@ -38,7 +38,8 @@ type Meeting struct {
 	Template string `json:"template" doc:"纪要模板的 ID"`
 	Hotwords string `json:"hotwords"`
 	// 0 是按声音自动区分
-	SpeakerCount int `json:"speaker_count" doc:"有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人"`
+	SpeakerCount int    `json:"speaker_count" doc:"有几个人说话：0 是按声音自动区分，1 到 30 是按这个人数区分说话人"`
+	Language     string `json:"language" enum:",auto,zh,en,yue,ja,ko" doc:"这场会议指定的识别语言：空字符串是跟随团队默认设置，auto 是自动识别多语种与混合语音，其余是固定单种语言"`
 	// 已经有转写不等于这次只写纪要：重新转写时旧的转写在新的存好之前一直留着
 	Retranscribing bool   `json:"retranscribing" doc:"要求了重新转写、新的转写还没存好：处理中时是在从录音重新识别（看到的还是旧的转写），不只是写纪要。失败以后点重试只重新写纪要，这一项跟着变成 false"`
 	ASREngine      string `json:"asr_engine" enum:",local,deepseek" doc:"当前这份转写实际用的语音识别：还没转写或旧会议为空，local 是本机识别，deepseek 是 DeepSeek 在线识别"`
@@ -97,6 +98,7 @@ func toMeeting(ctx context.Context, m service.Meeting) Meeting {
 		Template:       m.Template,
 		Hotwords:       m.Hotwords,
 		SpeakerCount:   int(m.SpeakerCount),
+		Language:       m.Language,
 		Retranscribing: m.Retranscribe,
 		ASREngine:      m.AsrEngine,
 		ASRWarning:     i18n.TranslateMessage(lang, m.AsrWarning),

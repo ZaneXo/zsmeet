@@ -5,7 +5,8 @@ import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import { Button, Card, Field, Input, Notice, Select, Spinner } from "../components/ui";
 import { isEn } from "../i18n/lang";
 import { tr, useLang } from "../i18n/react";
-import { dateTime } from "../lib/format";
+import { ASR_LANGUAGES, asrLanguageLabel, dateTime } from "../lib/format";
+import type { ASRLanguage } from "../lib/format";
 import { Check } from "./FeishuSettings";
 
 const DEFAULT_ASR_URL = "https://api.deepseek.com/v1/tools/asr";
@@ -22,6 +23,7 @@ export function ASRSettingsSection() {
   });
 
   const [provider, setProvider] = useState<"local" | "deepseek">("local");
+  const [language, setLanguage] = useState<ASRLanguage>("auto");
   const [baseURL, setBaseURL] = useState(DEFAULT_ASR_URL);
   const [apiKey, setAPIKey] = useState("");
   const [clearKey, setClearKey] = useState(false);
@@ -30,6 +32,7 @@ export function ASRSettingsSection() {
   useEffect(() => {
     if (saved.data && !loaded) {
       setProvider(saved.data.provider);
+      setLanguage(saved.data.language || "auto");
       setBaseURL(saved.data.base_url || DEFAULT_ASR_URL);
       setLoaded(true);
     }
@@ -50,6 +53,7 @@ export function ASRSettingsSection() {
         api.PUT("/api/settings/asr", {
           body: {
             provider,
+            language,
             base_url: baseURL || undefined,
             api_key: provider === "deepseek" ? apiKey || undefined : undefined,
             clear_api_key: provider === "local" && clearKey ? true : undefined,
@@ -114,6 +118,31 @@ export function ASRSettingsSection() {
           >
             <option value="local">{tr("本机识别（默认，录音不出服务器）", "Local recognition (default — audio stays on server)")}</option>
             <option value="deepseek">{tr("DeepSeek 在线识别（准确率更高，录音分段发给 DeepSeek）", "DeepSeek online ASR (higher accuracy — audio chunks sent to DeepSeek)")}</option>
+          </Select>
+        </Field>
+
+        <Field
+          label={tr("默认识别语言", "Default recognition language")}
+          htmlFor="asr-language"
+          hint={tr(
+            "「自动识别」能识别普通话、粤语、英语、日语、韩语及中英/粤英混合发言；如果团队只开纯中文会（或纯单语种会），也可以固定成对应语言。新建或重新转写单场会议时还可以单独覆盖。",
+            "\"Auto-detect\" recognizes Mandarin, Cantonese, English, Japanese, Korean, and code-switching; if your team holds single-language meetings only, you can pin that language. Individual meetings can also override this when created or re-transcribed.",
+          )}
+        >
+          <Select
+            id="asr-language"
+            className="max-w-md"
+            value={language}
+            onChange={(e) => {
+              setLanguage(e.target.value as ASRLanguage);
+              edited();
+            }}
+          >
+            {ASR_LANGUAGES.map((code) => (
+              <option key={code} value={code}>
+                {asrLanguageLabel(code)}
+              </option>
+            ))}
           </Select>
         </Field>
 

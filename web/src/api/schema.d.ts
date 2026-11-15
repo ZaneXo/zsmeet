@@ -1319,6 +1319,11 @@ export interface components {
             api_key_set: boolean;
             /** @description DeepSeek 在线识别接口地址 */
             base_url: string;
+            /**
+             * @description 团队默认的识别语言：auto 是自动识别多语种与混合语音（默认），其余是固定单种语言（普通话、英语、粤语、日语、韩语）
+             * @enum {string}
+             */
+            language: "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /** @description 最近一次调用在线识别失败的原因；管理员重新保存或之后转写恢复正常会自动清掉 */
             last_error?: string;
             /**
@@ -1339,6 +1344,11 @@ export interface components {
             base_url?: string;
             /** @description 是否清除已保存的 API Key（切回本机识别时可选） */
             clear_api_key?: boolean;
+            /**
+             * @description 团队默认的识别语言；不填时沿用已保存的设置
+             * @enum {string}
+             */
+            language?: "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /**
              * @description local 是本机识别，deepseek 是 DeepSeek 在线识别
              * @enum {string}
@@ -1465,6 +1475,11 @@ export interface components {
         CreateMeetingInputBody: {
             /** @description 人名、产品名等专有名词，用逗号分开 */
             hotwords?: string;
+            /**
+             * @description 这场会议的识别语言：留空跟随团队默认设置，auto 是自动识别多语种与混合语音，其余是固定单种语言
+             * @enum {string}
+             */
+            language?: "" | "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /**
              * @description upload 是上传文件，record 是网页录音，desktop 是桌面版录音
              * @enum {string}
@@ -1845,6 +1860,11 @@ export interface components {
             /** Format: uuid */
             id: string;
             /**
+             * @description 这场会议指定的识别语言：空字符串是跟随团队默认设置，auto 是自动识别多语种与混合语音，其余是固定单种语言
+             * @enum {string}
+             */
+            language: "" | "auto" | "zh" | "en" | "yue" | "ja" | "ko";
+            /**
              * Format: date-time
              * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次
              */
@@ -1944,6 +1964,11 @@ export interface components {
             hotwords: string;
             /** Format: uuid */
             id: string;
+            /**
+             * @description 这场会议指定的识别语言：空字符串是跟随团队默认设置，auto 是自动识别多语种与混合语音，其余是固定单种语言
+             * @enum {string}
+             */
+            language: "" | "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /**
              * Format: date-time
              * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次
@@ -2122,6 +2147,11 @@ export interface components {
             audio_days: number;
         };
         RetranscribeInputBody: {
+            /**
+             * @description 这次用的识别语言：空字符串是跟随团队默认，auto 是自动识别多语种与混合语音，其余是固定单种语言；不填就照原来的设置
+             * @enum {string}
+             */
+            language?: "" | "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /**
              * Format: int64
              * @description 这次按几个人区分说话人：0 是按声音自动区分，1 到 30 是按这个人数；不填就照原来的设置
@@ -2303,6 +2333,11 @@ export interface components {
             hotwords: string;
             /** Format: uuid */
             id: string;
+            /**
+             * @description 这场会议指定的识别语言：空字符串是跟随团队默认设置，auto 是自动识别多语种与混合语音，其余是固定单种语言
+             * @enum {string}
+             */
+            language: "" | "auto" | "zh" | "en" | "yue" | "ja" | "ko";
             /**
              * Format: date-time
              * @description 最后一次收到录音分片的时间，还没收到过时没有这一项。网页录音进行中时每 10 秒左右更新一次

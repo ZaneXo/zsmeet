@@ -1690,10 +1690,42 @@ func TestASRSettings(t *testing.T) {
 	member.want(member.do("PUT", "/api/settings/asr", obj{"provider": "local"}), 403)
 	member.want(member.do("POST", "/api/settings/asr/test", obj{}), 403)
 
-	// 默认是本机识别，没有保存 Key
+	// 默认是本机识别、自动识别多语种，没有保存 Key
 	r := c.want(c.do("GET", "/api/settings/asr", nil), 200)
-	if r.Body["provider"] != "local" || r.Body["api_key_set"] != false || r.Body["base_url"] != settings.DefaultASRBaseURL {
+	if r.Body["provider"] != "local" || r.Body["language"] != "auto" || r.Body["api_key_set"] != false || r.Body["base_url"] != settings.DefaultASRBaseURL {
 		t.Fatalf("默认语音识别配置不对：%s", r.Raw)
+	}
+
+	// 改团队默认识别语言；非法语言返回 422 并指出是「识别语言」
+	if badLang := c.want(c.do("PUT", "/api/settings/asr", obj{"provider": "local", "language": "fr"}), 422); !strings.Contains(badLang.Raw, "识别语言") {
+		t.Fatalf("非法识别语言报错应指出字段名：%s", badLang.Raw)
+	}
+	langSaved := c.want(c.do("PUT", "/api/settings/asr", obj{"provider": "local", "language": "yue"}), 200)
+	if langSaved.Body["language"] != "yue" {
+		t.Fatalf("保存团队默认语言不对：%s", langSaved.Raw)
+	}
+
+	// 新建会议和重新转写可以单独指定识别语言，不填时为空（跟随团队默认）
+	mDefault := c.want(c.do("POST", "/api/meetings", obj{"title": "常规周会", "source": "upload"}), 201)
+	if mDefault.Body["language"] != "" {
+		t.Fatalf("新建会议未指定语言应为空：%s", mDefault.Raw)
+	}
+	mJa := c.want(c.do("POST", "/api/meetings", obj{"title": "日本客户沟通", "source": "upload", "language": "ja"}), 201)
+	if mJa.Body["language"] != "ja" {
+		t.Fatalf("新建会议指定语言应为 ja：%s", mJa.Raw)
+	}
+	c.want(c.do("POST", "/api/meetings", obj{"title": "x", "source": "upload", "language": "de"}), 422)
+
+	reID := c.processed("跨区周会", []transcript.Segment{{Start: 0, End: 2, Text: "Hello."}}, "## 摘要\nOK。", `[]`)
+	if err := os.MkdirAll(c.store.Path("audio"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.store.Path("audio/"+reID+".m4a"), []byte("m4a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reResp := c.want(c.do("POST", "/api/meetings/"+reID+"/retranscribe", obj{"language": "en"}), 200)
+	if reResp.Body["language"] != "en" {
+		t.Fatalf("重新转写应更新会议识别语言为 en：%s", reResp.Raw)
 	}
 
 	// 打开在线识别必须填 Key
@@ -1726,11 +1758,11 @@ func TestASRSettings(t *testing.T) {
 		t.Fatalf("保存后的语音识别配置不对：%s", saved.Raw)
 	}
 
-	// 留空 Key 沿用已保存的 Key 测试与保存
+	// 留空 Key 和 language 沿用已保存的值测试与保存
 	c.want(c.do("POST", "/api/settings/asr/test", obj{"base_url": srv.URL}), 204)
 	kept := c.want(c.do("PUT", "/api/settings/asr", obj{"provider": "local", "base_url": srv.URL}), 200)
-	if kept.Body["provider"] != "local" || kept.Body["api_key_set"] != true {
-		t.Fatalf("切回本机识别默认保留已保存的 Key：%s", kept.Raw)
+	if kept.Body["provider"] != "local" || kept.Body["language"] != "yue" || kept.Body["api_key_set"] != true {
+		t.Fatalf("切回本机识别默认保留已保存的 Key 与语言：%s", kept.Raw)
 	}
 
 	// 勾上清除 Key 后清掉

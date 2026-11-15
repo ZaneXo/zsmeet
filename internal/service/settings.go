@@ -110,6 +110,7 @@ type ASRSettings struct {
 // ASRInput 是管理员提交的语音识别配置。APIKey 留空表示沿用已保存的；ClearAPIKey 为 true 时清掉已保存的 Key。
 type ASRInput struct {
 	Provider    string
+	Language    string
 	BaseURL     string
 	APIKey      string
 	ClearAPIKey bool
@@ -174,6 +175,16 @@ func (s *Service) SaveASR(ctx context.Context, in ASRInput) (ASRSettings, error)
 	if provider != settings.ASRLocal && provider != settings.ASRDeepSeek {
 		return ASRSettings{}, invalid("识别方式只能选「本机识别」或「DeepSeek 在线识别」")
 	}
+	lang := strings.TrimSpace(in.Language)
+	if lang == "" {
+		saved, err := s.settings.ASR(ctx)
+		if err != nil && !errors.Is(err, secret.ErrDecrypt) {
+			return ASRSettings{}, err
+		}
+		lang = saved.EffectiveLanguage()
+	} else if !slices.Contains(settings.ASRLanguages, lang) {
+		return ASRSettings{}, invalid("识别语言只能选自动识别（多语种混合）、中文（普通话）、英语、粤语、日语或韩语")
+	}
 	baseURL, err := checkASRURL(in.BaseURL)
 	if err != nil {
 		return ASRSettings{}, err
@@ -185,7 +196,7 @@ func (s *Service) SaveASR(ctx context.Context, in ASRInput) (ASRSettings, error)
 	if provider == settings.ASRDeepSeek && apiKey == "" {
 		return ASRSettings{}, invalid("打开 DeepSeek 在线识别需要填写 API Key")
 	}
-	cfg := settings.ASR{Provider: provider, BaseURL: baseURL, APIKey: apiKey}
+	cfg := settings.ASR{Provider: provider, Language: lang, BaseURL: baseURL, APIKey: apiKey}
 	if err := s.settings.SaveASR(ctx, cfg); err != nil {
 		return ASRSettings{}, err
 	}

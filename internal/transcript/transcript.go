@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -87,17 +88,21 @@ func renumber(segs []Segment) map[int]int {
 	return ids
 }
 
-// joinText 把两句接在一起。英文的两句之间要留一个空格，中文直接接上。
+// joinText 把两句接在一起。英文、韩文的两句之间要留一个空格，中文、日文直接接上。
 func joinText(a, b string) string {
 	if a == "" || b == "" {
 		return a + b
 	}
 	last, _ := utf8.DecodeLastRuneInString(a)
 	next, _ := utf8.DecodeRuneInString(b)
-	if last < utf8.RuneSelf && next < utf8.RuneSelf && last != ' ' && next != ' ' {
+	if usesWordSpace(last) && usesWordSpace(next) && last != ' ' && next != ' ' {
 		return a + " " + b
 	}
 	return a + b
+}
+
+func usesWordSpace(r rune) bool {
+	return r < utf8.RuneSelf || unicode.Is(unicode.Hangul, r)
 }
 
 // markedBetween：from 到 to 之间（含 from、不含 to）有没有标记。

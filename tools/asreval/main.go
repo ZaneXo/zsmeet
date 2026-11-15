@@ -80,7 +80,7 @@ func main() {
 	flag.StringVar(&f.funasrNano, "funasr-nano", "", "Fun-ASR-Nano 的模型目录，不给就不比")
 	flag.StringVar(&f.qwen3ASR, "qwen3-asr", "", "Qwen3-ASR 的模型目录，不给就不比")
 	flag.StringVar(&f.hotwords, "hotwords", "", "所有录音共用的热词，逗号隔开")
-	flag.StringVar(&f.language, "language", cmp.Or(os.Getenv("ZSMEET_ASR_LANGUAGE"), "zh"), "SenseVoice 的识别语言，和线上一致")
+	flag.StringVar(&f.language, "language", cmp.Or(os.Getenv("ZSMEET_ASR_LANGUAGE"), "auto"), "SenseVoice 的识别语言，和线上一致")
 	flag.IntVar(&f.threads, "threads", min(runtime.NumCPU(), 4), "每个识别模型用几个 CPU 线程")
 	flag.IntVar(&f.workers, "workers", 1, "每种识别模型同时加载几份、同时识别几段录音（CPU 多的机器上调大，占用的 CPU 是 threads×workers）")
 	flag.StringVar(&f.provider, "provider", "cpu", "识别模型在哪跑：cpu，或者 cuda（NVIDIA 显卡，要用带 CUDA 的 sherpa-onnx 库，见 LD_LIBRARY_PATH）")

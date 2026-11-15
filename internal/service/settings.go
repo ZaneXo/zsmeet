@@ -2,11 +2,15 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/ZaneXo/zsmeet/internal/cloudasr"
 	"github.com/ZaneXo/zsmeet/internal/llm"
+	"github.com/ZaneXo/zsmeet/internal/secret"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 )
 
@@ -92,4 +96,117 @@ func (s *Service) LLMModels(ctx context.Context, in LLMInput) ([]string, error) 
 		return nil, &Error{Invalid, err.Error()}
 	}
 	return models, nil
+}
+
+// ---- 语音识别 ----
+
+// ASRSettings 是网页上看到的语音识别配置和最近一次运行错误。API Key 本身不传出接口层。
+type ASRSettings struct {
+	settings.ASR
+	LastError   string
+	LastErrorAt *time.Time
+}
+
+// ASRInput 是管理员提交的语音识别配置。APIKey 留空表示沿用已保存的；ClearAPIKey 为 true 时清掉已保存的 Key。
+type ASRInput struct {
+	Provider    string
+	BaseURL     string
+	APIKey      string
+	ClearAPIKey bool
+}
+
+// ASRSettings 返回语音识别配置和最近一次错误。主密钥改过解不开旧 Key 时不报 500，把原因放在 LastError 里让管理员重新填。
+func (s *Service) ASRSettings(ctx context.Context) (ASRSettings, error) {
+	cfg, err := s.settings.ASR(ctx)
+	var decryptErr bool
+	if errors.Is(err, secret.ErrDecrypt) {
+		decryptErr = true
+		err = nil
+	}
+	if err != nil {
+		return ASRSettings{}, err
+	}
+	st, err := s.settings.ASRStatus(ctx)
+	if err != nil {
+		return ASRSettings{}, err
+	}
+	out := ASRSettings{ASR: cfg, LastError: st.LastError}
+	if !st.UpdatedAt.IsZero() {
+		t := st.UpdatedAt
+		out.LastErrorAt = &t
+	}
+	if decryptErr && out.LastError == "" {
+		out.LastError = secret.ErrDecrypt.Error()
+	}
+	return out, nil
+}
+
+func checkASRURL(raw string) (string, error) {
+	cleaned := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if cleaned == "" {
+		cleaned = settings.DefaultASRBaseURL
+	}
+	u, err := url.Parse(cleaned)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return "", invalid("接口地址要以 http:// 或 https:// 开头，例如 %s", settings.DefaultASRBaseURL)
+	}
+	return cleaned, nil
+}
+
+func (s *Service) resolveASRKey(ctx context.Context, key string, clearKey bool) (string, error) {
+	if clearKey {
+		return "", nil
+	}
+	key = strings.TrimSpace(key)
+	if key != "" {
+		return key, nil
+	}
+	saved, err := s.settings.ASR(ctx)
+	if err != nil && !errors.Is(err, secret.ErrDecrypt) {
+		return "", err
+	}
+	return saved.APIKey, nil
+}
+
+// SaveASR 保存语音识别配置。
+func (s *Service) SaveASR(ctx context.Context, in ASRInput) (ASRSettings, error) {
+	provider := strings.TrimSpace(in.Provider)
+	if provider != settings.ASRLocal && provider != settings.ASRDeepSeek {
+		return ASRSettings{}, invalid("识别方式只能选「本机识别」或「DeepSeek 在线识别」")
+	}
+	baseURL, err := checkASRURL(in.BaseURL)
+	if err != nil {
+		return ASRSettings{}, err
+	}
+	apiKey, err := s.resolveASRKey(ctx, in.APIKey, in.ClearAPIKey)
+	if err != nil {
+		return ASRSettings{}, err
+	}
+	if provider == settings.ASRDeepSeek && apiKey == "" {
+		return ASRSettings{}, invalid("打开 DeepSeek 在线识别需要填写 API Key")
+	}
+	cfg := settings.ASR{Provider: provider, BaseURL: baseURL, APIKey: apiKey}
+	if err := s.settings.SaveASR(ctx, cfg); err != nil {
+		return ASRSettings{}, err
+	}
+	return ASRSettings{ASR: cfg}, nil
+}
+
+// TestASR 用提交的接口地址和 API Key（不需要先保存）发 1 秒静音测试能不能用。
+func (s *Service) TestASR(ctx context.Context, in ASRInput) error {
+	baseURL, err := checkASRURL(in.BaseURL)
+	if err != nil {
+		return err
+	}
+	apiKey, err := s.resolveASRKey(ctx, in.APIKey, false)
+	if err != nil {
+		return err
+	}
+	if apiKey == "" {
+		return invalid("请先填写 DeepSeek 的 API Key")
+	}
+	if err := cloudasr.Test(ctx, baseURL, apiKey); err != nil {
+		return &Error{Invalid, err.Error()}
+	}
+	return nil
 }

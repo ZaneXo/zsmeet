@@ -18,6 +18,7 @@ import (
 
 	"github.com/ZaneXo/zsmeet/internal/asr"
 	"github.com/ZaneXo/zsmeet/internal/audio"
+	"github.com/ZaneXo/zsmeet/internal/cloudasr"
 	"github.com/ZaneXo/zsmeet/internal/config"
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/feishu"
@@ -47,6 +48,7 @@ var errSuperseded = errors.New("会议已被新的任务接手")
 // 测试里用假的替换，不用加载几百 MB 的模型。
 type recognizer interface {
 	Transcribe(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error)
+	TranscribeDetailed(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Speech, error)
 	// speakers 大于 0 时按这个人数区分说话人，0 是自动区分
 	Diarize(ctx context.Context, samples []float32, speakers int, progress func(float64)) ([]transcript.Turn, error)
 	// Embed 给每位说话人算声音特征（声纹），键是 turns 里的说话人编号。只在管理员打开了声纹时调用
@@ -78,6 +80,15 @@ type Worker struct {
 	feishu     *feishu.Pool
 	// 只在测试里设：允许群机器人的地址指向这个 http 的假服务器（host:port），见 webhook.CheckURL
 	webhookTestHost string
+	// 只在测试里设：替换在线语音识别客户端（比如省掉重试退避等待）
+	newOnlineASR func(settings.ASR) cloudasr.Provider
+}
+
+func (w *Worker) onlineASR(cfg settings.ASR) cloudasr.Provider {
+	if w.newOnlineASR != nil {
+		return w.newOnlineASR(cfg)
+	}
+	return &cloudasr.DeepSeek{URL: cfg.EffectiveURL(), APIKey: cfg.APIKey}
 }
 
 func newWorker(pool *pgxpool.Pool, cfg config.Config, store *storage.Local, st *settings.Store) *Worker {

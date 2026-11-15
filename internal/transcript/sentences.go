@@ -13,6 +13,15 @@ type Token struct {
 	Start float64
 }
 
+// Speech 是语音检测切出的一小段有人说话的区间（Start 到 End 秒），以及本地识别出的字和句子。
+type Speech struct {
+	Start, End float64
+	// 本地识别出的字和标点，Start 是从这一小段开头算的秒数（0 到 End-Start）。模型没给每个字的时间时为空
+	Tokens []Token
+	// 按标点切出的句子
+	Segments []Segment
+}
+
 // 句子里攒到这么多字还没遇到句末标点，就在下一个逗号处断开，免得一句太长、定位不准
 const longSentence = 50
 

@@ -12,6 +12,7 @@ import { feishuErrorText } from "../lib/feishuErrors";
 import { dateTime } from "../lib/format";
 import { isDesktop } from "../platform";
 import { DesktopAccountSection, OpenAdminSettings } from "../platform/DesktopAccount";
+import { ASRSettingsSection } from "./ASRSettings";
 import { FeishuSettingsSection } from "./FeishuSettings";
 import { MembersSection } from "./Members";
 import { TemplateSettingsSection } from "./TemplateSettings";
@@ -22,6 +23,7 @@ const SECTIONS = [
   { key: "account", label: "账号", adminOnly: false },
   { key: "members", label: "成员", adminOnly: true },
   { key: "llm", label: "大模型", adminOnly: true },
+  { key: "asr", label: "语音识别", adminOnly: true },
   { key: "templates", label: "纪要模板", adminOnly: true },
   { key: "feishu", label: "飞书", adminOnly: true },
   { key: "webhooks", label: "群机器人", adminOnly: true },
@@ -75,6 +77,7 @@ export function SettingsPage({ user }: { user: User }) {
           {current === "account" && (isDesktop ? <DesktopAccountSection user={user} /> : <AccountSection user={user} />)}
           {current === "members" && <MembersSection me={user} />}
           {current === "llm" && <LLMSettingsCard />}
+          {current === "asr" && <ASRSettingsSection />}
           {current === "templates" && <TemplateSettingsSection />}
           {current === "feishu" && <FeishuSettingsSection />}
           {current === "webhooks" && <WebhookSettingsSection />}
@@ -100,7 +103,7 @@ function AccountSection({ user }: { user: User }) {
           <dd>{user.role === "admin" ? "管理员" : "成员"}</dd>
         </dl>
         {user.role !== "admin" && (
-          <p className="mt-3 text-[13px] leading-relaxed text-muted">成员、大模型、飞书、群机器人这些团队配置由管理员统一管理。</p>
+          <p className="mt-3 text-[13px] leading-relaxed text-muted">成员、大模型、语音识别、飞书、群机器人这些团队配置由管理员统一管理。</p>
         )}
       </Card>
       <FeishuLinkCard />
@@ -528,7 +531,7 @@ function LLMSettingsCard() {
         </div>
 
         <p className="rounded-xl bg-canvas px-4 py-3 text-[13px] leading-relaxed text-ink-2">
-          语音识别在你自己的服务器上完成，录音不会发给任何外部服务。只有转写出来的文字会发给上面填的大模型；用自己部署的模型，数据就完全不出内网。
+          语音识别默认在你自己的服务器上完成，录音不发给外部服务（在「设置 → 语音识别」里打开在线识别时除外）。平时只有转写出来的文字会发给上面填的大模型；都用本机或内网模型，数据就完全不出内网。
         </p>
       </form>
     </Card>

@@ -111,6 +111,22 @@ func (t *Transcriber) Close() {
 	t.recognizer = nil
 }
 
+// Close 释放识别、说话人区分和声纹模型。
+func (e *Engine) Close() {
+	if e.Transcriber != nil {
+		e.Transcriber.Close()
+		e.Transcriber = nil
+	}
+	if e.diarizer != nil {
+		sherpa.DeleteSpeakerEmbeddingExtractor(e.diarizer)
+		e.diarizer = nil
+	}
+	if e.extractor != nil {
+		sherpa.DeleteSpeakerEmbeddingExtractor(e.extractor)
+		e.extractor = nil
+	}
+}
+
 // modelError 是模型加载失败时给用户看的说明。模型下载时校验过，加载失败多半是文件后来坏了；
 // 检查模型时只看文件在不在、大小对不对，所以要删掉它才会重新下载。
 func modelError(what, path string) error {
@@ -124,15 +140,31 @@ const vadWindow = 512
 
 // Transcribe 把整段录音识别成带时间的句子。progress 的参数是 0 到 1。
 func (t *Transcriber) Transcribe(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
+	speeches, err := t.TranscribeDetailed(ctx, samples, progress)
+	if err != nil {
+		return nil, err
+	}
 	var segs []transcript.Segment
+	for _, sp := range speeches {
+		segs = append(segs, sp.Segments...)
+	}
+	return segs, nil
+}
+
+// TranscribeDetailed 找出有人说话的区间，逐段识别成带时间的字和句子。progress 的参数是 0 到 1。
+// 在线识别用它的区间来切录音、用它每个字的时间给远端返回的文字定时间（见 internal/cloudasr）。
+func (t *Transcriber) TranscribeDetailed(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Speech, error) {
+	var out []transcript.Speech
 	err := t.detectSpeech(ctx, samples, progress, func(start int, speech []float32) {
 		from := float64(start) / audio.SampleRate
-		segs = append(segs, t.recognize(speech, from, from+float64(len(speech))/audio.SampleRate)...)
+		end := from + float64(len(speech))/audio.SampleRate
+		tokens, segs := t.recognize(speech, from, end)
+		out = append(out, transcript.Speech{Start: from, End: end, Tokens: tokens, Segments: segs})
 	})
 	if err != nil {
 		return nil, err
 	}
-	return segs, nil
+	return out, nil
 }
 
 // detectSpeech 用语音检测找出有人说话的片段，按先后交给 each（片段开头的采样下标和片段的声音）。
@@ -168,9 +200,9 @@ func (t *Transcriber) detectSpeech(ctx context.Context, samples []float32, progr
 	return nil
 }
 
-// recognize 识别一小段录音（start 到 end 秒），按标点切成句子，每句带开始和结束时间。
-// 模型没给出每个字的时间时（正常不会发生），整段算一句。
-func (t *Transcriber) recognize(samples []float32, start, end float64) []transcript.Segment {
+// recognize 识别一小段录音（start 到 end 秒），返回每个字的时间（从这一小段开头算）和按标点切出的句子。
+// 模型没给出每个字的时间时（正常不会发生），整段算一句，tokens 为 nil。
+func (t *Transcriber) recognize(samples []float32, start, end float64) ([]transcript.Token, []transcript.Segment) {
 	stream := sherpa.NewOfflineStream(t.recognizer)
 	defer sherpa.DeleteOfflineStream(stream)
 	stream.AcceptWaveform(audio.SampleRate, samples)
@@ -181,12 +213,12 @@ func (t *Transcriber) recognize(samples []float32, start, end float64) []transcr
 		for i, text := range result.Tokens {
 			tokens[i] = transcript.Token{Text: text, Start: float64(result.Timestamps[i])}
 		}
-		return transcript.Sentences(tokens, start, end)
+		return tokens, transcript.Sentences(tokens, start, end)
 	}
 	if text := strings.TrimSpace(result.Text); text != "" {
-		return []transcript.Segment{{Start: start, End: end, Speaker: -1, Text: text}}
+		return nil, []transcript.Segment{{Start: start, End: end, Speaker: -1, Text: text}}
 	}
-	return nil
+	return nil, nil
 }
 
 // 算一个人的声纹时用他最长的几段话，加起来最多这么多秒：再多也不会更准，只是更慢

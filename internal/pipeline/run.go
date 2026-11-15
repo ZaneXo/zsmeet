@@ -6,22 +6,29 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ZaneXo/zsmeet/internal/audio"
+	"github.com/ZaneXo/zsmeet/internal/cloudasr"
 	"github.com/ZaneXo/zsmeet/internal/correct"
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/llm"
 	"github.com/ZaneXo/zsmeet/internal/minutes"
 	"github.com/ZaneXo/zsmeet/internal/search"
+	"github.com/ZaneXo/zsmeet/internal/secret"
 	"github.com/ZaneXo/zsmeet/internal/service"
+	"github.com/ZaneXo/zsmeet/internal/settings"
 	"github.com/ZaneXo/zsmeet/internal/storage"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
+	"github.com/ZaneXo/zsmeet/internal/voiceprint"
 )
 
 // 处理阶段。网页按这个顺序显示进度。
@@ -41,6 +48,7 @@ type run struct {
 	runID  uuid.UUID
 	cancel context.CancelCauseFunc
 
+	mu         sync.Mutex
 	lastStage  string
 	lastReport time.Time
 }
@@ -65,6 +73,8 @@ func (r *run) process(ctx context.Context) error {
 
 // report 更新阶段和进度，同一阶段内最多每秒写一次数据库。
 func (r *run) report(ctx context.Context, stage string, progress float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if stage == r.lastStage && time.Since(r.lastReport) < time.Second {
 		return
 	}
@@ -192,37 +202,7 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 	}
 
 	r.report(ctx, StageTranscribe, 0)
-	w.cpu.Lock()
-	defer w.cpu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	engine, err := w.loadEngine()
-	if err != nil {
-		return nil, err
-	}
-	segs, err := engine.Transcribe(ctx, samples, func(p float64) { r.report(ctx, StageTranscribe, p) })
-	if err != nil {
-		return nil, err
-	}
-	if len(segs) == 0 {
-		return nil, errors.New("没有识别到说话内容，请确认录音里有人声")
-	}
-
-	r.report(ctx, StageDiarize, 0)
-	// 用户填了有几个人说话（会议上的说话人数）就按人数分，没填是 0：按声音自动区分
-	turns, err := engine.Diarize(ctx, samples, int(r.m.SpeakerCount), func(p float64) { r.report(ctx, StageDiarize, p) })
-	if err != nil {
-		return nil, err
-	}
-	// 聚类那一步不能中断：算完以后再看一次是不是取消了
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	ids := transcript.AssignSpeakers(segs, turns)
-	// 按热词的读音先改一遍错字：不用大模型，没配置大模型也有
-	correct.Homophones(segs, r.hotwords())
-	voices, err := r.voices(ctx, engine, samples, transcript.RenumberTurns(turns, ids))
+	segs, voices, asrEngine, asrWarning, err := r.recognize(ctx, samples)
 	if err != nil {
 		return nil, err
 	}
@@ -234,6 +214,9 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 	}
 	err = r.inTx(ctx, func(_ pgx.Tx, q *sqlc.Queries, m sqlc.Meeting) error {
 		if err := q.SaveTranscript(ctx, sqlc.SaveTranscriptParams{MeetingID: id, Segments: raw}); err != nil {
+			return err
+		}
+		if err := q.SetMeetingASR(ctx, sqlc.SetMeetingASRParams{ID: id, AsrEngine: asrEngine, AsrWarning: asrWarning}); err != nil {
 			return err
 		}
 		if err := q.ClearRetranscribe(ctx, id); err != nil {
@@ -250,6 +233,186 @@ func (r *run) transcribe(ctx context.Context, old []transcript.Segment) ([]trans
 		return nil, err
 	}
 	return segs, nil
+}
+
+// recognize 跑完文字识别、说话人区分、拼音纠错和声纹特征提取，返回最终句子、声纹、实际用到的识别引擎名和兜底提示。
+func (r *run) recognize(ctx context.Context, samples []float32) ([]transcript.Segment, map[int]voiceprint.Voice, string, string, error) {
+	w := r.w
+	asrCfg, asrUpdatedAt, asrErr := w.settings.ASRWithTime(ctx)
+	decryptFailed := errors.Is(asrErr, secret.ErrDecrypt)
+	if asrErr != nil && !decryptFailed {
+		return nil, nil, "", "", asrErr
+	}
+
+	var (
+		useOnline  bool
+		asrWarning string
+	)
+	switch {
+	case decryptFailed && asrCfg.Provider == settings.ASRDeepSeek:
+		asrWarning = "在线识别没用上：解不开已保存的 API Key（ZSMEET_SECRET_KEY 可能被改过），本场已改用本机识别"
+		slog.Warn("在线识别 API Key 解密失败，退回本机识别", "meeting", r.m.ID)
+	case asrCfg.Provider == settings.ASRDeepSeek && asrCfg.APIKey == "":
+		asrWarning = "在线识别没用上：尚未配置 DeepSeek API Key，本场已改用本机识别"
+	case asrCfg.OnlineReady():
+		useOnline = true
+	}
+
+	if !useOnline {
+		w.cpu.Lock()
+		defer w.cpu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, nil, "", "", err
+		}
+		engine, err := w.loadEngine()
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		segs, err := engine.Transcribe(ctx, samples, func(p float64) { r.report(ctx, StageTranscribe, p) })
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		if len(segs) == 0 {
+			return nil, nil, "", "", errors.New("没有识别到说话内容，请确认录音里有人声")
+		}
+		r.report(ctx, StageDiarize, 0)
+		// 用户填了有几个人说话（会议上的说话人数）就按人数分，没填是 0：按声音自动区分
+		turns, err := engine.Diarize(ctx, samples, int(r.m.SpeakerCount), func(p float64) { r.report(ctx, StageDiarize, p) })
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		// 聚类那一步不能中断：算完以后再看一次是不是取消了
+		if err := ctx.Err(); err != nil {
+			return nil, nil, "", "", err
+		}
+		ids := transcript.AssignSpeakers(segs, turns)
+		// 按热词的读音先改一遍错字：不用大模型，没配置大模型也有
+		correct.Homophones(segs, r.hotwords())
+		voices, err := r.voices(ctx, engine, samples, transcript.RenumberTurns(turns, ids))
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		return segs, voices, settings.ASRLocal, asrWarning, nil
+	}
+
+	cloudCtx, cancelCloud := context.WithCancel(ctx)
+	defer cancelCloud()
+
+	var (
+		cloudDone atomic.Bool
+		cloudRes  cloudasr.Result
+		cloudWG   sync.WaitGroup
+	)
+
+	turns, diarizeReported, err := func() ([]transcript.Turn, bool, error) {
+		w.cpu.Lock()
+		defer w.cpu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		engine, err := w.loadEngine()
+		if err != nil {
+			return nil, false, err
+		}
+		speeches, err := engine.TranscribeDetailed(ctx, samples, func(p float64) {
+			r.report(ctx, StageTranscribe, p*0.5)
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		totalSegs := 0
+		for _, sp := range speeches {
+			totalSegs += len(sp.Segments)
+		}
+		if totalSegs == 0 {
+			return nil, false, errors.New("没有识别到说话内容，请确认录音里有人声")
+		}
+
+		// 在线识别主要是等网络，跟本机区分说话人并行跑；本机跑完先放开 CPU 锁，让下一场会议接着用
+		provider := w.onlineASR(asrCfg)
+		cloudWG.Go(func() {
+			defer cloudDone.Store(true)
+			cloudRes = cloudasr.Transcribe(cloudCtx, provider, samples, speeches, cloudasr.DefaultConcurrency, func(done, total int) {
+				r.report(ctx, StageTranscribe, 0.5+0.5*float64(done)/float64(total))
+			})
+		})
+
+		var reported bool
+		turns, err := engine.Diarize(ctx, samples, int(r.m.SpeakerCount), func(p float64) {
+			if cloudDone.Load() {
+				reported = true
+				r.report(ctx, StageDiarize, p)
+			}
+		})
+		if err != nil {
+			cancelCloud()
+			return nil, false, err
+		}
+		return turns, reported, nil
+	}()
+	cloudWG.Wait()
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, "", "", err
+	}
+	if !diarizeReported {
+		r.report(ctx, StageDiarize, 1)
+	}
+
+	segs := cloudRes.Segments
+	asrEngine := settings.ASRDeepSeek
+	bg := context.WithoutCancel(ctx)
+	switch {
+	case cloudRes.AuthErr != nil:
+		asrEngine = settings.ASRLocal
+		asrWarning = "在线识别没用上：" + cloudRes.AuthErr.Error() + "；本场已改用本机识别"
+		slog.Warn("在线识别鉴权或余额异常，已退回本机识别", "meeting", r.m.ID, "err", cloudRes.AuthErr)
+		_ = w.settings.RecordASRError(bg, asrUpdatedAt, cloudRes.AuthErr.Error())
+	case cloudRes.Succeeded == 0:
+		asrEngine = settings.ASRLocal
+		reason := "请求全部失败"
+		if cloudRes.Err != nil {
+			reason = cloudRes.Err.Error()
+		}
+		asrWarning = "在线识别没用上：" + reason + "；本场已改用本机识别"
+		slog.Warn("在线识别全部失败，已退回本机识别", "meeting", r.m.ID, "chunks", cloudRes.Chunks, "err", cloudRes.Err)
+		if cloudRes.Err != nil {
+			_ = w.settings.RecordASRError(bg, asrUpdatedAt, cloudRes.Err.Error())
+		}
+	case cloudRes.Aligned == 0:
+		asrEngine = settings.ASRLocal
+		asrWarning = "在线识别没用上：识别结果与本机时间轴对不上，本场已改用本机识别"
+		slog.Warn("在线识别全部未能对齐时间轴，已退回本机识别", "meeting", r.m.ID, "chunks", cloudRes.Chunks)
+	default:
+		if cloudRes.Aligned < cloudRes.Chunks {
+			slog.Info("在线识别部分分段退回本机识别", "meeting", r.m.ID, "aligned", cloudRes.Aligned, "succeeded", cloudRes.Succeeded, "chunks", cloudRes.Chunks)
+		}
+		if cloudRes.Err == nil {
+			_ = w.settings.ClearASRError(bg, asrUpdatedAt)
+		}
+	}
+
+	ids := transcript.AssignSpeakers(segs, turns)
+	correct.Homophones(segs, r.hotwords())
+	voices, err := func() (map[int]voiceprint.Voice, error) {
+		vpCfg, err := w.settings.Voiceprints(ctx)
+		if err != nil || !vpCfg.Enabled {
+			return nil, err
+		}
+		w.cpu.Lock()
+		defer w.cpu.Unlock()
+		engine, err := w.loadEngine()
+		if err != nil {
+			return nil, err
+		}
+		return r.voices(ctx, engine, samples, transcript.RenumberTurns(turns, ids))
+	}()
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	return segs, voices, asrEngine, asrWarning, nil
 }
 
 // concatChunks 把分片按序号首尾相接写成一个文件，返回它的路径；copied 表示是不是新写的（用完可以删）。

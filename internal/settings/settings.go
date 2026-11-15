@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -329,4 +330,132 @@ func (s *Store) Seal(plain string) string {
 // Open 解开 Seal 加密的凭证。
 func (s *Store) Open(sealed string) (string, error) {
 	return s.box.Open(sealed)
+}
+
+// 语音识别的两种方式。
+const (
+	ASRLocal    = "local"
+	ASRDeepSeek = "deepseek"
+
+	// DefaultASRBaseURL 是 DeepSeek 在线语音识别接口的默认地址。
+	DefaultASRBaseURL = "https://api.deepseek.com/v1/tools/asr"
+)
+
+// ASR 是团队级的语音识别配置。默认只用服务器本机识别（Provider 为 "local"），录音不外发；
+// 打开 "deepseek" 后，录音切成小段发给 DeepSeek 在线识别，本机 SenseVoice 仍同时运行以提供字级时间并在失败时兜底。
+type ASR struct {
+	Provider string `json:"provider"`
+	BaseURL  string `json:"base_url,omitempty"`
+	// 加密后保存
+	APIKey string `json:"api_key,omitempty"`
+}
+
+// EffectiveURL 返回在线识别实际请求的接口地址。
+func (a ASR) EffectiveURL() string {
+	if strings.TrimSpace(a.BaseURL) != "" {
+		return strings.TrimSpace(a.BaseURL)
+	}
+	return DefaultASRBaseURL
+}
+
+// OnlineReady 表示管理员打开了在线识别且填了凭证。
+func (a ASR) OnlineReady() bool {
+	return a.Provider == ASRDeepSeek && a.APIKey != ""
+}
+
+// ASRStatus 是后台处理会议调用在线识别时记下的最近一次错误（比如 API Key 失效、欠费），单独存一行以免和管理员改配置互相覆盖。
+type ASRStatus struct {
+	LastError string    `json:"last_error,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+const (
+	keyASR       = "asr"
+	keyASRStatus = "asr_status"
+)
+
+// ASR 返回语音识别配置；还没设置过时返回本机识别和默认的接口地址。
+// API Key 解不开（主密钥改过）时返回 secret.ErrDecrypt，其余字段照样有。
+func (s *Store) ASR(ctx context.Context) (ASR, error) {
+	cfg, _, err := s.ASRWithTime(ctx)
+	return cfg, err
+}
+
+// ASRWithTime 返回语音识别配置和这一行最后一次保存的时间（后台写错误状态时用来核对配置期间没被改过）。
+func (s *Store) ASRWithTime(ctx context.Context) (ASR, time.Time, error) {
+	row, err := s.q.GetSettingWithTime(ctx, keyASR)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ASR{Provider: ASRLocal, BaseURL: DefaultASRBaseURL}, time.Time{}, nil
+	}
+	if err != nil {
+		return ASR{}, time.Time{}, err
+	}
+	var a ASR
+	if err := json.Unmarshal(row.Value, &a); err != nil {
+		return ASR{}, time.Time{}, err
+	}
+	if a.Provider == "" {
+		a.Provider = ASRLocal
+	}
+	if a.BaseURL == "" {
+		a.BaseURL = DefaultASRBaseURL
+	}
+	a.APIKey, err = s.box.Open(a.APIKey)
+	return a, row.UpdatedAt, err
+}
+
+// SaveASR 保存语音识别配置，并清掉旧的最近一次错误。
+func (s *Store) SaveASR(ctx context.Context, a ASR) error {
+	if a.Provider == "" {
+		a.Provider = ASRLocal
+	}
+	a.BaseURL = strings.TrimRight(strings.TrimSpace(a.BaseURL), "/")
+	if a.BaseURL == "" {
+		a.BaseURL = DefaultASRBaseURL
+	}
+	a.APIKey = s.box.Seal(strings.TrimSpace(a.APIKey))
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	if err := s.q.PutSetting(ctx, sqlc.PutSettingParams{Key: keyASR, Value: raw}); err != nil {
+		return err
+	}
+	return s.q.DeleteSetting(ctx, keyASRStatus)
+}
+
+// ASRStatus 返回在线识别最近一次记下的错误；没有时返回零值。
+func (s *Store) ASRStatus(ctx context.Context) (ASRStatus, error) {
+	raw, err := s.q.GetSetting(ctx, keyASRStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ASRStatus{}, nil
+	}
+	if err != nil {
+		return ASRStatus{}, err
+	}
+	var st ASRStatus
+	return st, json.Unmarshal(raw, &st)
+}
+
+// RecordASRError 记下在线识别最近一次错误；只在这项配置自 asrUpdatedAt 以来没被管理员改过时写入。
+func (s *Store) RecordASRError(ctx context.Context, asrUpdatedAt time.Time, msg string) error {
+	if asrUpdatedAt.IsZero() || msg == "" {
+		return nil
+	}
+	raw, err := json.Marshal(ASRStatus{LastError: msg, UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	return s.q.PutASRStatusIfUnchanged(ctx, sqlc.PutASRStatusIfUnchangedParams{
+		Value:        raw,
+		AsrUpdatedAt: asrUpdatedAt,
+	})
+}
+
+// ClearASRError 在在线识别恢复正常后清掉之前记下的错误（同样只在配置没被改过时动它）。
+func (s *Store) ClearASRError(ctx context.Context, asrUpdatedAt time.Time) error {
+	if asrUpdatedAt.IsZero() {
+		return nil
+	}
+	return s.q.ClearASRStatusIfUnchanged(ctx, asrUpdatedAt)
 }

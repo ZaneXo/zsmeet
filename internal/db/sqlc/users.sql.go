@@ -12,6 +12,19 @@ import (
 	"github.com/google/uuid"
 )
 
+const clearASRStatusIfUnchanged = `-- name: ClearASRStatusIfUnchanged :exec
+DELETE FROM settings
+WHERE key = 'asr_status'
+  AND EXISTS (
+      SELECT 1 FROM settings s WHERE s.key = 'asr' AND s.updated_at <= $1::timestamptz
+  )
+`
+
+func (q *Queries) ClearASRStatusIfUnchanged(ctx context.Context, asrUpdatedAt time.Time) error {
+	_, err := q.db.Exec(ctx, clearASRStatusIfUnchanged, asrUpdatedAt)
+	return err
+}
+
 const clearLockedIPs = `-- name: ClearLockedIPs :execrows
 DELETE FROM login_failures WHERE key LIKE 'ip:%' AND locked_until > now()
 `
@@ -89,6 +102,15 @@ func (q *Queries) DeleteEmptyLoginFailure(ctx context.Context, key string) error
 	return err
 }
 
+const deleteSetting = `-- name: DeleteSetting :exec
+DELETE FROM settings WHERE key = $1
+`
+
+func (q *Queries) DeleteSetting(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, deleteSetting, key)
+	return err
+}
+
 const deleteStaleLoginFailures = `-- name: DeleteStaleLoginFailures :exec
 DELETE FROM login_failures
 WHERE window_start < now() - interval '1 day' AND (locked_until IS NULL OR locked_until < now())
@@ -109,6 +131,22 @@ func (q *Queries) GetSetting(ctx context.Context, key string) ([]byte, error) {
 	var value []byte
 	err := row.Scan(&value)
 	return value, err
+}
+
+const getSettingWithTime = `-- name: GetSettingWithTime :one
+SELECT value, updated_at FROM settings WHERE key = $1
+`
+
+type GetSettingWithTimeRow struct {
+	Value     []byte
+	UpdatedAt time.Time
+}
+
+func (q *Queries) GetSettingWithTime(ctx context.Context, key string) (GetSettingWithTimeRow, error) {
+	row := q.db.QueryRow(ctx, getSettingWithTime, key)
+	var i GetSettingWithTimeRow
+	err := row.Scan(&i.Value, &i.UpdatedAt)
+	return i, err
 }
 
 const getUser = `-- name: GetUser :one
@@ -188,6 +226,26 @@ func (q *Queries) LoginRetryAt(ctx context.Context, arg LoginRetryAtParams) (tim
 	var column_1 time.Time
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const putASRStatusIfUnchanged = `-- name: PutASRStatusIfUnchanged :exec
+INSERT INTO settings (key, value)
+SELECT 'asr_status', $1::jsonb
+WHERE EXISTS (
+    SELECT 1 FROM settings s WHERE s.key = 'asr' AND s.updated_at <= $2::timestamptz
+)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+`
+
+type PutASRStatusIfUnchangedParams struct {
+	Value        []byte
+	AsrUpdatedAt time.Time
+}
+
+// 只在语音识别配置从 asr_updated_at 以来没被管理员改过时写入最近一次错误，免得旧任务盖掉刚改好的新配置状态
+func (q *Queries) PutASRStatusIfUnchanged(ctx context.Context, arg PutASRStatusIfUnchangedParams) error {
+	_, err := q.db.Exec(ctx, putASRStatusIfUnchanged, arg.Value, arg.AsrUpdatedAt)
+	return err
 }
 
 const putSetting = `-- name: PutSetting :exec

@@ -836,6 +836,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/asr": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 语音识别配置 */
+        get: operations["get-asr-settings"];
+        /**
+         * 保存语音识别配置
+         * @description 全团队共用一份。打开 DeepSeek 在线识别后，新转写的会议会把录音分段发给 DeepSeek；API Key 加密后保存。
+         */
+        put: operations["put-asr-settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/asr/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 测试 DeepSeek 在线识别能不能用
+         * @description 用提交的值（不需要先保存）发一段 1 秒静音音频测试连通和鉴权。失败时返回 422，detail 里是原因。
+         */
+        post: operations["test-asr-settings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings/feishu": {
         parameters: {
             query?: never;
@@ -1273,6 +1314,43 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ASRSettings: {
+            /** @description 是否已经保存了 API Key；Key 本身不会返回 */
+            api_key_set: boolean;
+            /** @description DeepSeek 在线识别接口地址 */
+            base_url: string;
+            /** @description 最近一次调用在线识别失败的原因；管理员重新保存或之后转写恢复正常会自动清掉 */
+            last_error?: string;
+            /**
+             * Format: date-time
+             * @description 最近一次调用在线识别失败的时间
+             */
+            last_error_at?: string;
+            /**
+             * @description 语音识别方式：本机识别（默认，录音不出服务器），或者 DeepSeek 在线识别
+             * @enum {string}
+             */
+            provider: "local" | "deepseek";
+        };
+        ASRSettingsInputBody: {
+            /** @description 留空表示沿用已保存的 Key */
+            api_key?: string;
+            /** @description DeepSeek 在线识别接口地址，留空用默认地址 */
+            base_url?: string;
+            /** @description 是否清除已保存的 API Key（切回本机识别时可选） */
+            clear_api_key?: boolean;
+            /**
+             * @description local 是本机识别，deepseek 是 DeepSeek 在线识别
+             * @enum {string}
+             */
+            provider: "local" | "deepseek";
+        };
+        ASRTestInputBody: {
+            /** @description 留空表示沿用已保存的 Key */
+            api_key?: string;
+            /** @description DeepSeek 在线识别接口地址，留空用默认地址 */
+            base_url?: string;
+        };
         AcceptLinkInputBody: {
             /** @description 接受邀请时必填；重置密码时不用传 */
             name?: string;
@@ -1738,6 +1816,13 @@ export interface components {
         };
         Meeting: {
             /**
+             * @description 当前这份转写实际用的语音识别：还没转写或旧会议为空，local 是本机识别，deepseek 是 DeepSeek 在线识别
+             * @enum {string}
+             */
+            asr_engine: "" | "local" | "deepseek";
+            /** @description 在线识别没用上、自动退回本机识别时的原因，可以直接展示 */
+            asr_warning?: string;
+            /**
              * Format: date-time
              * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
              */
@@ -1828,6 +1913,13 @@ export interface components {
             visibility: "team" | "members" | "private";
         };
         MeetingListItem: {
+            /**
+             * @description 当前这份转写实际用的语音识别：还没转写或旧会议为空，local 是本机识别，deepseek 是 DeepSeek 在线识别
+             * @enum {string}
+             */
+            asr_engine: "" | "local" | "deepseek";
+            /** @description 在线识别没用上、自动退回本机识别时的原因，可以直接展示 */
+            asr_warning?: string;
             /**
              * Format: date-time
              * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
@@ -2175,6 +2267,13 @@ export interface components {
             items: components["schemas"]["TrashedMeeting"][];
         };
         TrashedMeeting: {
+            /**
+             * @description 当前这份转写实际用的语音识别：还没转写或旧会议为空，local 是本机识别，deepseek 是 DeepSeek 在线识别
+             * @enum {string}
+             */
+            asr_engine: "" | "local" | "deepseek";
+            /** @description 在线识别没用上、自动退回本机识别时的原因，可以直接展示 */
+            asr_warning?: string;
             /**
              * Format: date-time
              * @description 录音过了保留期被删除的时间，转写和纪要还在。没删时没有这一项
@@ -3995,6 +4094,99 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PeopleOutputBody"];
                 };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-asr-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ASRSettings"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "put-asr-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ASRSettingsInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ASRSettings"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "test-asr-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ASRTestInputBody"];
+            };
+        };
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Error */
             default: {

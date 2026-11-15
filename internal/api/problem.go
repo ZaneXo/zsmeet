@@ -284,6 +284,7 @@ var fieldNames = map[string]string{
 	"q":                "搜索词",
 	"guide":            "写法说明",
 	"base_url":         "接口地址",
+	"provider":         "识别方式",
 	"model":            "模型",
 	"api_key":          "API Key",
 	"audio_days":       "录音保留天数",

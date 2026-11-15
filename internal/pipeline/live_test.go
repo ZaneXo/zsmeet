@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -10,10 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
 
 	"github.com/ZaneXo/zsmeet/internal/asr"
@@ -215,6 +218,102 @@ func TestLiveWorkerSkipsUploadSource(t *testing.T) {
 	}
 	if e.engine.transcribed.Load() != 0 {
 		t.Fatalf("上传文件的会议不该跑实时字幕，transcribed=%d", e.engine.transcribed.Load())
+	}
+}
+
+// 回归验证：真实 River 客户端消费 live_caption 队列时，第一片的任务 completed 以后，
+// 第二片入队不会被 River 去重吞掉；脏 JSON 等不可重试错误直接 JobCancel 取消。
+func TestLiveWorkerRiverSequentialChunks(t *testing.T) {
+	e := newEnv(t)
+	ctx := t.Context()
+
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &liveWorker{w: e.w})
+	client, err := river.NewClient(riverpgxv5.New(e.w.pool), &river.Config{
+		Queues:  map[string]river.QueueConfig{queue.QueueLiveCaption: {MaxWorkers: 1}},
+		Workers: workers,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = client.Stop(stopCtx)
+	})
+
+	m, err := e.q.CreateMeeting(ctx, sqlc.CreateMeetingParams{
+		OwnerID:    e.user.ID,
+		Title:      "River 连续分片回归",
+		Source:     "desktop",
+		Template:   "general",
+		Visibility: "team",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rawAAC := filepath.Join(t.TempDir(), "c.aac")
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "aevalsrc='0.05*sin(2*PI*440*t)':s=16000:d=4",
+		"-ac", "1", "-c:a", "aac", "-b:a", "64k", "-f", "adts", rawAAC)
+	if msg, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg 生成分片失败：%v\n%s", err, msg)
+	}
+	chunkBytes, err := os.ReadFile(rawAAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	uploadAndWait := func(seq int, wantChunks int32) {
+		t.Helper()
+		n, err := e.w.store.PutChunk(m.ID, seq, bytes.NewReader(chunkBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.q.AddChunk(ctx, sqlc.AddChunkParams{MeetingID: m.ID, Seq: int32(seq), Size: n}); err != nil {
+			t.Fatal(err)
+		}
+		res, err := client.Insert(ctx, queue.LiveCaptionArgs{MeetingID: m.ID}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.UniqueSkippedAsDuplicate {
+			t.Fatalf("第 %d 片入队被去重吞掉了", seq)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			lt, ltErr := e.q.GetLiveTranscript(ctx, m.ID)
+			var state string
+			_ = e.w.pool.QueryRow(ctx, "SELECT state FROM river_job WHERE id = $1", res.Job.ID).Scan(&state)
+			if ltErr == nil && lt.Chunks == wantChunks && state == string(rivertype.JobStateCompleted) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("等待第 %d 片完成超时：ltErr=%v chunks=%d jobState=%q", seq, ltErr, lt.Chunks, state)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+
+	uploadAndWait(0, 1)
+	uploadAndWait(1, 2)
+
+	// 不可重试错误（类型不对的 JSONB，无法反序列化成 []Segment）应返回 JobCancelError
+	if _, err := e.w.pool.Exec(ctx, "UPDATE live_transcripts SET chunks = 1, finalized = $2 WHERE meeting_id = $1", m.ID, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	lw := &liveWorker{w: e.w}
+	err = lw.Work(ctx, &river.Job[queue.LiveCaptionArgs]{
+		JobRow: &rivertype.JobRow{ID: 99},
+		Args:   queue.LiveCaptionArgs{MeetingID: m.ID},
+	})
+	var cancelErr *rivertype.JobCancelError
+	if !errors.As(err, &cancelErr) {
+		t.Fatalf("损坏 JSON 应触发 JobCancel，实际 err=%v", err)
 	}
 }
 

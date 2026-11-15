@@ -1795,8 +1795,8 @@ func TestLiveCaptionsAPI(t *testing.T) {
 	if err := c.pool.QueryRow(t.Context(), "SELECT count(*) FROM river_job WHERE kind = 'live_caption'").Scan(&jobCount); err != nil {
 		t.Fatal(err)
 	}
-	if jobCount != 1 {
-		t.Fatalf("同一场录音连传两片只应排队 1 个 live_caption 任务（upload 不排），实际 %d 个", jobCount)
+	if jobCount != 2 {
+		t.Fatalf("录音会议连传两片应排队 2 个 live_caption 任务（upload 不排），实际 %d 个", jobCount)
 	}
 
 	// 写入实时字幕后，创建者能读到定稿数与句子，看不到的成员返回 404

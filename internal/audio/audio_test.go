@@ -130,21 +130,24 @@ func TestDecodeTail(t *testing.T) {
 			full := readPCM(t, fullPCM)
 			wantClick := loudest(full)
 
-			tail, actualFrom, err := DecodeTail(t.Context(), in, filepath.Join(dir, "tail.f32"), 5.0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if actualFrom != 5.0 {
-				t.Fatalf("actualFrom = %v, want 5.0", actualFrom)
-			}
-			fromSample := 5 * SampleRate
-			if len(tail) != len(full)-fromSample {
-				t.Fatalf("截尾后有 %d 个采样，整段减掉前 5 秒有 %d 个", len(tail), len(full)-fromSample)
-			}
-			gotClick := fromSample + loudest(tail)
-			// 编码器帧长以内（≤2 个采样）完全对齐
-			if math.Abs(float64(gotClick-wantClick)) > 2 {
-				t.Errorf("「咔哒」整段在第 %d 个采样，截尾换算后在第 %d 个", wantClick, gotClick)
+			// 不同版本 ffmpeg（6.x / 8.x）对 Opus 预跳过（pre-skip）的输入 -ss 裁剪相差约 8ms，在一帧（20ms = 320 个采样）以内即可
+			const maxDrift = SampleRate / 50
+			for _, fromSec := range []float64{5.0, 5.125} {
+				tail, actualFrom, err := DecodeTail(t.Context(), in, filepath.Join(dir, "tail.f32"), fromSec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if actualFrom != fromSec {
+					t.Fatalf("actualFrom = %v, want %v", actualFrom, fromSec)
+				}
+				fromSample := int(math.Round(fromSec * SampleRate))
+				if math.Abs(float64(len(tail)-(len(full)-fromSample))) > maxDrift {
+					t.Fatalf("from=%vs 截尾后有 %d 个采样，整段减掉前面应约 %d 个", fromSec, len(tail), len(full)-fromSample)
+				}
+				gotClick := fromSample + loudest(tail)
+				if math.Abs(float64(gotClick-wantClick)) > maxDrift {
+					t.Errorf("from=%vs 「咔哒」整段在第 %d 个采样，截尾换算后在第 %d 个", fromSec, wantClick, gotClick)
+				}
 			}
 
 			past, _, err := DecodeTail(t.Context(), in, filepath.Join(dir, "past.f32"), 20.0)

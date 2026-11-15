@@ -41,10 +41,26 @@ type liveWorker struct {
 func (l *liveWorker) Work(ctx context.Context, job *river.Job[queue.LiveCaptionArgs]) error {
 	for {
 		advanced, err := l.step(ctx, job.Args.MeetingID)
-		if err != nil || !advanced {
+		if err != nil {
+			if isLivePermanentError(err) {
+				slog.Warn("实时字幕任务因不可重试错误取消", "meeting", job.Args.MeetingID, "err", err)
+				return river.JobCancel(err)
+			}
 			return err
 		}
+		if !advanced {
+			return nil
+		}
 	}
+}
+
+func isLivePermanentError(err error) bool {
+	if errors.Is(err, audio.ErrTooLong) {
+		return true
+	}
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &syntaxErr) || errors.As(err, &typeErr)
 }
 
 // step 往前识别一轮新传上来的连续分片；advanced 为 true 表示这一轮推进了分片进度，外层再看一眼跑的期间有没有又传上来新分片。

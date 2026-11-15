@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { api, ApiError, errorMessage, queryClient, unwrap } from "../../api/client";
+import { isEn, tr } from "../../i18n/lang";
 import * as store from "./store";
 import { SLICE_MS } from "./store";
 import type { LocalRecording } from "./store";
@@ -99,10 +100,16 @@ export type StartOptions = {
 /** 这个浏览器能不能录音；不能的话说明原因。 */
 export function unsupportedReason(): string {
   if (!window.isSecureContext) {
-    return "浏览器只允许 HTTPS 网页使用麦克风，现在这个地址不是 HTTPS。请管理员给 zsmeet 配上 HTTPS（在服务器本机上用 localhost 打开也可以）。";
+    return tr(
+      "浏览器只允许 HTTPS 网页使用麦克风，现在这个地址不是 HTTPS。请管理员给 zsmeet 配上 HTTPS（在服务器本机上用 localhost 打开也可以）。",
+      "Browsers only allow microphone access over HTTPS, and this URL is not HTTPS. Ask an admin to enable HTTPS for zsmeet (or open via localhost on the server).",
+    );
   }
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined" || typeof AudioContext === "undefined") {
-    return "这个浏览器不支持网页录音，请换用最新版的 Chrome、Edge、Safari 或 Firefox。";
+    return tr(
+      "这个浏览器不支持网页录音，请换用最新版的 Chrome、Edge、Safari 或 Firefox。",
+      "This browser does not support web recording. Please use a recent version of Chrome, Edge, Safari, or Firefox.",
+    );
   }
   return "";
 }
@@ -146,12 +153,17 @@ async function pickTab(): Promise<MediaStream> {
       surfaceSwitching: "include",
     } as DisplayMediaStreamOptions);
   } catch (e) {
-    if (e instanceof DOMException && e.name === "NotAllowedError") throw new Error("没有选择要录的标签页。");
+    if (e instanceof DOMException && e.name === "NotAllowedError") throw new Error(tr("没有选择要录的标签页。", "No browser tab was selected for recording."));
     throw e;
   }
   if (stream.getAudioTracks().length === 0) {
     stream.getTracks().forEach((t) => t.stop());
-    throw new Error("没有共享到声音：在弹出的窗口里选「标签页」，选中开会的那个标签页，并打开「同时共享标签页音频」，再试一次。");
+    throw new Error(
+      tr(
+        "没有共享到声音：在弹出的窗口里选「标签页」，选中开会的那个标签页，并打开「同时共享标签页音频」，再试一次。",
+        "No tab audio was shared: choose \"Browser Tab\" in the picker, select the meeting tab, enable \"Also share tab audio\", and try again.",
+      ),
+    );
   }
   return stream;
 }
@@ -359,7 +371,7 @@ class RecordingSession {
     if (this.busy || this.snap.needsDownload) return;
     this.set({ ...IDLE, phase: "starting", source: opts.source, micLabel: this.snap.micLabel, micLive: this.snap.micLive });
     try {
-      if (!this.mic) throw new Error("还没有打开麦克风：请允许这个网页使用麦克风。");
+      if (!this.mic) throw new Error(tr("还没有打开麦克风：请允许这个网页使用麦克风。", "Microphone is not open yet: please allow microphone access for this site."));
       void this.context().resume();
       if (opts.source === "mic+tab") this.attachTab(await pickTab());
 
@@ -412,7 +424,12 @@ class RecordingSession {
       this.recorder = recorder;
       recorder.addEventListener("dataavailable", (e) => this.onData(e.data));
       recorder.addEventListener("error", () => {
-        this.set({ stopReason: "浏览器的录音出错了，录音已经自动停止。停止前录下的部分会照常处理。" });
+        this.set({
+          stopReason: tr(
+            "浏览器的录音出错了，录音已经自动停止。停止前录下的部分会照常处理。",
+            "Browser recording encountered an error and stopped automatically. Audio captured before stopping will still be processed.",
+          ),
+        });
         void this.stop();
       });
       recorder.start(SLICE_MS);
@@ -581,7 +598,7 @@ class RecordingSession {
     try {
       if (rec.chunks === 0) {
         await store.deleteRecording(rec.meetingId).catch(() => {});
-        throw new ApiError(0, "什么也没有录下来。");
+        throw new ApiError(0, tr("什么也没有录下来。", "Nothing was recorded."));
       }
       await this.uploader!.drained();
       const meeting = await complete(rec.meetingId, rec.chunks, [...rec.marks], (trouble) => this.set({ trouble }));
@@ -653,7 +670,12 @@ class RecordingSession {
     const quietFor = this.quietSince === null ? 0 : Math.floor((now - this.quietSince) / 1000);
     if (quietFor !== this.snap.quietFor) this.set({ quietFor });
     if (this.elapsed() >= MAX_SECONDS) {
-      this.set({ stopReason: `已经录了 ${Math.floor(MAX_SECONDS / 3600)} 个小时，达到单场录音的上限，自动结束了。` });
+      const hrs = Math.floor(MAX_SECONDS / 3600);
+      this.set({
+        stopReason: isEn()
+          ? `Reached the ${hrs}-hour single-recording limit and stopped automatically.`
+          : `已经录了 ${hrs} 个小时，达到单场录音的上限，自动结束了。`,
+      });
       void this.stop();
     }
   };

@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/google/uuid"
 
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
@@ -24,8 +25,9 @@ type Template struct {
 	Custom bool   `json:"custom" doc:"管理员自己定义的模板（可以改、可以删）；内置的模板是 false"`
 }
 
-func toTemplate(t service.Template) Template {
-	return Template{ID: t.ID, Name: t.Name, Guide: t.Guide, Custom: t.Custom}
+func toTemplate(ctx context.Context, t service.Template) Template {
+	name, guide := i18n.LocalizeTemplate(i18n.FromContext(ctx), t.ID, t.Name, t.Guide, t.Custom)
+	return Template{ID: t.ID, Name: name, Guide: guide, Custom: t.Custom}
 }
 
 type TemplatesOutput struct {
@@ -52,7 +54,7 @@ func (h *Handlers) ListTemplates(ctx context.Context, _ *struct{}) (*TemplatesOu
 	out := &TemplatesOutput{}
 	out.Body.Items = make([]Template, len(items))
 	for i, t := range items {
-		out.Body.Items[i] = toTemplate(t)
+		out.Body.Items[i] = toTemplate(ctx, t)
 	}
 	return out, nil
 }
@@ -85,7 +87,7 @@ func (h *Handlers) CreateTemplate(ctx context.Context, in *TemplateInput) (*Temp
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &TemplateOutput{Body: toTemplate(t)}, nil
+	return &TemplateOutput{Body: toTemplate(ctx, t)}, nil
 }
 
 type TemplateID struct {
@@ -116,7 +118,7 @@ func (h *Handlers) UpdateTemplate(ctx context.Context, in *UpdateTemplateInput) 
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &TemplateOutput{Body: toTemplate(t)}, nil
+	return &TemplateOutput{Body: toTemplate(ctx, t)}, nil
 }
 
 var deleteTemplateOp = huma.Operation{
@@ -200,7 +202,7 @@ func (h *Handlers) ListMeetings(ctx context.Context, in *ListMeetingsInput) (*Li
 		for j, h := range m.Hits {
 			hits[j] = SearchHit(h)
 		}
-		out.Body.Items[i] = MeetingListItem{Meeting: toMeeting(m), Hits: hits}
+		out.Body.Items[i] = MeetingListItem{Meeting: toMeeting(ctx, m), Hits: hits}
 	}
 	out.Body.Expanded = list.Spellings
 	if out.Body.Expanded == nil {
@@ -241,7 +243,7 @@ func (h *Handlers) CreateMeeting(ctx context.Context, in *CreateMeetingInput) (*
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m)}, nil
+	return &MeetingOutput{Body: toMeeting(ctx, m)}, nil
 }
 
 var getMeetingOp = huma.Operation{
@@ -262,7 +264,7 @@ func (h *Handlers) GetMeeting(ctx context.Context, in *MeetingID) (*MeetingOutpu
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m)}, nil
+	return &MeetingOutput{Body: toMeeting(ctx, m)}, nil
 }
 
 type RenameMeetingInput struct {
@@ -290,7 +292,7 @@ func (h *Handlers) RenameMeeting(ctx context.Context, in *RenameMeetingInput) (*
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m)}, nil
+	return &MeetingOutput{Body: toMeeting(ctx, m)}, nil
 }
 
 // ---- 上传 ----
@@ -415,7 +417,7 @@ func (h *Handlers) CompleteUpload(ctx context.Context, in *CompleteUploadInput) 
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m)}, nil
+	return &MeetingOutput{Body: toMeeting(ctx, m)}, nil
 }
 
 // ---- 处理 ----
@@ -439,7 +441,7 @@ func (h *Handlers) RetryMeeting(ctx context.Context, in *MeetingID) (*MeetingOut
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m)}, nil
+	return &MeetingOutput{Body: toMeeting(ctx, m)}, nil
 }
 
 var meetingEventsOp = huma.Operation{
@@ -470,7 +472,7 @@ func (h *Handlers) MeetingEvents(ctx context.Context, in *MeetingID, send sse.Se
 		if err != nil {
 			return
 		}
-		cur := toMeeting(m)
+		cur := toMeeting(ctx, m)
 		switch {
 		case meetingChanged(cur, last):
 			if send.Data(cur) != nil {
@@ -535,7 +537,7 @@ func (h *Handlers) Retranscribe(ctx context.Context, in *RetranscribeInput) (*Me
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m)}, nil
+	return &MeetingOutput{Body: toMeeting(ctx, m)}, nil
 }
 
 type RenameSpeakersInput struct {
@@ -573,7 +575,7 @@ func (h *Handlers) RenameSpeakers(ctx context.Context, in *RenameSpeakersInput) 
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m)}, nil
+	return &MeetingOutput{Body: toMeeting(ctx, m)}, nil
 }
 
 // ---- 转写 ----
@@ -698,5 +700,5 @@ func (h *Handlers) RegenerateMinutes(ctx context.Context, in *RegenerateMinutesI
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &MeetingOutput{Body: toMeeting(m)}, nil
+	return &MeetingOutput{Body: toMeeting(ctx, m)}, nil
 }

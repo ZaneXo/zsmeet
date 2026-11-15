@@ -4,24 +4,50 @@ import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Meeting } from "../api/client";
 import type { components } from "../api/schema";
 import { Button, Modal, Notice, Select, Spinner } from "../components/ui";
+import { tr, useLang } from "../i18n/react";
 
 type Visibility = Meeting["visibility"];
 type Member = components["schemas"]["MeetingMember"];
 
 export const VISIBILITY_LABEL: Record<Visibility, string> = {
-  team: "团队所有人可见",
-  members: "指定的人可见",
-  private: "仅创建者可见",
+  get team() {
+    return tr("团队所有人可见", "Visible to entire team");
+  },
+  get members() {
+    return tr("指定的人可见", "Visible to specific people");
+  },
+  get private() {
+    return tr("仅创建者可见", "Only creator");
+  },
 };
 
 /** 可见范围的选项。管理员改别人的会议时，「只有我」要说成「只有创建者」。 */
 function options(isOwner: boolean, ownerName: string): { value: Visibility; label: string; hint: string }[] {
   return [
-    { value: "team", label: "团队里所有人", hint: "团队里的人都能看。下面加的人还能编辑" },
-    { value: "members", label: "指定的人", hint: "只有下面这些人能看，勾上「能编辑」的还能改" },
+    {
+      value: "team",
+      label: tr("团队里所有人", "Everyone in the team"),
+      hint: tr("团队里的人都能看。下面加的人还能编辑", "Everyone in the team can view. People added below can also edit."),
+    },
+    {
+      value: "members",
+      label: tr("指定的人", "Specific people"),
+      hint: tr(
+        "只有下面这些人能看，勾上「能编辑」的还能改",
+        "Only the people listed below can view; those with “Can edit” checked can also edit.",
+      ),
+    },
     isOwner
-      ? { value: "private", label: "只有我", hint: "只有你自己能看（管理员也能看）" }
-      : { value: "private", label: `只有创建者（${ownerName}）`, hint: "只有创建者和管理员能看" },
+      ? {
+          value: "private",
+          label: tr("只有我", "Only me"),
+          hint: tr("只有你自己能看（管理员也能看）", "Only you can view (admins can also view)."),
+        }
+      : {
+          value: "private",
+          label: tr(`只有创建者（${ownerName}）`, `Only creator (${ownerName})`),
+          hint: tr("只有创建者和管理员能看", "Only the creator and admins can view."),
+        },
   ];
 }
 
@@ -40,6 +66,7 @@ export function AccessDialog({
   groups?: boolean;
   onClose: () => void;
 }) {
+  useLang();
   // 每次打开都重新取：表单拿它当初始值、保存时整份替换，用缓存里的旧名单会把别人刚改的覆盖掉
   const access = useQuery({
     queryKey: ["meeting-access", m.id],
@@ -49,9 +76,9 @@ export function AccessDialog({
   const people = useQuery({ queryKey: ["people"], queryFn: () => unwrap(api.GET("/api/people")) });
 
   return (
-    <Modal title="谁能看、谁能编辑" onClose={onClose}>
+    <Modal title={tr("谁能看、谁能编辑", "Who can view & edit")} onClose={onClose}>
       {access.isPending || people.isPending ? (
-        <Spinner label="正在加载…" />
+        <Spinner label={tr("正在加载…", "Loading…")} />
       ) : access.isError || people.isError ? (
         <Notice tone="bad">{errorMessage(access.error ?? people.error)}</Notice>
       ) : (
@@ -78,6 +105,7 @@ function AccessForm({
   people: components["schemas"]["Person"][];
   onClose: () => void;
 }) {
+  useLang();
   const [visibility, setVisibility] = useState<Visibility>(initial.visibility);
   const [members, setMembers] = useState<Member[]>(initial.members);
   // 团队所有人可见时，单独加的人只用来给编辑权限
@@ -112,7 +140,7 @@ function AccessForm({
   return (
     <div className="flex flex-col gap-4">
       <fieldset className="flex flex-col gap-2">
-        <legend className="mb-1.5 text-[13px] font-semibold text-ink-2">谁能看</legend>
+        <legend className="mb-1.5 text-[13px] font-semibold text-ink-2">{tr("谁能看", "Who can view")}</legend>
         {options(isOwner, m.owner_name).map((o) => (
           <label
             key={o.value}
@@ -138,25 +166,32 @@ function AccessForm({
       {visibility !== "private" && (
         <div className="flex flex-col gap-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[13px] font-semibold text-ink-2">{visibility === "team" ? "还能编辑的人" : "能看的人"}</span>
+            <span className="text-[13px] font-semibold text-ink-2">
+              {visibility === "team" ? tr("还能编辑的人", "People who can edit") : tr("能看的人", "People who can view")}
+            </span>
             <Select
-              aria-label="加一个人"
+              aria-label={tr("加一个人", "Add person")}
               className="w-56"
               value=""
               disabled={candidates.length === 0}
               onChange={(e) => add(e.target.value)}
             >
-              <option value="">{candidates.length === 0 ? "团队里的人都加上了" : "加一个人…"}</option>
+              <option value="">
+                {candidates.length === 0 ? tr("团队里的人都加上了", "Everyone in the team has been added") : tr("加一个人…", "Add someone…")}
+              </option>
               {candidates.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name}（{p.email}）
+                  {p.name}
+                  {tr(`（${p.email}）`, ` (${p.email})`)}
                 </option>
               ))}
             </Select>
           </div>
           {shown.length === 0 ? (
             <p className="rounded-lg bg-subtle px-3.5 py-3 text-[13px] leading-relaxed text-muted">
-              {visibility === "team" ? "还没有加人：只有创建者和管理员能编辑。" : "还没有加人：现在只有创建者和管理员能看。"}
+              {visibility === "team"
+                ? tr("还没有加人：只有创建者和管理员能编辑。", "No one added yet: only the creator and admins can edit.")
+                : tr("还没有加人：现在只有创建者和管理员能看。", "No one added yet: currently only the creator and admins can view.")}
             </p>
           ) : (
             <ul className="flex max-h-64 flex-col divide-y divide-line overflow-y-auto rounded-lg border border-line">
@@ -166,7 +201,7 @@ function AccessForm({
                     {x.name}
                     <span className="ml-1.5 text-xs text-muted">
                       {x.email}
-                      {x.disabled && "（已停用）"}
+                      {x.disabled && tr("（已停用）", " (disabled)")}
                     </span>
                   </span>
                   {visibility === "members" && (
@@ -177,11 +212,11 @@ function AccessForm({
                         checked={x.can_edit}
                         onChange={(e) => update(x.user_id, e.target.checked)}
                       />
-                      能编辑
+                      {tr("能编辑", "Can edit")}
                     </label>
                   )}
                   <Button size="sm" variant="ghost" onClick={() => remove(x.user_id)}>
-                    移除
+                    {tr("移除", "Remove")}
                   </Button>
                 </li>
               ))}
@@ -191,15 +226,26 @@ function AccessForm({
       )}
 
       <p className="text-xs leading-relaxed text-muted">
-        创建者和管理员总能看、能编辑；删除会议、改这里的设置只有他们能做。
-        {feishu && "已经发到飞书群的卡片、导入的飞书文档不受这里的设置影响；只有团队所有人可见的会议才会自动发到飞书群。"}
-        {groups && "已经发到钉钉、企业微信、Slack 群里的消息不受这里的设置影响；只有团队所有人可见的会议才会自动发到这些群。"}
+        {tr(
+          "创建者和管理员总能看、能编辑；删除会议、改这里的设置只有他们能做。",
+          "The creator and admins can always view and edit; only they can delete the meeting or change access settings.",
+        )}
+        {feishu &&
+          tr(
+            "已经发到飞书群的卡片、导入的飞书文档不受这里的设置影响；只有团队所有人可见的会议才会自动发到飞书群。",
+            " Cards already sent to Feishu chats and imported Feishu docs are unaffected; only meetings visible to the entire team are auto-sent to Feishu.",
+          )}
+        {groups &&
+          tr(
+            "已经发到钉钉、企业微信、Slack 群里的消息不受这里的设置影响；只有团队所有人可见的会议才会自动发到这些群。",
+            " Messages already sent to DingTalk, WeCom, or Slack groups are unaffected; only meetings visible to the entire team are auto-sent to those groups.",
+          )}
       </p>
       {save.isError && <Notice tone="bad">{errorMessage(save.error)}</Notice>}
       <div className="flex justify-end gap-2">
-        <Button onClick={onClose}>取消</Button>
+        <Button onClick={onClose}>{tr("取消", "Cancel")}</Button>
         <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? "正在保存…" : "保存"}
+          {save.isPending ? tr("正在保存…", "Saving…") : tr("保存", "Save")}
         </Button>
       </div>
     </div>

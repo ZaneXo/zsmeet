@@ -3,6 +3,7 @@
 // 这里是不依赖 React 的部分：收到的能用几片、大约多长、录音是不是还在传，方便单独测试（unfinishedRecording.test.ts）。
 // 引用别的文件里的值要带 .ts 后缀：测试用 Node 直接跑，它不会自己补后缀
 import type { Meeting } from "../api/client";
+import { isEn, tr } from "../i18n/lang.ts";
 import { dateTime } from "./format.ts";
 
 /** 边录边传的会议来源：网页录音、桌面版录音。 */
@@ -66,8 +67,14 @@ export function chunksFlowing(m: ChunkTimes, now: number): boolean {
 
 /** 「最后一次收到录音：2 分钟前」，还没收到过的是「服务器还没有收到录音」。多久以前按 idleMs 算，超过一天的写日期和时间。 */
 export function lastReceived(m: ChunkTimes, now: number): string {
-  if (!m.last_chunk_at) return "服务器还没有收到录音";
+  if (!m.last_chunk_at) return tr("服务器还没有收到录音", "No audio received by the server yet");
   const sec = Math.max(0, idleMs(m, now) / 1000);
+  if (isEn()) {
+    if (sec < 60) return "Last audio received: just now";
+    if (sec < 3600) return `Last audio received: ${Math.floor(sec / 60)} min ago`;
+    if (sec < 86400) return `Last audio received: ${Math.floor(sec / 3600)} hr ago`;
+    return `Last audio received: ${dateTime(m.last_chunk_at)}`;
+  }
   if (sec < 60) return "最后一次收到录音：刚刚";
   if (sec < 3600) return `最后一次收到录音：${Math.floor(sec / 60)} 分钟前`;
   if (sec < 86400) return `最后一次收到录音：${Math.floor(sec / 3600)} 小时前`;

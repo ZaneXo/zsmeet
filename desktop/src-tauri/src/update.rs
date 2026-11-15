@@ -22,6 +22,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 use time::format_description::well_known::Rfc3339;
 use url::Url;
 
+use crate::i18n::{is_en, tr};
 use crate::recorder::Recorder;
 
 /// 发给界面的事件：有新版本（内容是 Available）；下载新版本的进度（内容是 Progress）。
@@ -46,6 +47,17 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
 const INSTALLING: &str = "正在更新，装好以后 zsmeet 会自动重新打开，请稍等";
 const UP_TO_DATE: &str = "已经是最新版本了，不用更新";
+
+fn installing_msg() -> &'static str {
+    tr(
+        INSTALLING,
+        "Update in progress. zsmeet will relaunch automatically once installed.",
+    )
+}
+
+fn up_to_date_msg() -> &'static str {
+    tr(UP_TO_DATE, "Already on the latest version.")
+}
 
 /// update_check 的结果。
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -140,7 +152,7 @@ pub(crate) async fn install<S: Source, G: Gate>(
         return Err(reason);
     }
     if installing.swap(true, Ordering::AcqRel) {
-        return Err(INSTALLING.into());
+        return Err(installing_msg().into());
     }
     let result = download_and_install(source, gate, &mut report).await;
     // 装好了的马上就重启，不用再放开
@@ -155,7 +167,7 @@ async fn download_and_install<S: Source, G: Gate>(
     gate: &G,
     report: &mut (impl FnMut(Progress) + Send),
 ) -> Result<Available, String> {
-    let package = source.latest().await?.ok_or(UP_TO_DATE)?;
+    let package = source.latest().await?.ok_or_else(up_to_date_msg)?;
     let available = source.describe(&package);
     log::info!("开始下载新版本 {}", available.version);
     let mut throttle = Throttle::new(PROGRESS_EVERY);
@@ -291,7 +303,13 @@ impl Source for Releases {
             })
         })
         .await
-        .map_err(|e| format!("新版本没装上（{e}），请再试一次"))?
+        .map_err(|e| {
+            if is_en() {
+                format!("Failed to install the update ({e}). Please try again.")
+            } else {
+                format!("新版本没装上（{e}），请再试一次")
+            }
+        })?
     }
 }
 
@@ -397,7 +415,13 @@ pub async fn install_and_relaunch(
     recorder: &Recorder,
 ) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| {
-        format!("找不到 zsmeet 装在哪（{e}），没法自动更新。请到 {RELEASES_PAGE} 下载新版本")
+        if is_en() {
+            format!(
+                "Cannot locate the running zsmeet executable ({e}); auto-update unavailable. Download the new version from {RELEASES_PAGE}"
+            )
+        } else {
+            format!("找不到 zsmeet 装在哪（{e}），没法自动更新。请到 {RELEASES_PAGE} 下载新版本")
+        }
     })?;
     if let Some(problem) = location_problem(&exe) {
         return Err(problem);
@@ -453,14 +477,26 @@ pub fn spawn_checks(app: AppHandle) {
 /// 现在运行的 zsmeet 能不能换成新版本，不能的话返回原因。exe：App 主程序的路径。
 fn location_problem(exe: &Path) -> Option<String> {
     let Some(bundle) = app_bundle(exe) else {
-        return Some("现在运行的不是打包好的 zsmeet.app（是开发版），不能自动更新".into());
+        return Some(
+            tr(
+                "现在运行的不是打包好的 zsmeet.app（是开发版），不能自动更新",
+                "Running a development build rather than a packaged zsmeet.app; auto-update is disabled.",
+            )
+            .into(),
+        );
     };
     // 没挪过位置、直接从下载的地方（或者安装盘里）打开的 App，macOS 把它放在一个只读的临时位置运行
     if bundle
         .components()
         .any(|c| c.as_os_str() == "AppTranslocation")
     {
-        return Some("zsmeet 是从下载的地方直接打开的，macOS 不让它换成新版本。请退出 zsmeet，把它拖到「应用程序」文件夹里，从那里打开以后再更新".into());
+        return Some(
+            tr(
+                "zsmeet 是从下载的地方直接打开的，macOS 不让它换成新版本。请退出 zsmeet，把它拖到「应用程序」文件夹里，从那里打开以后再更新",
+                "zsmeet was opened directly from Downloads (App Translocation), so macOS prevents in-place updates. Quit zsmeet, drag it into Applications, reopen it from there, and update again.",
+            )
+            .into(),
+        );
     }
     None
 }
@@ -480,6 +516,56 @@ fn app_bundle(exe: &Path) -> Option<&Path> {
 fn failure_message(e: &tauri_plugin_updater::Error) -> String {
     use std::io::ErrorKind;
     use tauri_plugin_updater::Error as E;
+    if is_en() {
+        return match e {
+            E::Reqwest(e) if e.is_decode() => format!(
+                "Could not parse release metadata (your network may require sign-in). Try again later, or download from {RELEASES_PAGE}"
+            ),
+            E::Reqwest(_) => format!(
+                "Cannot reach GitHub to check for updates. Check your network (and proxy if you use one) and try again, or download from {RELEASES_PAGE}"
+            ),
+            E::Network(detail) => {
+                let status = detail
+                    .rsplit_once("status: ")
+                    .map_or(detail.as_str(), |(_, status)| status);
+                format!(
+                    "Update package is temporarily unavailable on GitHub ({status}). Try again later, or download from {RELEASES_PAGE}"
+                )
+            }
+            E::ReleaseNotFound => {
+                "Could not fetch update metadata (none published yet on GitHub, or your network requires sign-in). Try again later.".into()
+            }
+            E::Serialization(_) | E::Semver(_) | E::UrlParse(_) => format!(
+                "Could not parse update metadata. Try again later, or download from {RELEASES_PAGE}"
+            ),
+            E::TargetNotFound(_) | E::TargetsNotFound(_) => format!(
+                "No installer package is available for this Mac yet. Try again later, or download from {RELEASES_PAGE}"
+            ),
+            E::Minisign(_)
+            | E::Base64(_)
+            | E::SignatureUtf8(_)
+            | E::SignedVersionMismatch { .. }
+            | E::MissingSignedVersion => format!(
+                "Downloaded update failed signature verification and was not installed. Try again later, or download from {RELEASES_PAGE}"
+            ),
+            E::InvalidUpdaterFormat | E::BinaryNotFoundInArchive => format!(
+                "Downloaded update archive is invalid and was not installed. Try again later, or download from {RELEASES_PAGE}"
+            ),
+            E::PreviousAppNotRestored(kept) => format!(
+                "Update failed to install; your previous zsmeet was moved to {}. Drag it back to Applications, or download a fresh copy from {RELEASES_PAGE}",
+                kept.display()
+            ),
+            E::TempDirNotOnSameMountPoint => "Cannot stage temporary files on the volume where zsmeet is located. Move zsmeet to Applications, reopen it from there, and update again.".into(),
+            E::Io(e) if e.kind() == ErrorKind::ReadOnlyFilesystem => "zsmeet is running from a read-only volume (such as a disk image). Move zsmeet to Applications, reopen it from there, and update again.".into(),
+            E::Io(e) if e.kind() == ErrorKind::PermissionDenied => format!(
+                "Update was not installed: administrator privileges are required to replace zsmeet. Click \"Update\" again and enter your Mac password, or download from {RELEASES_PAGE}"
+            ),
+            E::Io(e) => format!(
+                "Failed to install update ({e}). Try again, or download from {RELEASES_PAGE}"
+            ),
+            _ => format!("Auto-update failed ({e}). Download the new version from {RELEASES_PAGE}"),
+        };
+    }
     match e {
         E::Reqwest(e) if e.is_decode() => format!(
             "新版本的信息看不懂（连的网络可能要先登录），请稍后再试。一直这样的话，到 {RELEASES_PAGE} 下载新版本"

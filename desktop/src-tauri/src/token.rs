@@ -68,16 +68,29 @@ impl TokenStore for KeychainStore {
         match get_generic_password(&self.service, server) {
             Ok(bytes) => Ok(String::from_utf8(bytes).ok()),
             Err(e) if e.code() == ITEM_NOT_FOUND => Ok(None),
-            Err(e) => Err(format!(
-                "读不了钥匙串里保存的登录信息（{e}），请在弹出的提示里点「允许」，或者重新登录"
-            )),
+            Err(e) => Err(if crate::i18n::is_en() {
+                format!(
+                    "Cannot read saved sign-in credentials from Keychain ({e}). Click \"Allow\" in the macOS prompt or sign in again."
+                )
+            } else {
+                format!(
+                    "读不了钥匙串里保存的登录信息（{e}），请在弹出的提示里点「允许」，或者重新登录"
+                )
+            }),
         }
     }
 
     fn set(&self, server: &str, token: &str) -> Result<(), String> {
         use security_framework::passwords::set_generic_password;
-        set_generic_password(&self.service, server, token.as_bytes())
-            .map_err(|e| format!("登录信息没能存进钥匙串（{e}），请重新登录"))
+        set_generic_password(&self.service, server, token.as_bytes()).map_err(|e| {
+            if crate::i18n::is_en() {
+                format!(
+                    "Could not save sign-in credentials to Keychain ({e}). Please sign in again."
+                )
+            } else {
+                format!("登录信息没能存进钥匙串（{e}），请重新登录")
+            }
+        })
     }
 
     fn delete(&self, server: &str) -> Result<(), String> {
@@ -85,7 +98,11 @@ impl TokenStore for KeychainStore {
         match delete_generic_password(&self.service, server) {
             Ok(()) => Ok(()),
             Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
-            Err(e) => Err(format!("没能从钥匙串里删掉登录信息（{e}）")),
+            Err(e) => Err(if crate::i18n::is_en() {
+                format!("Could not remove sign-in credentials from Keychain ({e})")
+            } else {
+                format!("没能从钥匙串里删掉登录信息（{e}）")
+            }),
         }
     }
 }

@@ -6,6 +6,8 @@ import { api, ApiError, errorMessage, queryClient, unwrap } from "../api/client"
 import { AppLink } from "../components/AppLink";
 import { LevelMeter, RecordingMarks } from "../components/RecordingParts";
 import { Button, buttonClass, Card, Field, Icon, Input, Notice, Select } from "../components/ui";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { hms } from "../lib/format";
 import { SpeakerCountField, useTemplates, VisibilityField } from "../pages/UploadDialog";
 import { UploadRow } from "./DesktopRecordings";
@@ -58,6 +60,7 @@ import { recordUpdateNote } from "./updateView";
  * 录音和上传都在 App 里（Rust 管着录音程序），这个页面只是控制和显示：离开这个页面、关掉窗口，录音都不停。
  */
 export function DesktopRecordPage() {
+  useLang();
   const { state, ended, failure, micQuiet } = useRecorder();
   const [params] = useSearchParams();
   const resumeId = params.get("continue");
@@ -68,8 +71,13 @@ export function DesktopRecordPage() {
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-5">
       <div className="flex flex-col gap-1.5">
-        <h1 className="text-[26px] font-bold">录音</h1>
-        <p className="text-sm text-muted">录下电脑里会议软件的声音和麦克风，边录边传到服务器。断网也能接着录，联网后自动补传，录完自动出纪要。</p>
+        <h1 className="text-[26px] font-bold">{tr("录音", "Record")}</h1>
+        <p className="text-sm text-muted">
+          {tr(
+            "录下电脑里会议软件的声音和麦克风，边录边传到服务器。断网也能接着录，联网后自动补传，录完自动出纪要。",
+            "Capture meeting audio from your computer and microphone while uploading to the server. Keeps recording offline, uploads automatically once reconnected, and generates minutes when finished.",
+          )}
+        </p>
       </div>
       {failure && <Notice tone="bad">{failure}</Notice>}
       {isLive(state.status) ? (
@@ -77,7 +85,7 @@ export function DesktopRecordPage() {
       ) : state.status === "stopping" ? (
         <Card className="flex items-center gap-3 p-6 text-sm text-ink-2">
           <span className="size-4 shrink-0 animate-spin rounded-full border-2 border-line-strong border-t-brand" aria-hidden="true" />
-          正在结束录音，等最后一段录音写好…
+          {tr("正在结束录音，等最后一段录音写好…", "Finishing recording, waiting for the final audio chunk…")}
         </Card>
       ) : resume ? (
         <Resume key={resume.meetingId} upload={resume} starting={starting} warnings={state.warnings} />
@@ -138,6 +146,7 @@ function useUpdateNote() {
 
 /** 开始一场新的录音：先在服务器上建好会议，再交给 App 开始录。warnings 是没能开始时录音程序给的提示。 */
 function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWarning[] }) {
+  useLang();
   const templates = useTemplates();
   const devices = useMicrophones();
   const offline = useOffline();
@@ -171,14 +180,18 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
   return (
     <Card className="p-6">
       <form onSubmit={submit} className="flex flex-col gap-5">
-        <Field label="会议标题" htmlFor="rec-title" hint="留空会用开始录音的时间起一个，之后可以改">
+        <Field
+          label={tr("会议标题", "Meeting title")}
+          htmlFor="rec-title"
+          hint={tr("留空会用开始录音的时间起一个，之后可以改", "Leave blank to name by start time; you can rename it later")}
+        >
           <Input id="rec-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} disabled={busy} />
         </Field>
 
         <SourceFields sources={sources} onChange={setChosen} echoCancel={echoCancel} onEchoCancel={setEchoCancel} devices={devices} disabled={busy} />
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="纪要模板" htmlFor="rec-template">
+          <Field label={tr("纪要模板", "Minutes template")} htmlFor="rec-template">
             <Select id="rec-template" value={template} onChange={(e) => setTemplate(e.target.value)} disabled={busy}>
               {(templates.data?.items ?? []).map((t) => (
                 <option key={t.id} value={t.id}>
@@ -187,22 +200,41 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
               ))}
             </Select>
           </Field>
-          <Field label="本场热词" htmlFor="rec-hotwords">
-            <Input id="rec-hotwords" value={hotwords} onChange={(e) => setHotwords(e.target.value)} maxLength={500} placeholder="人名、产品名，用逗号分开" disabled={busy} />
+          <Field label={tr("本场热词", "Hotwords for this meeting")} htmlFor="rec-hotwords">
+            <Input
+              id="rec-hotwords"
+              value={hotwords}
+              onChange={(e) => setHotwords(e.target.value)}
+              maxLength={500}
+              placeholder={tr("人名、产品名，用逗号分开", "Names, product terms, comma-separated")}
+              disabled={busy}
+            />
           </Field>
         </div>
         <SpeakerCountField id="rec-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={busy} />
         <VisibilityField id="rec-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 
-        {offline && !start.isError && <Notice tone="warn">现在连不上服务器。开始录音要先在服务器上建好这场会议，请连上以后再开始；开始以后断网也能接着录。</Notice>}
+        {offline && !start.isError && (
+          <Notice tone="warn">
+            {tr(
+              "现在连不上服务器。开始录音要先在服务器上建好这场会议，请连上以后再开始；开始以后断网也能接着录。",
+              "Cannot reach the server right now. Starting a recording creates the meeting on the server first — reconnect to start; once started, recording continues offline.",
+            )}
+          </Notice>
+        )}
         {update && <Notice tone="info">{update.text}</Notice>}
         {start.isError && <StartFailure error={start.error} warnings={warnings} />}
 
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <span className="text-xs leading-relaxed text-muted">录音时可以关掉这个窗口，录音不会停：菜单栏的 zsmeet 图标旁边会显示录了多久。</span>
+          <span className="text-xs leading-relaxed text-muted">
+            {tr(
+              "录音时可以关掉这个窗口，录音不会停：菜单栏的 zsmeet 图标旁边会显示录了多久。",
+              "You can close this window while recording — it keeps running and shows elapsed time next to the zsmeet menu bar icon.",
+            )}
+          </span>
           <Button type="submit" variant="primary" disabled={busy || !!problem || blocked}>
             <Icon name="mic" />
-            {busy ? "正在开始…" : "开始录音"}
+            {busy ? tr("正在开始…", "Starting…") : tr("开始录音", "Start recording")}
           </Button>
         </div>
       </form>
@@ -212,6 +244,7 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
 
 /** 从提示条点「接着录」：接着录一场中断了的录音，会议信息不用再填，只选声音来源。 */
 function Resume({ upload, starting, warnings }: { upload: RecorderUpload; starting: boolean; warnings: RecorderWarning[] }) {
+  useLang();
   const navigate = useNavigate();
   const devices = useMicrophones();
   const update = useUpdateNote();
@@ -235,9 +268,13 @@ function Resume({ upload, starting, warnings }: { upload: RecorderUpload; starti
     <Card className="p-6">
       <form onSubmit={submit} className="flex flex-col gap-5">
         <div className="flex flex-col gap-1">
-          <b className="text-lg font-bold">接着录「{upload.title}」</b>
+          <b className="text-lg font-bold">
+            {isEn() ? `Resume "${upload.title}"` : `接着录「${upload.title}」`}
+          </b>
           <span className="text-sm leading-relaxed text-ink-2">
-            这场录音中断前已经录下{recordedLength(upload.recorded)}。接着录的部分会接在后面，标记的重点也都还在。
+            {isEn()
+              ? `${recordedLength(upload.recorded)} was recorded before interruption. New audio will be appended, and your bookmarks are preserved.`
+              : `这场录音中断前已经录下${recordedLength(upload.recorded)}。接着录的部分会接在后面，标记的重点也都还在。`}
           </span>
         </div>
         <SourceFields sources={sources} onChange={setChosen} echoCancel={echoCancel} onEchoCancel={setEchoCancel} devices={devices} disabled={busy} />
@@ -245,11 +282,11 @@ function Resume({ upload, starting, warnings }: { upload: RecorderUpload; starti
         {start.isError && <StartFailure error={start.error} warnings={warnings} />}
         <div className="flex flex-wrap justify-end gap-2.5">
           <AppLink to="/record" replace className={buttonClass("default")}>
-            取消
+            {tr("取消", "Cancel")}
           </AppLink>
           <Button type="submit" variant="primary" disabled={busy || !!problem || blocked}>
             <Icon name="mic" />
-            {busy ? "正在开始…" : "接着录"}
+            {busy ? tr("正在开始…", "Starting…") : tr("接着录", "Resume recording")}
           </Button>
         </div>
       </form>
@@ -278,10 +315,11 @@ function SourceFields({
   devices: ReturnType<typeof useMicrophones>;
   disabled: boolean;
 }) {
+  useLang();
   const problem = sourcesProblem(sources);
   return (
     <fieldset className="flex flex-col gap-2.5" disabled={disabled}>
-      <legend className="mb-1.5 text-[13px] font-semibold text-ink-2">录什么声音</legend>
+      <legend className="mb-1.5 text-[13px] font-semibold text-ink-2">{tr("录什么声音", "Audio sources")}</legend>
       <label className={`${choiceClass(sources.system)} cursor-pointer hover:border-line-strong`}>
         <input
           type="checkbox"
@@ -290,9 +328,12 @@ function SourceFields({
           className="mt-1 shrink-0 self-start accent-brand"
         />
         <span className="flex flex-col gap-1">
-          <b className="text-sm font-semibold">电脑里的声音</b>
+          <b className="text-sm font-semibold">{tr("电脑里的声音", "Computer audio")}</b>
           <span className="text-[13px] leading-relaxed text-muted">
-            录下飞书、腾讯会议、Zoom 这些会议软件里其他人说话的声音（电脑上同时在放的其他声音也会录进去）。第一次录的时候，macOS 会问是否允许 zsmeet 录制系统音频，点「允许」。
+            {tr(
+              "录下飞书、腾讯会议、Zoom 这些会议软件里其他人说话的声音（电脑上同时在放的其他声音也会录进去）。第一次录的时候，macOS 会问是否允许 zsmeet 录制系统音频，点「允许」。",
+              "Captures remote participants from meeting apps like Feishu, Tencent Meeting, or Zoom (along with any other audio playing on your Mac). On first use, macOS will ask to allow zsmeet to record system audio — click \"Allow\".",
+            )}
           </span>
         </span>
       </label>
@@ -300,9 +341,14 @@ function SourceFields({
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           <span className="flex flex-col gap-1">
             <label htmlFor="rec-mic" className="text-sm font-semibold">
-              麦克风
+              {tr("麦克风", "Microphone")}
             </label>
-            <span className="text-[13px] leading-relaxed text-muted">录下你自己和身边的人说话的声音。第一次录的时候，macOS 会问是否允许 zsmeet 使用麦克风，点「允许」。</span>
+            <span className="text-[13px] leading-relaxed text-muted">
+              {tr(
+                "录下你自己和身边的人说话的声音。第一次录的时候，macOS 会问是否允许 zsmeet 使用麦克风，点「允许」。",
+                "Captures your voice and people nearby. On first use, macOS will ask to allow zsmeet to access your microphone — click \"Allow\".",
+              )}
+            </span>
           </span>
           <Select id="rec-mic" value={sources.mic} onChange={(e) => onChange({ ...sources, mic: e.target.value })}>
             {micOptions(devices.data ?? []).map((o) => (
@@ -311,14 +357,25 @@ function SourceFields({
               </option>
             ))}
           </Select>
-          {devices.isError && <span className="text-xs leading-relaxed text-warn">没能列出电脑上的麦克风：{errorMessage(devices.error)}。可以先用系统默认的麦克风。</span>}
+          {devices.isError && (
+            <span className="text-xs leading-relaxed text-warn">
+              {isEn()
+                ? `Could not list microphones: ${errorMessage(devices.error)}. You can use the system default microphone.`
+                : `没能列出电脑上的麦克风：${errorMessage(devices.error)}。可以先用系统默认的麦克风。`}
+            </span>
+          )}
         </div>
       </div>
       <EchoCancelField on={echoCancel} usable={echoCancelUsable(sources)} onChange={onEchoCancel} />
       {problem ? (
         <p className="text-xs leading-relaxed text-warn">{problem}</p>
       ) : (
-        <p className="text-xs leading-relaxed text-muted">开线上会议时建议戴耳机，免得对方的声音从扬声器放出来，又被麦克风录一遍。</p>
+        <p className="text-xs leading-relaxed text-muted">
+          {tr(
+            "开线上会议时建议戴耳机，免得对方的声音从扬声器放出来，又被麦克风录一遍。",
+            "Wearing headphones is recommended for online meetings so speaker output isn't picked up again by your microphone.",
+          )}
+        </p>
       )}
     </fieldset>
   );
@@ -329,6 +386,7 @@ function SourceFields({
  * 实验功能，默认关，每台电脑记自己的。麦克风和电脑里的声音都录时才用得上，不然变灰（记下的选择不动）。
  */
 function EchoCancelField({ on, usable, onChange }: { on: boolean; usable: boolean; onChange: (on: boolean) => void }) {
+  useLang();
   const checked = on && usable;
   return (
     <label className={`${choiceClass(checked)} ${usable ? "cursor-pointer hover:border-line-strong" : "cursor-not-allowed"}`}>
@@ -340,14 +398,26 @@ function EchoCancelField({ on, usable, onChange }: { on: boolean; usable: boolea
         className="mt-1 shrink-0 self-start accent-brand"
       />
       <span className="flex flex-col gap-1">
-        <b className={`text-sm font-semibold ${usable ? "" : "text-muted"}`}>外放时去掉回声（实验）</b>
+        <b className={`text-sm font-semibold ${usable ? "" : "text-muted"}`}>
+          {tr("外放时去掉回声（实验）", "Echo cancellation on speakers (experimental)")}
+        </b>
         <span className="text-[13px] leading-relaxed text-muted">
-          用扬声器外放开会时，麦克风也会录到会议里其他人的声音，转写里同一句话会出现两次。打开后，zsmeet 会用录到的电脑声音把它从麦克风里去掉，不影响会议软件和别的 App 播放的声音。戴耳机（包括 AirPods）时没有回声，会自动不处理。
+          {tr(
+            "用扬声器外放开会时，麦克风也会录到会议里其他人的声音，转写里同一句话会出现两次。打开后，zsmeet 会用录到的电脑声音把它从麦克风里去掉，不影响会议软件和别的 App 播放的声音。戴耳机（包括 AirPods）时没有回声，会自动不处理。",
+            "When using speakers, your microphone also picks up remote voices, causing duplicate lines in the transcript. When enabled, zsmeet subtracts captured computer audio from your mic without affecting playback in meeting or other apps. Automatically bypassed when wearing headphones (including AirPods).",
+          )}
         </span>
         <span className="text-[13px] leading-relaxed text-muted">
-          这是实验功能，默认关闭，效果还在验证：外放音量开得很大、用蓝牙音箱或电视外放时，回声可能去不干净；用 AirPlay 外放时不处理。你和别人同时说话时，如果转写里你说的话缺了，关掉这个选项、改用耳机。录音时页面上会显示回声消除现在开没开。
+          {tr(
+            "这是实验功能，默认关闭，效果还在验证：外放音量开得很大、用蓝牙音箱或电视外放时，回声可能去不干净；用 AirPlay 外放时不处理。你和别人同时说话时，如果转写里你说的话缺了，关掉这个选项、改用耳机。录音时页面上会显示回声消除现在开没开。",
+            "Experimental and off by default: residual echo may remain at high speaker volumes or on Bluetooth/TV speakers, and AirPlay output is bypassed. If your own words drop out during double-talk, turn this off and use headphones instead. Current echo cancellation status is shown while recording.",
+          )}
         </span>
-        {!usable && <span className="text-xs leading-relaxed text-warn">要同时录麦克风和电脑里的声音才能用。</span>}
+        {!usable && (
+          <span className="text-xs leading-relaxed text-warn">
+            {tr("要同时录麦克风和电脑里的声音才能用。", "Requires recording both microphone and computer audio.")}
+          </span>
+        )}
       </span>
     </label>
   );
@@ -358,19 +428,28 @@ function EchoCancelField({ on, usable, onChange }: { on: boolean; usable: boolea
  * 录音程序会说是哪一路、怎么打开（warnings，App 留到下次开始录音）。
  */
 function StartFailure({ error, warnings }: { error: unknown; warnings: RecorderWarning[] }) {
+  useLang();
   if (!(error instanceof RecorderStartError)) {
     const network = error instanceof ApiError && (error.status === 0 || error.status === 502);
     return (
       <Notice tone="bad">
-        没能在服务器上建好这场会议：{sentence(errorMessage(error))}
-        {network && "开始录音时要连得上服务器，开始以后断网也能接着录。"}
+        {isEn()
+          ? `Could not create the meeting on the server: ${sentence(errorMessage(error))}`
+          : `没能在服务器上建好这场会议：${sentence(errorMessage(error))}`}
+        {network &&
+          tr(
+            "开始录音时要连得上服务器，开始以后断网也能接着录。",
+            " A server connection is required to start recording; once started, recording continues offline.",
+          )}
       </Notice>
     );
   }
   return (
     <Notice tone="bad">
       <div className="flex flex-col gap-1.5">
-        <span>没能开始录音：{sentence(error.message)}</span>
+        <span>
+          {isEn() ? `Could not start recording: ${sentence(error.message)}` : `没能开始录音：${sentence(error.message)}`}
+        </span>
         {warnings.map((w, i) => (
           <span key={i}>{warningText(w)}</span>
         ))}
@@ -389,6 +468,7 @@ const ECHO_TONE: Record<EchoLabel["tone"], string> = { ok: "text-ok", mute: "", 
  * （recorderView.ts 的 micTooQuiet）。
  */
 function Live({ state, micQuiet }: { state: RecorderState; micQuiet: boolean }) {
+  useLang();
   const paused = state.status === "paused";
   const [confirming, setConfirming] = useState(false);
   const act = useMutation({ mutationFn: (run: () => Promise<unknown>) => run() });
@@ -404,8 +484,8 @@ function Live({ state, micQuiet }: { state: RecorderState; micQuiet: boolean }) 
         <div className="flex flex-col gap-1">
           <b className="text-lg font-bold">{state.title}</b>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-muted">
-            <span>麦克风：{labels.mic}</span>
-            <span>电脑里的声音：{labels.system}</span>
+            <span>{isEn() ? `Mic: ${labels.mic}` : `麦克风：${labels.mic}`}</span>
+            <span>{isEn() ? `Computer audio: ${labels.system}` : `电脑里的声音：${labels.system}`}</span>
             {echo && <span className={ECHO_TONE[echo.tone]}>{echo.text}</span>}
             {gain && <span className="text-warn">{gain}</span>}
           </div>
@@ -414,42 +494,47 @@ function Live({ state, micQuiet }: { state: RecorderState; micQuiet: boolean }) 
         <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
           <div className="flex items-center gap-3">
             <span className={`size-2.5 rounded-full ${paused ? "bg-muted" : "animate-pulse bg-bad"}`} aria-hidden="true" />
-            <span className="text-sm font-semibold">{paused ? "已暂停" : "录音中"}</span>
-            <span className="font-mono text-3xl font-semibold tabular-nums" role="timer" aria-label="已录时长">
+            <span className="text-sm font-semibold">{paused ? tr("已暂停", "Paused") : tr("录音中", "Recording")}</span>
+            <span className="font-mono text-3xl font-semibold tabular-nums" role="timer" aria-label={tr("已录时长", "Elapsed time")}>
               {hms(state.seconds)}
             </span>
           </div>
           {/* 两条音量条带着名字至少要 340px（40 根柱子加名字），放不下时换到计时的下面一行 */}
           <div className="flex min-w-[340px] flex-1 flex-col gap-1">
-            {state.mic !== null && <Meter label="麦克风" read={() => recorderState().level?.mic ?? 0} paused={paused} />}
-            {state.system && <Meter label="电脑" read={() => recorderState().level?.system ?? 0} paused={paused} />}
+            {state.mic !== null && <Meter label={tr("麦克风", "Mic")} read={() => recorderState().level?.mic ?? 0} paused={paused} />}
+            {state.system && <Meter label={tr("电脑", "System")} read={() => recorderState().level?.system ?? 0} paused={paused} />}
           </div>
         </div>
 
         <div className="flex flex-wrap gap-2.5">
           <Button disabled={act.isPending} onClick={() => act.mutate(paused ? recorderResume : recorderPause)}>
             <Icon name={paused ? "play" : "pause"} />
-            {paused ? "继续录音" : "暂停"}
+            {paused ? tr("继续录音", "Resume") : tr("暂停", "Pause")}
           </Button>
           <Button disabled={act.isPending} onClick={() => act.mutate(recorderMark)}>
             <Icon name="flag" />
-            标记重点
+            {tr("标记重点", "Bookmark")}
             {state.marks.length > 0 && <span className="tabular-nums text-muted">{state.marks.length}</span>}
           </Button>
           <Button variant="danger" disabled={act.isPending || confirming} onClick={() => setConfirming(true)}>
             <Icon name="stop" />
-            结束录音
+            {tr("结束录音", "Stop recording")}
           </Button>
         </div>
         {confirming && (
           <div className="flex flex-col gap-2.5 rounded-xl bg-warn-tint/60 px-4 py-3 text-sm">
-            <span className="text-ink-2">确定结束录音吗？结束以后这一场就不能再接着录了。录音传完会自动开始转写、生成纪要。</span>
+            <span className="text-ink-2">
+              {tr(
+                "确定结束录音吗？结束以后这一场就不能再接着录了。录音传完会自动开始转写、生成纪要。",
+                "Stop recording? Once stopped, you cannot resume this session. Transcription and minutes generation will start automatically once uploaded.",
+              )}
+            </span>
             <span className="flex gap-2">
               <Button size="sm" variant="danger" disabled={act.isPending} onClick={() => act.mutate(recorderStop, { onSettled: () => setConfirming(false) })}>
-                确定结束
+                {tr("确定结束", "Stop")}
               </Button>
               <Button size="sm" onClick={() => setConfirming(false)}>
-                取消
+                {tr("取消", "Cancel")}
               </Button>
             </span>
           </div>
@@ -466,7 +551,7 @@ function Live({ state, micQuiet }: { state: RecorderState; micQuiet: boolean }) 
         {upload.trouble && <Notice tone={upload.tone}>{upload.trouble}</Notice>}
 
         <div className="flex flex-col gap-1 border-t border-line pt-4 text-[13px]">
-          <span className="font-semibold text-ink-2">上传情况（每 10 秒左右一片）</span>
+          <span className="font-semibold text-ink-2">{tr("上传情况（每 10 秒左右一片）", "Upload status (~10s chunks)")}</span>
           <span className="text-muted">{upload.text}</span>
         </div>
       </Card>
@@ -474,7 +559,10 @@ function Live({ state, micQuiet }: { state: RecorderState; micQuiet: boolean }) 
       <RecordingMarks marks={state.marks} />
 
       <p className="text-xs leading-relaxed text-muted">
-        关掉这个窗口录音也不会停：菜单栏的 zsmeet 图标旁边显示录了多久，点开可以暂停、标记重点、结束录音。退出 zsmeet 会结束录音，没传完的部分下次打开时接着传。
+        {tr(
+          "关掉这个窗口录音也不会停：菜单栏的 zsmeet 图标旁边显示录了多久，点开可以暂停、标记重点、结束录音。退出 zsmeet 会结束录音，没传完的部分下次打开时接着传。",
+          "Closing this window won't stop recording: the zsmeet menu bar icon shows elapsed time and lets you pause, bookmark, or stop. Quitting zsmeet stops recording, and any remaining audio uploads next time you open the app.",
+        )}
       </p>
     </>
   );
@@ -483,7 +571,7 @@ function Live({ state, micQuiet }: { state: RecorderState; micQuiet: boolean }) 
 function Meter({ label, read, paused }: { label: string; read: () => number; paused: boolean }) {
   return (
     <div className="flex items-center gap-3">
-      <span className="w-12 shrink-0 text-xs text-muted">{label}</span>
+      <span className="w-14 shrink-0 text-xs text-muted">{label}</span>
       <LevelMeter read={read} active paused={paused} />
     </div>
   );
@@ -493,6 +581,7 @@ function Meter({ label, read, paused }: { label: string; read: () => number; pau
 
 /** 刚结束的那一场：上传进度，传完以后去会议页面看处理进度。 */
 function EndedCard({ ended, state }: { ended: Ended; state: RecorderState }) {
+  useLang();
   const upload = endedUpload(state, ended);
   if (!upload) return <EndedGoneCard ended={ended} />;
   const done = upload.status === "completed";
@@ -505,20 +594,30 @@ function EndedCard({ ended, state }: { ended: Ended; state: RecorderState }) {
     <Card className="flex flex-col gap-4 p-6">
       <div className="flex flex-col gap-1">
         <b className="text-lg font-bold">
-          {upload.status === "interrupted" ? "录音中断了" : "录音已结束"} · {hms(ended.seconds)}
+          {upload.status === "interrupted" ? tr("录音中断了", "Recording interrupted") : tr("录音已结束", "Recording finished")} · {hms(ended.seconds)}
         </b>
         <span className="text-sm text-muted">
           {ended.title}
-          {ended.marks > 0 && ` · 标记了 ${ended.marks} 个重点`}
+          {ended.marks > 0 &&
+            (isEn()
+              ? ` · ${ended.marks} bookmark${ended.marks === 1 ? "" : "s"}`
+              : ` · 标记了 ${ended.marks} 个重点`)}
         </span>
       </div>
       {/* 录音自己停下来的原因（录满了时长、出错了）；和上传情况里说的一样时不重复 */}
       {state.error && state.error !== upload.error && <Notice tone="warn">{sentence(state.error)}</Notice>}
       <UploadRow upload={upload} where="record" canStart />
-      {!settled && <p className="text-xs leading-relaxed text-muted">可以关掉这个窗口，也可以接着录下一场。退出 zsmeet 也没关系，没传完的部分下次打开时接着传。</p>}
+      {!settled && (
+        <p className="text-xs leading-relaxed text-muted">
+          {tr(
+            "可以关掉这个窗口，也可以接着录下一场。退出 zsmeet 也没关系，没传完的部分下次打开时接着传。",
+            "You can close this window or start another recording. Even if you quit zsmeet, any remaining audio will finish uploading next time.",
+          )}
+        </p>
+      )}
       <div className="flex flex-wrap gap-2.5">
         <AppLink to={`/meetings/${ended.meetingId}`} className={buttonClass(done ? "primary" : "default")} onClick={seen}>
-          {done ? "查看处理进度" : "打开会议页面"}
+          {done ? tr("查看处理进度", "View processing status") : tr("打开会议页面", "Open meeting")}
         </AppLink>
         <Button
           onClick={() => {
@@ -526,7 +625,7 @@ function EndedCard({ ended, state }: { ended: Ended; state: RecorderState }) {
             clearEnded();
           }}
         >
-          再录一场
+          {tr("再录一场", "Record another")}
         </Button>
       </div>
     </Card>
@@ -535,6 +634,7 @@ function EndedCard({ ended, state }: { ended: Ended; state: RecorderState }) {
 
 /** 刚结束的那一场在这台电脑上已经没有了：什么也没录下来（空会议已经删了），或者录音被删掉了。 */
 function EndedGoneCard({ ended }: { ended: Ended }) {
+  useLang();
   const gone = endedGone(ended);
   return (
     <Card className="flex flex-col gap-4 p-6">
@@ -546,11 +646,11 @@ function EndedGoneCard({ ended }: { ended: Ended }) {
       <div className="flex flex-wrap gap-2.5">
         {!ended.empty && (
           <AppLink to={`/meetings/${ended.meetingId}`} className={buttonClass("default")}>
-            打开会议页面
+            {tr("打开会议页面", "Open meeting")}
           </AppLink>
         )}
         <Button variant={ended.empty ? "primary" : "default"} onClick={clearEnded}>
-          再录一场
+          {tr("再录一场", "Record another")}
         </Button>
       </div>
     </Card>

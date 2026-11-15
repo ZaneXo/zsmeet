@@ -7,6 +7,7 @@ import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Citation, Meeting, Segment, User } from "../api/client";
 import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings";
 import { Button, buttonClass, Card, Chip, Field, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
+import { tr, useLang } from "../i18n/react";
 import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { waitingForRecording, writingMinutesOnly } from "../lib/meetingStatus";
@@ -55,6 +56,7 @@ export function MeetingDetailPage({
   voiceprints: boolean;
   isAdmin: boolean;
 }) {
+  useLang();
   const { id = "" } = useParams();
   const meeting = useQuery({
     queryKey: ["meeting", id],
@@ -153,7 +155,7 @@ export function MeetingDetailPage({
     }
   };
 
-  if (meeting.isPending) return <Spinner label="正在加载会议…" />;
+  if (meeting.isPending) return <Spinner label={tr("正在加载会议…", "Loading meeting…")} />;
   if (meeting.isError || !m) {
     return (
       <div className="mx-auto flex max-w-3xl flex-col gap-4">
@@ -183,10 +185,10 @@ export function MeetingDetailPage({
             <span>{dateTime(m.created_at)}</span>
             {m.duration_sec > 0 && <span>{duration(m.duration_sec)}</span>}
             <span>{SOURCE_LABEL[m.source]}</span>
-            <span>创建者 {m.owner_name}</span>
+            <span>{tr(`创建者 ${m.owner_name}`, `Created by ${m.owner_name}`)}</span>
             {m.can_manage ? (
               <button type="button" className="cursor-pointer font-medium text-brand hover:text-brand-hover" onClick={() => setAccess(true)}>
-                {VISIBILITY_LABEL[m.visibility]} · 设置谁能看
+                {VISIBILITY_LABEL[m.visibility]} · {tr("设置谁能看", "Manage access")}
               </button>
             ) : (
               m.visibility !== "team" && <span>{VISIBILITY_LABEL[m.visibility]}</span>
@@ -200,19 +202,19 @@ export function MeetingDetailPage({
           {canAsk && (
             <Button size="sm" variant="ghost" aria-expanded={asking} onClick={() => setAsking(!asking)}>
               <Icon name="ask" size={15} />
-              问这场会议
+              {tr("问这场会议", "Ask this meeting")}
             </Button>
           )}
           {canShare && (
             <Button size="sm" variant="ghost" onClick={() => setSharing(true)}>
               <Icon name="upload" size={15} />
-              发到飞书
+              {tr("发到飞书", "Share to Feishu")}
             </Button>
           )}
           {canPost && (
             <Button size="sm" variant="ghost" onClick={() => setPosting(true)}>
               <Icon name="upload" size={15} />
-              发到群里
+              {tr("发到群里", "Send to group")}
             </Button>
           )}
           <ExportMenu meeting={m} hasTranscript={hasTranscript} />
@@ -233,7 +235,7 @@ export function MeetingDetailPage({
             controls
             preload="metadata"
             src={mediaUrl(`/api/meetings/${m.id}/audio`)}
-            aria-label="会议录音"
+            aria-label={tr("会议录音", "Meeting recording")}
             className="w-full"
             onTimeUpdate={(e) => setNow(e.currentTarget.currentTime)}
           />
@@ -242,15 +244,18 @@ export function MeetingDetailPage({
 
       {m.audio_deleted_at && (
         <p className="rounded-xl border border-line bg-white px-4 py-3 text-[13px] leading-relaxed text-muted">
-          录音已经过了保留期，在 {dateTime(m.audio_deleted_at)} 删除了。转写和纪要都还在，只是不能再回放、重新转写。
+          {tr(
+            `录音已经过了保留期，在 ${dateTime(m.audio_deleted_at)} 删除了。转写和纪要都还在，只是不能再回放、重新转写。`,
+            `Audio passed the retention period and was deleted on ${dateTime(m.audio_deleted_at)}. The transcript and minutes are preserved, though playback and re-transcription are no longer available.`,
+          )}
         </p>
       )}
 
       {canAsk && asking && (
         <Card className="flex flex-col gap-3 px-5 py-4">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-base font-semibold">问这场会议</h2>
-            <Button variant="ghost" size="sm" aria-label="收起" onClick={() => setAsking(false)}>
+            <h2 className="text-base font-semibold">{tr("问这场会议", "Ask this meeting")}</h2>
+            <Button variant="ghost" size="sm" aria-label={tr("收起", "Collapse")} onClick={() => setAsking(false)}>
               <Icon name="close" />
             </Button>
           </div>
@@ -267,8 +272,8 @@ export function MeetingDetailPage({
             <div role="tablist" className="flex">
               {(
                 [
-                  ["minutes", "纪要"],
-                  ["transcript", "转写"],
+                  ["minutes", tr("纪要", "Minutes")],
+                  ["transcript", tr("转写", "Transcript")],
                 ] as const
               ).map(([key, label]) => (
                 <button
@@ -289,7 +294,7 @@ export function MeetingDetailPage({
               <div className="flex items-center gap-3 py-1.5">
                 {m.asr_engine && (
                   <span className="text-xs text-muted">
-                    {m.asr_engine === "deepseek" ? "DeepSeek 在线识别" : "本机识别"}
+                    {m.asr_engine === "deepseek" ? tr("DeepSeek 在线识别", "DeepSeek Cloud ASR") : tr("本机识别", "Local ASR")}
                   </span>
                 )}
                 {m.can_edit && m.has_audio && <Retranscribe meeting={m} />}
@@ -320,16 +325,18 @@ export function MeetingDetailPage({
 }
 
 function BackLink() {
+  useLang();
   return (
     <AppLink to="/" className="inline-flex min-h-8 items-center gap-1 self-start text-sm text-muted hover:text-ink">
       <Icon name="back" size={16} />
-      会议
+      {tr("会议", "Meetings")}
     </AppLink>
   );
 }
 
 /** 标题，点铅笔可以改名。 */
 function Title({ meeting }: { meeting: Meeting }) {
+  useLang();
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(meeting.title);
   const rename = useMutation({
@@ -350,8 +357,8 @@ function Title({ meeting }: { meeting: Meeting }) {
           <Button
             variant="ghost"
             size="sm"
-            aria-label="修改标题"
-            title="修改标题"
+            aria-label={tr("修改标题", "Edit title")}
+            title={tr("修改标题", "Edit title")}
             onClick={() => {
               setTitle(meeting.title);
               setEditing(true);
@@ -370,11 +377,19 @@ function Title({ meeting }: { meeting: Meeting }) {
   return (
     <form onSubmit={submit} className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
-        <Input className="w-[420px] max-w-full" aria-label="会议标题" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} required autoFocus />
+        <Input
+          className="w-[420px] max-w-full"
+          aria-label={tr("会议标题", "Meeting title")}
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          maxLength={200}
+          required
+          autoFocus
+        />
         <Button type="submit" variant="primary" disabled={rename.isPending}>
-          保存
+          {tr("保存", "Save")}
         </Button>
-        <Button onClick={() => setEditing(false)}>取消</Button>
+        <Button onClick={() => setEditing(false)}>{tr("取消", "Cancel")}</Button>
       </div>
       {rename.isError && <Notice tone="bad">{errorMessage(rename.error)}</Notice>}
     </form>
@@ -383,16 +398,24 @@ function Title({ meeting }: { meeting: Meeting }) {
 
 const STEPS = ["assemble", "transcribe", "diarize", "correct", "minutes"] as const;
 
-const STEP_HINT: Record<(typeof STEPS)[number], string> = {
-  assemble: "把上传的分片拼起来，转成统一的格式",
-  transcribe: "语音识别，自动加标点",
-  diarize: "按声音区分是谁在说话。这一步不显示进度，长会议要等几分钟",
-  correct: "用大模型改正同音字、人名和专有名词；没有配置大模型时跳过",
-  minutes: "把转写交给大模型写成纪要",
-};
+function stepHint(step: (typeof STEPS)[number]): string {
+  switch (step) {
+    case "assemble":
+      return tr("把上传的分片拼起来，转成统一的格式", "Assemble uploaded chunks and transcode into a uniform audio format");
+    case "transcribe":
+      return tr("语音识别，自动加标点", "Speech-to-text recognition with automatic punctuation");
+    case "diarize":
+      return tr("按声音区分是谁在说话。这一步不显示进度，长会议要等几分钟", "Separate speakers by voice. Progress is not shown for this step; long meetings may take a few minutes.");
+    case "correct":
+      return tr("用大模型改正同音字、人名和专有名词；没有配置大模型时跳过", "Use LLM to fix homophones, names, and proper nouns; skipped if LLM is not configured.");
+    case "minutes":
+      return tr("把转写交给大模型写成纪要", "Generate structured minutes from the transcript using LLM");
+  }
+}
 
 /** 会议还没处理完时显示：排队、各步骤的进度，或者失败原因和重试按钮。 */
 function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting; user: User; hasTranscript: boolean }) {
+  useLang();
   const retry = useMutation({
     mutationFn: () => unwrap(api.POST("/api/meetings/{id}/retry", { params: { path: { id: m.id } } })),
     onSuccess: (updated) => queryClient.setQueryData(["meeting", m.id], updated),
@@ -413,8 +436,14 @@ function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting
     return (
       <Notice tone="warn">
         {m.can_manage
-          ? "这场会议的录音还没有传完。上传的那个页面如果已经关掉了，需要重新上传一次。"
-          : `${m.owner_name} 正在上传这场会议的录音，传完以后才会开始处理。`}
+          ? tr(
+              "这场会议的录音还没有传完。上传的那个页面如果已经关掉了，需要重新上传一次。",
+              "Audio upload for this meeting is incomplete. If the upload page was closed, please upload the file again.",
+            )
+          : tr(
+              `${m.owner_name} 正在上传这场会议的录音，传完以后才会开始处理。`,
+              `${m.owner_name} is uploading the recording for this meeting; processing will begin once upload completes.`,
+            )}
       </Notice>
     );
   }
@@ -424,7 +453,9 @@ function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting
       <Card className="flex flex-col gap-3 border-bad/30 bg-bad-tint/40 p-5">
         <div className="flex flex-col gap-1">
           <b className="text-[15px] font-semibold text-bad">
-            处理失败{m.stage ? `：卡在「${STAGE_LABEL[m.stage]}」这一步` : ""}
+            {m.stage
+              ? tr(`处理失败：卡在「${STAGE_LABEL[m.stage]}」这一步`, `Processing failed at “${STAGE_LABEL[m.stage]}”`)
+              : tr("处理失败", "Processing failed")}
           </b>
           <span className="text-sm leading-relaxed text-ink-2">{m.error}</span>
         </div>
@@ -434,11 +465,13 @@ function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting
             <Button variant="primary" size="sm" disabled={retry.isPending} onClick={() => retry.mutate()}>
               <Icon name="retry" size={15} />
               {/* 有转写时重试只重新写纪要（重新转写失败了也是，见 writingMinutesOnly 的说明） */}
-              {hasTranscript ? "重新生成纪要" : "重试"}
+              {hasTranscript ? tr("重新生成纪要", "Regenerate minutes") : tr("重试", "Retry")}
             </Button>
           </div>
         ) : (
-          <span className="text-[13px] text-muted">可以请 {m.owner_name} 或管理员重试。</span>
+          <span className="text-[13px] text-muted">
+            {tr(`可以请 ${m.owner_name} 或管理员重试。`, `Ask ${m.owner_name} or an admin to retry.`)}
+          </span>
         )}
       </Card>
     );
@@ -448,7 +481,10 @@ function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting
     return (
       <Card className="flex items-center gap-3 p-5 text-sm text-ink-2">
         <span className="size-4 shrink-0 animate-spin rounded-full border-2 border-line-strong border-t-brand" aria-hidden="true" />
-        排队中，前面的会议处理完就轮到这一场。可以先去做别的，不用开着这个页面。
+        {tr(
+          "排队中，前面的会议处理完就轮到这一场。可以先去做别的，不用开着这个页面。",
+          "Queued — processing will start as soon as earlier meetings finish. You don’t need to keep this page open.",
+        )}
       </Card>
     );
   }
@@ -460,8 +496,12 @@ function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting
     return (
       <Card className="flex flex-col gap-2.5 p-5">
         <div className="flex justify-between text-sm">
-          <b className="font-semibold">{correcting ? "正在校对转写" : "正在生成纪要"}</b>
-          <span className="text-muted">{correcting ? "改正认错的字，转写稍后会更新，接着生成纪要" : "长会议会分几段处理，可能要几分钟"}</span>
+          <b className="font-semibold">{correcting ? tr("正在校对转写", "Proofreading transcript") : tr("正在生成纪要", "Generating minutes")}</b>
+          <span className="text-muted">
+            {correcting
+              ? tr("改正认错的字，转写稍后会更新，接着生成纪要", "Fixing recognition errors — transcript will update shortly before minutes are generated")
+              : tr("长会议会分几段处理，可能要几分钟", "Long meetings are processed in segments and may take a few minutes")}
+          </span>
         </div>
         <ProgressBar value={Math.max(0.05, m.progress)} />
       </Card>
@@ -474,10 +514,12 @@ function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting
       {m.stage === "models" && (
         <div className="flex flex-col gap-2 border-b border-line py-4">
           <div className="flex justify-between text-[15px]">
-            <b className="font-semibold">下载识别模型</b>
+            <b className="font-semibold">{tr("下载识别模型", "Downloading recognition models")}</b>
             <span className="text-[13px] tabular-nums text-muted">{Math.round(m.progress * 100)}%</span>
           </div>
-          <span className="text-[13px] text-muted">只在第一次处理会议时下载，约 300 MB，之后不用再等</span>
+          <span className="text-[13px] text-muted">
+            {tr("只在第一次处理会议时下载，约 300 MB，之后不用再等", "Downloaded once on first meeting (~300 MB); subsequent meetings won’t wait")}
+          </span>
           <ProgressBar value={m.progress} />
         </div>
       )}
@@ -497,10 +539,16 @@ function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting
               <div className="flex justify-between gap-3 text-[15px]">
                 <b className={`font-semibold ${done || running ? "text-ink" : "text-muted"}`}>{STAGE_LABEL[stepName]}</b>
                 <span className="text-[13px] tabular-nums text-muted">
-                  {done ? "已完成" : running && stepName !== "diarize" && m.progress > 0 ? `${Math.round(m.progress * 100)}%` : running ? "进行中" : ""}
+                  {done
+                    ? tr("已完成", "Done")
+                    : running && stepName !== "diarize" && m.progress > 0
+                      ? `${Math.round(m.progress * 100)}%`
+                      : running
+                        ? tr("进行中", "In progress")
+                        : ""}
                 </span>
               </div>
-              <span className="text-[13px] leading-relaxed text-muted">{STEP_HINT[stepName]}</span>
+              <span className="text-[13px] leading-relaxed text-muted">{stepHint(stepName)}</span>
               {running && stepName !== "diarize" && <ProgressBar value={m.progress} />}
             </div>
           </div>
@@ -515,6 +563,7 @@ function ProcessingPanel({ meeting: m, user, hasTranscript }: { meeting: Meeting
  * 这台电脑上有没传完的录音时接着传；找不回来的话，可以先用服务器已经收到的部分生成纪要。
  */
 function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: User }) {
+  useLang();
   const rec = useRecording();
   const local = useLocalItems(user).find((item) => item.rec.meetingId === m.id);
 
@@ -523,9 +572,9 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
     return (
       <Notice tone="info">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <span>这场会议正在这个网页里录音，录完会自动开始处理。</span>
+          <span>{tr("这场会议正在这个网页里录音，录完会自动开始处理。", "This meeting is currently recording in this browser tab; processing will start automatically when finished.")}</span>
           <AppLink to="/record" className={buttonClass("default", "sm")}>
-            回到录音
+            {tr("回到录音", "Back to recording")}
           </AppLink>
         </div>
       </Notice>
@@ -538,7 +587,7 @@ function UnfinishedRecording({ meeting: m, user }: { meeting: Meeting; user: Use
 /** 录音还没传完时，网页录音和桌面版录音不一样的说法。 */
 type UnfinishedText = {
   /** 别人看到的，接在创建者的名字后面：还在录，或者录的还没传完 */
-  others: (live: boolean) => string;
+  others: (ownerName: string, live: boolean, last: string) => string;
   /** 创建者、管理员看到的：录音还在传。last 是「最后一次收到录音：…」 */
   live: (last: string) => string;
   /** 录音不传了：可能是怎么了，恢复以后会怎样 */
@@ -549,37 +598,78 @@ type UnfinishedText = {
   confirm: string;
 };
 
-const UNFINISHED_TEXT: Record<RecordingSource, UnfinishedText> = {
-  record: {
-    others: (live) => (live ? "正在录这场会议" : "录的这场会议还没有传完"),
-    live: (last) => `这场会议正在录音（${last}）。录音的网页点「结束录音」以后会自动开始处理。`,
-    stalled: "录音的网页可能关掉了、断网了，或者正暂停着；它恢复以后会自动接着传。",
-    offer: "如果录音的那台电脑找不回来了，可以先用这一部分生成纪要。",
-    confirm: "确定吗？如果录音的网页其实还开着（比如暂停着、断网了），开始处理以后它后面录的部分就传不上来了。",
-  },
+function unfinishedText(source: RecordingSource): UnfinishedText {
+  if (source === "record") {
+    return {
+      others: (owner, live, last) =>
+        live
+          ? tr(`${owner}正在录这场会议（${last}）。录完、传完以后才会开始处理。`, `${owner} is recording this meeting (${last}). Processing will start once recording and upload finish.`)
+          : tr(`${owner}录的这场会议还没有传完（${last}）。录完、传完以后才会开始处理。`, `${owner}’s recording for this meeting hasn’t finished uploading (${last}). Processing will start once finished.`),
+      live: (last) =>
+        tr(
+          `这场会议正在录音（${last}）。录音的网页点「结束录音」以后会自动开始处理。`,
+          `This meeting is currently recording (${last}). Click “Finish recording” on the recording tab to start processing automatically.`,
+        ),
+      stalled: tr(
+        "录音的网页可能关掉了、断网了，或者正暂停着；它恢复以后会自动接着传。",
+        "The recording tab may have been closed, lost connection, or paused; upload will resume automatically once restored.",
+      ),
+      offer: tr(
+        "如果录音的那台电脑找不回来了，可以先用这一部分生成纪要。",
+        " If the recording device is no longer accessible, you can generate minutes from the received audio.",
+      ),
+      confirm: tr(
+        "确定吗？如果录音的网页其实还开着（比如暂停着、断网了），开始处理以后它后面录的部分就传不上来了。",
+        "Are you sure? If the recording tab is still open (e.g. paused or offline), any audio recorded later can no longer be uploaded once processing starts.",
+      ),
+    };
+  }
   // 桌面版录的：录音存在录音的那台电脑上，zsmeet 桌面版开着、连上网就自动接着传（docs/desktop.md 的「上传」）。
-  // 在这里开始处理以后，那台电脑再传分片会得到 409，桌面版把这段录音显示成传不上去，等用户删掉。
-  // 那台电脑上的录音也可能自己传不上去了（比如断网时接着录的分片和服务器上已有的序号重了），这时也只能这样结束
-  desktop: {
-    others: (live) => (live ? "正在用 zsmeet 桌面版录这场会议" : "用 zsmeet 桌面版录的这场会议还没有传完"),
-    live: (last) => `这场会议正在用 zsmeet 桌面版录音（${last}）。在录音的电脑上点「结束录音」，录音传完以后会自动开始处理。`,
-    stalled:
+  return {
+    others: (owner, live, last) =>
+      live
+        ? tr(
+            `${owner}正在用 zsmeet 桌面版录这场会议（${last}）。录完、传完以后才会开始处理。`,
+            `${owner} is recording this meeting in zsmeet Desktop (${last}). Processing will start once recording and upload finish.`,
+          )
+        : tr(
+            `${owner}用 zsmeet 桌面版录的这场会议还没有传完（${last}）。录完、传完以后才会开始处理。`,
+            `${owner}’s zsmeet Desktop recording hasn’t finished uploading (${last}). Processing will start once finished.`,
+          ),
+    live: (last) =>
+      tr(
+        `这场会议正在用 zsmeet 桌面版录音（${last}）。在录音的电脑上点「结束录音」，录音传完以后会自动开始处理。`,
+        `This meeting is recording in zsmeet Desktop (${last}). Click “Finish recording” on that computer to start processing automatically after upload.`,
+      ),
+    stalled: tr(
       "录音的电脑可能断网了、关机了、退出了 zsmeet，或者录音正暂停着。那台电脑上的 zsmeet 桌面版再打开、连上网以后，会自动把剩下的录音传上来。",
-    offer: "如果录音的那台电脑找不回来了，或者那台电脑上的录音传不上来了，可以先用这一部分生成纪要。",
-    confirm:
+      "The recording computer may be offline, powered off, quit zsmeet, or paused. Once zsmeet Desktop on that computer reconnects, remaining audio will upload automatically.",
+    ),
+    offer: tr(
+      "如果录音的那台电脑找不回来了，或者那台电脑上的录音传不上来了，可以先用这一部分生成纪要。",
+      " If that computer is unavailable or its upload cannot continue, you can generate minutes from the received audio.",
+    ),
+    confirm: tr(
       "确定吗？开始处理以后，那台电脑上还没传上来的录音就用不上了，zsmeet 桌面版会显示这段录音传不上去，可以在那里删掉。如果那台电脑其实还在录（比如暂停着、断网了），后面录的也传不上来。",
-  },
-};
+      "Are you sure? Once processing starts, any remaining audio on that computer cannot be uploaded (zsmeet Desktop will mark it as unuploadable so you can delete it). If that computer is still recording, later audio cannot be uploaded either.",
+    ),
+  };
+}
 
 /**
  * 桌面版里，这场会议的录音就在这台电脑上，却传不上去了（platform/recorderView.ts 的 stuckHere）。
  * 为什么传不上去，上面那一行已经说了，这里只说服务器收到了多少。
  */
-const STUCK_HERE_TEXT: Pick<UnfinishedText, "stalled" | "offer" | "confirm"> = {
-  stalled: "",
-  offer: "可以先用这一部分生成纪要。",
-  confirm: "确定吗？开始处理以后，这台电脑上没传上去的部分就传不上去了（还留在这台电脑上，不需要的话可以删掉）。",
-};
+function stuckHereText(): Pick<UnfinishedText, "stalled" | "offer" | "confirm"> {
+  return {
+    stalled: "",
+    offer: tr("可以先用这一部分生成纪要。", " You can generate minutes from the received audio."),
+    confirm: tr(
+      "确定吗？开始处理以后，这台电脑上没传上去的部分就传不上去了（还留在这台电脑上，不需要的话可以删掉）。",
+      "Are you sure? Once processing starts, the remaining audio on this computer cannot be uploaded (it stays locally until you delete it).",
+    ),
+  };
+}
 
 /**
  * 网页录音、桌面版录音还没传完，录音又不在这个网页（这台电脑）上：服务器已经收到了多少。
@@ -590,9 +680,10 @@ const STUCK_HERE_TEXT: Pick<UnfinishedText, "stalled" | "offer" | "confirm"> = {
  * 和别的情况一样，不传了才给。
  */
 function ReceivedSoFar({ meeting: m, here = false }: { meeting: Meeting; here?: boolean }) {
+  useLang();
   const source: RecordingSource = m.source === "desktop" ? "desktop" : "record";
-  const text = UNFINISHED_TEXT[source];
-  const card = here ? STUCK_HERE_TEXT : text;
+  const text = unfinishedText(source);
+  const card = here ? stuckHereText() : text;
   // 录音还在不在传、多久以前收到的，按服务器算好的 upload_idle_sec（会议每 10 秒重新取一次）。
   // 定时重画是给还没有这一项的旧版本服务器的：那时按这台电脑的时钟算，录音中断以后，
   // 即使服务器返回的数据没变，「录音中」也要变成「还没有传完」
@@ -617,22 +708,24 @@ function ReceivedSoFar({ meeting: m, here = false }: { meeting: Meeting; here?: 
 
   if (!m.can_manage) {
     if (here) return null;
-    return (
-      <Notice tone="info">
-        {m.owner_name}
-        {text.others(live)}（{last}）。录完、传完以后才会开始处理。
-      </Notice>
-    );
+    return <Notice tone="info">{text.others(m.owner_name, live, last)}</Notice>;
   }
   if (live) return here ? null : <Notice tone="info">{text.live(last)}</Notice>;
 
+  const approxDur = duration(receivedSeconds(source, received, SLICE_MS));
   return (
     <Card className="flex flex-col gap-3 p-5">
       <div className="flex flex-col gap-1">
-        <b className="text-[15px] font-semibold">录音还没有传完</b>
+        <b className="text-[15px] font-semibold">{tr("录音还没有传完", "Recording upload incomplete")}</b>
         <span className="text-sm leading-relaxed text-ink-2">
-          {last}。{card.stalled}
-          {received > 0 ? `服务器已经收到 ${received} 片（大约 ${duration(receivedSeconds(source, received, SLICE_MS))}）。${card.offer}` : ""}
+          {tr(`${last}。`, `${last}. `)}
+          {card.stalled}
+          {received > 0
+            ? tr(
+                `服务器已经收到 ${received} 片（大约 ${approxDur}）。${card.offer}`,
+                ` The server has received ${received} chunk${received === 1 ? "" : "s"} (~${approxDur}).${card.offer}`,
+              )
+            : ""}
         </span>
       </div>
       {chunks.isError && <Notice tone="bad">{errorMessage(chunks.error)}</Notice>}
@@ -643,17 +736,17 @@ function ReceivedSoFar({ meeting: m, here = false }: { meeting: Meeting; here?: 
             <span className="text-ink-2">{card.confirm}</span>
             <span className="flex gap-2">
               <Button size="sm" variant="primary" disabled={finish.isPending} onClick={() => finish.mutate()}>
-                确定，开始处理
+                {tr("确定，开始处理", "Confirm & start processing")}
               </Button>
               <Button size="sm" onClick={() => setConfirming(false)}>
-                取消
+                {tr("取消", "Cancel")}
               </Button>
             </span>
           </div>
         ) : (
           <div>
             <Button size="sm" onClick={() => setConfirming(true)}>
-              用已经收到的部分生成纪要
+              {tr("用已经收到的部分生成纪要", "Generate minutes from received audio")}
             </Button>
           </div>
         ))}
@@ -673,9 +766,10 @@ function segmentAt(segments: Segment[], sec: number): Segment | undefined {
 
 /** 录音时标记的重点：时间点和那时正在说的话，点时间从那一句开始播放。 */
 function MarksCard({ marks, segments, canSeek, onSeek }: { marks: number[]; segments: Segment[]; canSeek: boolean; onSeek: (sec: number) => void }) {
+  useLang();
   return (
     <Card className="flex flex-col gap-2.5 px-5 py-4">
-      <b className="text-[15px] font-semibold">录音时标记的重点</b>
+      <b className="text-[15px] font-semibold">{tr("录音时标记的重点", "Key moments marked during recording")}</b>
       <ol className="flex flex-col gap-2">
         {marks.map((t) => {
           const seg = segmentAt(segments, t);
@@ -683,13 +777,20 @@ function MarksCard({ marks, segments, canSeek, onSeek }: { marks: number[]; segm
           return (
             <li key={t} className="flex gap-3 text-sm leading-relaxed">
               {canSeek ? (
-                <button type="button" onClick={() => onSeek(at)} className="shrink-0 cursor-pointer font-mono text-brand hover:underline" title="从这里开始播放">
+                <button
+                  type="button"
+                  onClick={() => onSeek(at)}
+                  className="shrink-0 cursor-pointer font-mono text-brand hover:underline"
+                  title={tr("从这里开始播放", "Play from here")}
+                >
                   {clock(t)}
                 </button>
               ) : (
                 <span className="shrink-0 font-mono text-muted">{clock(t)}</span>
               )}
-              <span className="line-clamp-2 text-ink-2">{seg ? seg.text : "转写完成后这里会显示那时在说什么"}</span>
+              <span className="line-clamp-2 text-ink-2">
+                {seg ? seg.text : tr("转写完成后这里会显示那时在说什么", "What was said at this moment will appear once transcription completes")}
+              </span>
             </li>
           );
         })}
@@ -698,12 +799,12 @@ function MarksCard({ marks, segments, canSeek, onSeek }: { marks: number[]; segm
   );
 }
 
-
 /**
  * 用现在的识别模型重新转写：说话人分错了时选上有几个人说话再转；换模型以前转写的会议也用它得到逐句的时间。
  * 先确认一次，确认时可以改说话人数。
  */
 function Retranscribe({ meeting: m }: { meeting: Meeting }) {
+  useLang();
   const [confirming, setConfirming] = useState(false);
   const [speakerCount, setSpeakerCount] = useState(m.speaker_count);
   const run = useMutation({
@@ -728,25 +829,35 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
         }}
       >
         <Icon name="retry" size={15} />
-        重新转写
+        {tr("重新转写", "Re-transcribe")}
       </Button>
     );
   }
   return (
     <div className="flex basis-full flex-col gap-2.5 py-3 text-sm">
       <span className="leading-relaxed text-ink-2">
-        用现在的识别模型从录音重新转写，转完会重新生成一版纪要（之前的版本都保留）。长会议要几分钟，转完之前看到的还是原来的转写；重新转写失败时原来的转写和纪要也都还在。
+        {tr(
+          "用现在的识别模型从录音重新转写，转完会重新生成一版纪要（之前的版本都保留）。长会议要几分钟，转完之前看到的还是原来的转写；重新转写失败时原来的转写和纪要也都还在。",
+          "Re-transcribes from the audio using the current recognition model and generates a new minutes version (previous versions are kept). Long meetings may take a few minutes; existing transcript and minutes remain available while processing or if it fails.",
+        )}
       </span>
-      <Field label="说话人数" htmlFor="retranscribe-speakers" hint="说话人分得不对（分多了或者几个人混在一起）时，选上有几个人说话再转写">
+      <Field
+        label={tr("说话人数", "Speaker count")}
+        htmlFor="retranscribe-speakers"
+        hint={tr(
+          "说话人分得不对（分多了或者几个人混在一起）时，选上有几个人说话再转写",
+          "If speaker separation was inaccurate (too many or merged speakers), specify the number of speakers before re-transcribing",
+        )}
+      >
         <SpeakerCountSelect id="retranscribe-speakers" className="sm:w-48" value={speakerCount} onChange={setSpeakerCount} disabled={run.isPending} />
       </Field>
       {run.isError && <Notice tone="bad">{errorMessage(run.error)}</Notice>}
       <span className="flex gap-2">
         <Button size="sm" variant="primary" disabled={run.isPending} onClick={() => run.mutate()}>
-          确定重新转写
+          {tr("确定重新转写", "Confirm re-transcribe")}
         </Button>
         <Button size="sm" onClick={() => setConfirming(false)}>
-          取消
+          {tr("取消", "Cancel")}
         </Button>
       </span>
     </div>
@@ -755,6 +866,7 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
 
 /** 删除会议：放进回收站，30 天内可以恢复。先确认一次。 */
 function DeleteMeeting({ meeting: m }: { meeting: Meeting }) {
+  useLang();
   const navigate = useNavigate();
   const [confirming, setConfirming] = useState(false);
   const remove = useMutation({
@@ -769,18 +881,18 @@ function DeleteMeeting({ meeting: m }: { meeting: Meeting }) {
   if (!confirming) {
     return (
       <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
-        删除
+        {tr("删除", "Delete")}
       </Button>
     );
   }
   return (
     <span className="flex flex-wrap items-center gap-2 rounded-lg bg-bad-tint/60 px-3 py-1.5 text-[13px]">
-      <span className="text-ink-2">放进回收站？30 天内可以恢复。</span>
+      <span className="text-ink-2">{tr("放进回收站？30 天内可以恢复。", "Move to Trash? Can be restored within 30 days.")}</span>
       <Button size="sm" variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()}>
-        确定删除
+        {tr("确定删除", "Confirm delete")}
       </Button>
       <Button size="sm" onClick={() => setConfirming(false)}>
-        取消
+        {tr("取消", "Cancel")}
       </Button>
       {remove.isError && <span className="basis-full text-bad">{errorMessage(remove.error)}</span>}
     </span>
@@ -793,6 +905,7 @@ function DeleteMeeting({ meeting: m }: { meeting: Meeting }) {
  * 按声音认出的名字标着「按声音认出」，认对了点改名再保存一次就算确认。
  */
 function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Meeting; segments: Segment[]; voiceprints: boolean; isAdmin: boolean }) {
+  useLang();
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const rename = useMutation({
@@ -820,7 +933,7 @@ function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Mee
   return (
     <div className="flex flex-col gap-2 border-b border-line px-6 py-3.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="mr-1 text-[13px] font-semibold text-ink-2">说话人</span>
+        <span className="mr-1 text-[13px] font-semibold text-ink-2">{tr("说话人", "Speakers")}</span>
         {speakers.map((sp) =>
           editing === sp ? (
             <form
@@ -837,14 +950,14 @@ function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Mee
                 maxLength={20}
                 value={draft}
                 placeholder={speakerName(sp)}
-                aria-label={`给${speakerName(sp)}起名字`}
+                aria-label={tr(`给${speakerName(sp)}起名字`, `Name ${speakerName(sp)}`)}
                 onChange={(e) => setDraft(e.target.value)}
               />
               <Button size="sm" type="submit" variant="primary" disabled={rename.isPending}>
-                保存
+                {tr("保存", "Save")}
               </Button>
               <Button size="sm" onClick={() => setEditing(null)}>
-                取消
+                {tr("取消", "Cancel")}
               </Button>
             </form>
           ) : (
@@ -854,9 +967,12 @@ function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Mee
               {m.auto_speakers.includes(sp) && (
                 <span
                   className="rounded-full bg-brand-tint px-1.5 text-[11px] font-medium text-brand-ink"
-                  title="这个名字是按声音和以前会议里的名字比对出来的，可能认错。认错了点「改名」改过来"
+                  title={tr(
+                    "这个名字是按声音和以前会议里的名字比对出来的，可能认错。认错了点「改名」改过来",
+                    "Matched by voice against speakers from past meetings — may be inaccurate. Click “Rename” to fix.",
+                  )}
                 >
-                  按声音认出
+                  {tr("按声音认出", "Voice match")}
                 </span>
               )}
               <span className="text-muted">{total > 0 ? Math.round(((talk.get(sp) ?? 0) / total) * 100) : 0}%</span>
@@ -870,7 +986,7 @@ function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Mee
                     rename.reset();
                   }}
                 >
-                  改名
+                  {tr("改名", "Rename")}
                 </button>
               )}
             </span>
@@ -880,23 +996,33 @@ function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Mee
       {rename.isError && <Notice tone="bad">{errorMessage(rename.error)}</Notice>}
       {m.can_edit && editing !== null && (
         <span className="text-xs text-muted">
-          {m.auto_speakers.includes(editing) && "这个名字是按声音认出的：认对了直接保存就算确认，认错了改成对的名字。"}
-          改完以后，转写和搜索结果马上用新名字；当前纪要里的「{speakerName(editing)}」也会换成新名字，作为一个新版本保存。留空表示去掉名字。
-          {voiceprints && "之后的会议会按声音认出这个人。"}
+          {m.auto_speakers.includes(editing) &&
+            tr(
+              "这个名字是按声音认出的：认对了直接保存就算确认，认错了改成对的名字。",
+              "Matched by voice: click Save to confirm if accurate, or enter the right name. ",
+            )}
+          {tr(
+            `改完以后，转写和搜索结果马上用新名字；当前纪要里的「${speakerName(editing)}」也会换成新名字，作为一个新版本保存。留空表示去掉名字。`,
+            `Once saved, the transcript and search results update immediately, and “${speakerName(editing)}” in the current minutes is replaced as a new version. Leave blank to clear the name.`,
+          )}
+          {voiceprints && tr("之后的会议会按声音认出这个人。", " Future meetings will recognize this speaker by voice.")}
         </span>
       )}
       {m.can_edit && editing !== null && !voiceprints && (
         <span className="text-xs text-muted">
           {isAdmin ? (
             <>
-              在
+              {tr("在", "Enable voiceprints in ")}
               <AppLink to="/settings/voiceprints" className="text-brand hover:text-brand-hover">
-                「设置 → 声纹」
+                {tr("「设置 → 声纹」", "Settings → Voiceprints")}
               </AppLink>
-              里打开以后，改过名的人在之后的会议里能按声音自动认出。
+              {tr("里打开以后，改过名的人在之后的会议里能按声音自动认出。", " to automatically recognize named speakers by voice in future meetings.")}
             </>
           ) : (
-            "管理员在「设置 → 声纹」里打开以后，改过名的人在之后的会议里能按声音自动认出。"
+            tr(
+              "管理员在「设置 → 声纹」里打开以后，改过名的人在之后的会议里能按声音自动认出。",
+              "Once an admin enables Settings → Voiceprints, named speakers can be recognized automatically by voice in future meetings.",
+            )
           )}
         </span>
       )}
@@ -906,25 +1032,32 @@ function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Mee
 
 /** 导出：纪要导出成 Word 或 Markdown，转写导出成 Word 或纯文本。直接下载，不离开这个页面。 */
 function ExportMenu({ meeting: m, hasTranscript }: { meeting: Meeting; hasTranscript: boolean }) {
+  const lang = useLang();
   const options: [string, string, string][] = [];
   if (m.minutes_version > 0) {
-    options.push(["minutes", "docx", "纪要 · Word"], ["minutes", "md", "纪要 · Markdown"]);
+    options.push(
+      ["minutes", "docx", tr("纪要 · Word", "Minutes · Word")],
+      ["minutes", "md", tr("纪要 · Markdown", "Minutes · Markdown")],
+    );
   }
   if (hasTranscript) {
-    options.push(["transcript", "docx", "转写 · Word"], ["transcript", "txt", "转写 · 纯文本"]);
+    options.push(
+      ["transcript", "docx", tr("转写 · Word", "Transcript · Word")],
+      ["transcript", "txt", tr("转写 · 纯文本", "Transcript · Plain text")],
+    );
   }
   if (options.length === 0) return null;
   return (
     <details className="relative">
       <summary className={`${buttonClass("ghost", "sm")} list-none [&::-webkit-details-marker]:hidden`}>
         <Icon name="download" size={15} />
-        导出
+        {tr("导出", "Export")}
       </summary>
       <div className="absolute right-0 z-10 mt-1 flex min-w-36 flex-col rounded-xl border border-line bg-white p-1 shadow-lg">
         {options.map(([what, format, label]) => (
           <DownloadLink
-            key={label}
-            href={`/api/meetings/${m.id}/export?what=${what}&format=${format}`}
+            key={`${what}-${format}`}
+            href={`/api/meetings/${m.id}/export?what=${what}&format=${format}&lang=${lang}`}
             className="rounded-lg px-3 py-2 text-[13px] text-ink-2 hover:bg-canvas hover:text-ink"
           >
             {label}

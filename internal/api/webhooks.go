@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
@@ -258,7 +259,7 @@ type WebhookSend struct {
 
 // toWebhookSend 转成网页看的发送记录。now 是现在：发送中太久的（后台任务丢了）报成失败，网页上就能重新发，也不再一直刷新。
 // 判断用的期限和 SendToWebhooks 允许重新发的是同一个（service.WebhookPendingWindow）。
-func toWebhookSend(s sqlc.WebhookSend, by string, now time.Time) WebhookSend {
+func toWebhookSend(ctx context.Context, s sqlc.WebhookSend, by string, now time.Time) WebhookSend {
 	out := WebhookSend{
 		ID: s.ID.String(), WebhookName: s.WebhookName, Platform: s.Platform, MinutesVersion: s.MinutesVersion,
 		Status: s.Status, Error: s.Error, RequestedByName: by, CreatedAt: s.CreatedAt, FinishedAt: s.FinishedAt,
@@ -266,6 +267,7 @@ func toWebhookSend(s sqlc.WebhookSend, by string, now time.Time) WebhookSend {
 	if service.WebhookSendStale(s, now) {
 		out.Status, out.Error = "failed", service.WebhookStaleMessage
 	}
+	out.Error = i18n.TranslateMessage(i18n.FromContext(ctx), out.Error)
 	if s.WebhookID != nil {
 		out.WebhookID = s.WebhookID.String()
 	}
@@ -310,7 +312,7 @@ func (h *Handlers) ListMeetingWebhooks(ctx context.Context, in *MeetingID) (*Mee
 	for i, r := range rows {
 		item := MeetingWebhook{ID: r.Webhook.ID.String(), Name: r.Webhook.Name, Platform: r.Webhook.Platform}
 		if r.Latest != nil {
-			s := toWebhookSend(r.Latest.WebhookSend, r.Latest.RequestedByName, now)
+			s := toWebhookSend(ctx, r.Latest.WebhookSend, r.Latest.RequestedByName, now)
 			item.Latest = &s
 		}
 		out.Body.Items[i] = item
@@ -364,7 +366,7 @@ func (h *Handlers) SendToWebhooks(ctx context.Context, in *SendToWebhooksInput) 
 	out.Body.Items = make([]WebhookSend, len(sends))
 	now := time.Now()
 	for i, s := range sends {
-		out.Body.Items[i] = toWebhookSend(s, user.Name, now)
+		out.Body.Items[i] = toWebhookSend(ctx, s, user.Name, now)
 	}
 	return out, nil
 }

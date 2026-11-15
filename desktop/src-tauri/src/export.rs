@@ -5,13 +5,22 @@ use std::path::Path;
 
 use percent_encoding::percent_decode_str;
 
+use crate::i18n::{self, is_en, tr};
 use crate::server;
 
 /// 导出文件最大多少（Word 文档带不了录音，几 MB 就很大了）。
 const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
-const TOO_LARGE: &str = "导出的文件太大了";
-const BROKEN: &str = "下载到一半断了，没能导出。请检查网络后再试";
+fn too_large() -> &'static str {
+    tr("导出的文件太大了", "Exported file is too large")
+}
+
+fn broken() -> &'static str {
+    tr(
+        "下载到一半断了，没能导出。请检查网络后再试",
+        "Download interrupted; export failed. Check your network and try again.",
+    )
+}
 
 /// 只允许 `/api/meetings/{id}/export?…`，界面传不了别的路径进来。id 只能是普通的字母数字（见 server::api_segments），
 /// 编码过的「..」、反斜杠这些转发出去以后可能落到别的路径上，把令牌带过去。
@@ -72,16 +81,31 @@ pub async fn fetch(
     path_and_query: &str,
 ) -> Result<(String, Vec<u8>), (u16, String)> {
     let Some(url) = server::api_url(server, path_and_query) else {
-        return Err((0, "导出的地址不对，没能导出".to_string()));
+        return Err((
+            0,
+            tr(
+                "导出的地址不对，没能导出",
+                "Invalid export URL; export failed.",
+            )
+            .to_string(),
+        ));
     };
-    let mut req = client.get(url);
+    let mut req = client
+        .get(url)
+        .header(reqwest::header::ACCEPT_LANGUAGE, i18n::accept_language());
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|_| (0, "连不上服务器，没能导出。请检查网络后再试".to_string()))?;
+    let resp = req.send().await.map_err(|_| {
+        (
+            0,
+            tr(
+                "连不上服务器，没能导出。请检查网络后再试",
+                "Cannot reach the server; export failed. Check your network and try again.",
+            )
+            .to_string(),
+        )
+    })?;
     let status = resp.status().as_u16();
     if !resp.status().is_success() {
         let detail = resp
@@ -90,15 +114,20 @@ pub async fn fetch(
             .ok()
             .and_then(|v| v.get("detail")?.as_str().map(str::to_string))
             .filter(|d| !d.is_empty());
-        let message =
-            detail.unwrap_or_else(|| format!("导出失败（服务器返回 {status}），请稍后再试"));
+        let message = detail.unwrap_or_else(|| {
+            if is_en() {
+                format!("Export failed (server returned {status}). Please try again later.")
+            } else {
+                format!("导出失败（服务器返回 {status}），请稍后再试")
+            }
+        });
         return Err((status, message));
     }
     if resp
         .content_length()
         .is_some_and(|n| n > MAX_EXPORT_BYTES as u64)
     {
-        return Err((status, TOO_LARGE.into()));
+        return Err((status, too_large().into()));
     }
     let name = file_name(
         resp.headers()
@@ -114,9 +143,9 @@ pub async fn fetch(
 async fn read_body(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, (u16, String)> {
     let status = resp.status().as_u16();
     let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|_| (0, BROKEN.to_string()))? {
+    while let Some(chunk) = resp.chunk().await.map_err(|_| (0, broken().to_string()))? {
         if body.len() + chunk.len() > max {
-            return Err((status, TOO_LARGE.into()));
+            return Err((status, too_large().into()));
         }
         body.extend_from_slice(&chunk);
     }
@@ -235,7 +264,7 @@ mod tests {
         let read = tokio::time::timeout(Duration::from_secs(5), read_body(resp, 10_000))
             .await
             .expect("超过上限就该停下，不该一直读");
-        assert_eq!(read, Err((200, TOO_LARGE.to_string())));
+        assert_eq!(read, Err((200, too_large().to_string())));
 
         let small = || {
             futures_util::stream::iter(

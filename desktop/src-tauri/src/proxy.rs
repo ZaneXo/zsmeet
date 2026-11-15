@@ -22,6 +22,7 @@ use futures_util::{stream, StreamExt};
 
 use crate::cache::{self, MAX_ENTRY_BYTES};
 use crate::core::Core;
+use crate::i18n::{is_en, tr};
 use crate::server;
 
 pub const SECRET_HEADER: &str = "x-zsmeet-app";
@@ -143,11 +144,17 @@ fn same_secret(given: &[u8], secret: &str) -> bool {
 /// 编码过的字符、「..」、空段这些转发出去以后可能落到别的接口、别的路径上，把令牌带过去。
 fn check_path(path: &str) -> Result<(), &'static str> {
     let Some(segments) = server::api_segments(path) else {
-        return Err("本地代理只转发 /api/ 下的接口");
+        return Err(tr(
+            "本地代理只转发 /api/ 下的接口",
+            "Local proxy only forwards /api/ endpoints",
+        ));
     };
     // 换令牌、退出登录这些接口只有 App 自己（Rust 这边）用：界面不能借代理拿当前的令牌去调
     if segments[0].eq_ignore_ascii_case("apps") {
-        return Err("本地代理不转发登录相关的接口");
+        return Err(tr(
+            "本地代理不转发登录相关的接口",
+            "Local proxy does not forward app auth endpoints",
+        ));
     }
     Ok(())
 }
@@ -199,7 +206,13 @@ async fn handle(State(proxy): State<Arc<Proxy>>, req: Request) -> Response {
 
 async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
     if foreign_origin {
-        return problem(StatusCode::FORBIDDEN, "只接受 zsmeet 桌面版界面发来的请求");
+        return problem(
+            StatusCode::FORBIDDEN,
+            tr(
+                "只接受 zsmeet 桌面版界面发来的请求",
+                "Only requests from the zsmeet desktop UI are allowed",
+            ),
+        );
     }
     // 跨域预检：带不了自定义请求头，所以不查 secret，只回答允许什么
     if req.method() == Method::OPTIONS {
@@ -229,7 +242,13 @@ async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !host.starts_with("127.0.0.1:") && !host.starts_with("localhost:") {
-        return problem(StatusCode::FORBIDDEN, "只接受发给 127.0.0.1 的请求");
+        return problem(
+            StatusCode::FORBIDDEN,
+            tr(
+                "只接受发给 127.0.0.1 的请求",
+                "Only requests addressed to 127.0.0.1 are allowed",
+            ),
+        );
     }
     let path = req.uri().path().to_string();
     if let Err(detail) = check_path(&path) {
@@ -248,14 +267,20 @@ async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
     if !header_ok && !query_ok {
         return problem(
             StatusCode::FORBIDDEN,
-            "缺少 zsmeet 桌面版的本机验证，请求被拒绝",
+            tr(
+                "缺少 zsmeet 桌面版的本机验证，请求被拒绝",
+                "Missing zsmeet desktop local verification; request rejected",
+            ),
         );
     }
 
     let Some(upstream) = proxy.core.upstream() else {
         return problem(
             StatusCode::SERVICE_UNAVAILABLE,
-            "还没有设置服务器地址，请先填写服务器地址",
+            tr(
+                "还没有设置服务器地址，请先填写服务器地址",
+                "Server URL is not set yet. Please enter your server URL first.",
+            ),
         );
     };
     let path_and_query = match &query {
@@ -269,7 +294,13 @@ async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
         .filter(|_| cache::cacheable(method.as_str(), &path));
     let cache_key = cache::key(&path_and_query);
     let Some(target) = server::api_url(&upstream.server, &path_and_query) else {
-        return problem(StatusCode::NOT_FOUND, "本地代理只转发 /api/ 下的接口");
+        return problem(
+            StatusCode::NOT_FOUND,
+            tr(
+                "本地代理只转发 /api/ 下的接口",
+                "Local proxy only forwards /api/ endpoints",
+            ),
+        );
     };
 
     // 转发请求
@@ -311,13 +342,20 @@ async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
                     return resp;
                 }
             }
-            let mut detail = format!(
-                "连不上服务器 {}，请检查网络，或者确认服务器正在运行",
-                upstream.server
-            );
+            let mut detail = if is_en() {
+                format!(
+                    "Cannot reach server {}. Check your network or confirm the server is running",
+                    upstream.server
+                )
+            } else {
+                format!(
+                    "连不上服务器 {}，请检查网络，或者确认服务器正在运行",
+                    upstream.server
+                )
+            };
             if server::is_lan_address(&upstream.server) {
-                detail.push('。');
-                detail.push_str(server::LOCAL_NETWORK_HINT);
+                detail.push_str(if is_en() { ". " } else { "。" });
+                detail.push_str(server::local_network_hint());
             }
             let mut resp = problem(StatusCode::BAD_GATEWAY, &detail);
             resp.headers_mut()
@@ -326,7 +364,13 @@ async fn route(proxy: &Proxy, req: Request, foreign_origin: bool) -> Response {
         }
         Err(Failure::Other(e)) => {
             log::warn!("转发 {method} {path} 失败：{e}");
-            return problem(StatusCode::BAD_GATEWAY, "请求没能发到服务器，请重试");
+            return problem(
+                StatusCode::BAD_GATEWAY,
+                tr(
+                    "请求没能发到服务器，请重试",
+                    "Failed to send request to the server. Please try again.",
+                ),
+            );
         }
     };
 

@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use crate::cache::{Generation, OfflineCache, DEFAULT_MAX_BYTES};
+use crate::i18n::{is_en, tr};
 use crate::server::{self, Answer, Pkce};
 use crate::token::TokenStore;
 
@@ -295,7 +296,13 @@ impl Core {
             self.update_settings(&mut inner, |s| s.server = Some(server))
         };
         let state = self.changed();
-        saved.map_err(|e| format!("服务器地址没能保存（{e}），请检查磁盘空间后再试"))?;
+        saved.map_err(|e| {
+            if is_en() {
+                format!("Could not save server URL ({e}). Check disk space and try again.")
+            } else {
+                format!("服务器地址没能保存（{e}），请检查磁盘空间后再试")
+            }
+        })?;
         Ok(state)
     }
 
@@ -310,9 +317,14 @@ impl Core {
             self.update_settings(&mut inner, |s| s.server = None)
         };
         if let Err(e) = saved {
-            self.events.login_error(&format!(
-                "服务器地址没能清掉（{e}），请检查磁盘空间后再点「换一个服务器」"
-            ));
+            let msg = if is_en() {
+                format!(
+                    "Could not clear server URL ({e}). Check disk space and click \"Switch server\" again."
+                )
+            } else {
+                format!("服务器地址没能清掉（{e}），请检查磁盘空间后再点「换一个服务器」")
+            };
+            self.events.login_error(&msg);
         }
         self.changed()
     }
@@ -321,7 +333,9 @@ impl Core {
     pub fn login_start(&self) -> Result<AppState, String> {
         let url = {
             let mut inner = self.inner.lock().unwrap();
-            let server = inner.settings.server.clone().ok_or("请先填写服务器地址")?;
+            let server = inner.settings.server.clone().ok_or_else(|| {
+                tr("请先填写服务器地址", "Please enter the server URL first").to_string()
+            })?;
             let pkce = Pkce::new();
             let url = server::authorize_url(&server, &self.opts.device, &pkce);
             inner.drop_login();
@@ -335,7 +349,11 @@ impl Core {
         if let Err(e) = self.events.open_url(&url) {
             self.inner.lock().unwrap().drop_login();
             self.changed();
-            return Err(format!("没能打开浏览器（{e}）"));
+            return Err(if is_en() {
+                format!("Could not open browser ({e})")
+            } else {
+                format!("没能打开浏览器（{e}）")
+            });
         }
         Ok(self.changed())
     }
@@ -370,10 +388,11 @@ impl Core {
             if !matches {
                 // 不是这次点「在浏览器里登录」打开的页面跳回来的（旧的标签页、别人发来的链接）：不认，
                 // 正在等的登录照样等着
-                return Err(
-                    "这个登录链接不是这次登录打开的，或者已经用过了。请回到 zsmeet 重新点「在浏览器里登录」"
-                        .into(),
-                );
+                return Err(tr(
+                    "这个登录链接不是这次登录打开的，或者已经用过了。请回到 zsmeet 重新点「在浏览器里登录」",
+                    "This sign-in link does not match the current login attempt or has already been used. Return to zsmeet and click \"Sign in with browser\" again.",
+                )
+                .into());
             }
             let pending = inner.pending.take().expect("刚检查过");
             let code = match callback.answer {
@@ -382,10 +401,18 @@ impl Core {
                 Answer::Refused(message) => return Err(message),
             };
             if pending.started.elapsed() > LOGIN_WINDOW {
-                return Err("登录等得太久，已经失效了。请重新点「在浏览器里登录」".into());
+                return Err(tr(
+                    "登录等得太久，已经失效了。请重新点「在浏览器里登录」",
+                    "Sign-in timed out and expired. Click \"Sign in with browser\" again.",
+                )
+                .into());
             }
             if inner.settings.server.as_deref() != Some(&pending.server) {
-                return Err("登录期间换了服务器，请重新点「在浏览器里登录」".into());
+                return Err(tr(
+                    "登录期间换了服务器，请重新点「在浏览器里登录」",
+                    "Server changed during sign-in. Click \"Sign in with browser\" again.",
+                )
+                .into());
             }
             (pending, code, inner.login_attempt)
         };
@@ -418,9 +445,13 @@ impl Core {
             if let Err(e) = self.tokens.delete(server) {
                 log::warn!("{e}");
             }
-            return Err(format!(
-                "登录信息没能保存（{e}），请检查磁盘空间后重新点「在浏览器里登录」"
-            ));
+            return Err(if is_en() {
+                format!(
+                    "Could not save sign-in state ({e}). Check disk space and click \"Sign in with browser\" again."
+                )
+            } else {
+                format!("登录信息没能保存（{e}），请检查磁盘空间后重新点「在浏览器里登录」")
+            });
         }
         inner.token = Some(token.to_string());
         inner.expired = false;
@@ -431,9 +462,12 @@ impl Core {
     /// 设置没能保存时也照样退出，原因显示在登录页上（点退出的那个页面已经不在了）。
     pub async fn logout(&self) -> AppState {
         if let Err(e) = self.logout_inner(false).await {
-            self.events.login_error(&format!(
-                "已经退出登录，但设置没能保存（{e}），请检查磁盘空间"
-            ));
+            let msg = if is_en() {
+                format!("Signed out, but could not save settings ({e}). Check disk space.")
+            } else {
+                format!("已经退出登录，但设置没能保存（{e}），请检查磁盘空间")
+            };
+            self.events.login_error(&msg);
         }
         self.changed()
     }

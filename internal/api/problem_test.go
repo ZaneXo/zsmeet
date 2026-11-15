@@ -255,3 +255,93 @@ func TestUnexpectedErrorIsHidden(t *testing.T) {
 		t.Errorf("内部报错不能出现在响应里：%+v", p)
 	}
 }
+
+// 请求头带上 Accept-Language: en 时，参数校验、业务报错、内置纪要模板、未命名会议默认标题都是英文，不掺中文，也不泄露密码。
+func TestRequestErrorsInEnglish(t *testing.T) {
+	base := newServer(t)
+	base.setup()
+	c := base.withLang("en-US,en;q=0.9")
+	unauth := base.another().withLang("en")
+
+	created := c.want(c.do("POST", "/api/meetings", obj{"source": "upload"}), 201)
+	if title, _ := created.Body["title"].(string); title == "" || hasHan(title) || !strings.HasSuffix(title, " Meeting") {
+		t.Fatalf("英文下未命名会议默认标题不对：%q", title)
+	}
+	meetingID := created.Body["id"].(string)
+	meeting := "/api/meetings/" + meetingID
+	const password = "correct-horse-battery"
+
+	tplResp := c.want(c.do("GET", "/api/templates", nil), 200)
+	items, _ := tplResp.Body["items"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("内置模板列表不该为空")
+	}
+	for _, item := range items {
+		m := item.(map[string]any)
+		if hasHan(m["name"].(string)) || hasHan(m["guide"].(string)) {
+			t.Errorf("英文请求下内置模板不该有中文：%+v", m)
+		}
+	}
+
+	notFoundRoute := c.do("GET", "/api/no-such-endpoint", nil)
+	if notFoundRoute.Status != 404 || strings.TrimSpace(notFoundRoute.Raw) != "Endpoint not found" {
+		t.Fatalf("英文请求下未知接口应该返回 404 Endpoint not found，得到 %d: %q", notFoundRoute.Status, notFoundRoute.Raw)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		r        result
+		status   int
+		location string
+	}{
+		{"invalid UUID", c.do("GET", "/api/meetings/not-a-uuid", nil), 422, "path.id"},
+		{"title too long", c.do("PATCH", meeting, obj{"title": strings.Repeat("a", 201)}), 422, "body.title"},
+		{"missing required field", c.do("POST", "/api/meetings", obj{"title": "Weekly"}), 422, "body"},
+		{"invalid enum", c.do("POST", "/api/meetings", obj{"title": "Weekly", "source": "feishu"}), 422, "body.source"},
+		{"malformed JSON", c.post("/api/meetings", "application/json", `{"title": "Weekly", }`), 400, "body"},
+		{"number out of range", c.do("POST", meeting+"/feishu", obj{"chat_id": "oc_team", "minutes_version": 1e10}), 422, "body"},
+		{"unsupported content type", c.post("/api/meetings", "text/plain", `{"title": "Weekly", "source": "upload"}`), 415, "body"},
+		{"invalid integer query", c.do("GET", "/api/meetings?limit=abc", nil), 422, "query.limit"},
+		{"multiple validation errors", c.do("POST", meeting+"/complete", obj{"chunks": 0, "marks": []any{"three"}}), 422, "body.chunks"},
+		{"empty chunk", c.do("PUT", meeting+"/chunks/0", []byte{}), 400, ""},
+		{"minutes too large", c.do("PUT", meeting+"/minutes", obj{"content": strings.Repeat("x", 2<<20+10)}), 413, ""},
+		{"unauthenticated", unauth.do("GET", "/api/meetings", nil), 401, ""},
+		{"wrong password", unauth.do("POST", "/api/login", obj{"email": "lihang@example.com", "password": password}), 401, ""},
+		{"meeting not found", c.do("GET", "/api/meetings/00000000-0000-0000-0000-000000000000", nil), 404, ""},
+		{"login missing email", c.do("POST", "/api/login", obj{"password": password}), 422, "body"},
+		{"export lang query override", base.do("GET", meeting+"/export?what=minutes&format=md&lang=en", nil), 409, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.r.Status != tc.status {
+				t.Fatalf("expected status %d, got %d: %s", tc.status, tc.r.Status, tc.r.Raw)
+			}
+			var p problem
+			if err := json.Unmarshal([]byte(tc.r.Raw), &p); err != nil {
+				t.Fatalf("expected JSON problem: %s", tc.r.Raw)
+			}
+			if p.Detail == "" || hasHan(p.Detail) {
+				t.Errorf("expected English detail without Han characters, got %q (%s)", p.Detail, tc.r.Raw)
+			}
+			if strings.Contains(tc.r.Raw, password) {
+				t.Errorf("password leaked in error response: %s", tc.r.Raw)
+			}
+			if tc.location == "" {
+				if len(p.Errors) != 0 {
+					t.Errorf("expected no errors slice, got %s", tc.r.Raw)
+				}
+				return
+			}
+			if len(p.Errors) == 0 || p.Errors[0].Location != tc.location {
+				t.Fatalf("expected first error location %s, got %s", tc.location, tc.r.Raw)
+			}
+			for _, e := range p.Errors {
+				if e.Message == "" || hasHan(e.Message) {
+					t.Errorf("expected English error message without Han characters: %s", tc.r.Raw)
+				}
+				if e.Value != nil {
+					t.Errorf("submitted value should not be echoed: %s", tc.r.Raw)
+				}
+			}
+		})
+	}
+}

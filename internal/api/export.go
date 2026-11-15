@@ -13,6 +13,7 @@ type ExportInput struct {
 	MeetingID
 	What   string `query:"what" enum:"minutes,transcript" default:"minutes" doc:"导出纪要（当前版本）还是转写"`
 	Format string `query:"format" enum:"docx,md,txt" default:"docx" doc:"Word、Markdown 或纯文本（纯文本只用于转写，纪要选它时给 Markdown）"`
+	Lang   string `query:"lang" doc:"导出文件里元信息的语言（zh 或 en，不传时按请求头 Accept-Language）"`
 }
 
 type ExportOutput struct {

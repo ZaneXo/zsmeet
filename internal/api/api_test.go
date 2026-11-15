@@ -49,6 +49,8 @@ type client struct {
 	store *storage.Local
 	// 不为空时每个请求都带 Authorization: Bearer <bearer>，相当于一个 App
 	bearer string
+	// 不为空时每个请求都带 Accept-Language: <lang>
+	lang string
 }
 
 // result 是一次请求的结果。Body 是解析后的 JSON（没有响应体时为空）。
@@ -133,6 +135,9 @@ func (c *client) do(method, path string, body any) result {
 	if c.bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+c.bearer)
 	}
+	if c.lang != "" {
+		req.Header.Set("Accept-Language", c.lang)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		c.t.Fatal(err)
@@ -151,10 +156,27 @@ func (c *client) do(method, path string, body any) result {
 	return r
 }
 
+func (c *client) withLang(lang string) *client {
+	cp := *c
+	cp.lang = lang
+	return &cp
+}
+
 // post 用指定的 Content-Type 发一段原始内容，测试接口对请求格式的要求时用。
 func (c *client) post(path, contentType, body string) result {
 	c.t.Helper()
-	resp, err := c.http.Post(c.base+path, contentType, strings.NewReader(body))
+	req, err := http.NewRequest("POST", c.base+path, strings.NewReader(body))
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	}
+	if c.lang != "" {
+		req.Header.Set("Accept-Language", c.lang)
+	}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		c.t.Fatal(err)
 	}

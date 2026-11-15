@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"strconv"
 	"time"
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/transcript"
 )
@@ -63,7 +65,8 @@ type Meeting struct {
 }
 
 // toMeeting 把会议转成接口的样子。can_edit、can_manage 是对取出这场会议的人而言的（见 service.Access）。
-func toMeeting(m service.Meeting) Meeting {
+func toMeeting(ctx context.Context, m service.Meeting) Meeting {
+	lang := i18n.FromContext(ctx)
 	speakers := map[string]string{}
 	names := transcript.ParseNames(m.Speakers)
 	for idx, name := range names {
@@ -90,13 +93,13 @@ func toMeeting(m service.Meeting) Meeting {
 		Status:         m.Status,
 		Stage:          m.Stage,
 		Progress:       float64(m.Progress),
-		Error:          m.Error,
+		Error:          i18n.TranslateMessage(lang, m.Error),
 		Template:       m.Template,
 		Hotwords:       m.Hotwords,
 		SpeakerCount:   int(m.SpeakerCount),
 		Retranscribing: m.Retranscribe,
 		ASREngine:      m.AsrEngine,
-		ASRWarning:     m.AsrWarning,
+		ASRWarning:     i18n.TranslateMessage(lang, m.AsrWarning),
 		DurationSec:    int(m.DurationSec),
 		HasAudio:       m.AudioKey != "" && m.AudioDeletedAt == nil,
 		AudioDeletedAt: m.AudioDeletedAt,

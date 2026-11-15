@@ -9,6 +9,7 @@ import (
 
 	"github.com/ZaneXo/zsmeet/internal/db/sqlc"
 	"github.com/ZaneXo/zsmeet/internal/feishu"
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/service"
 	"github.com/ZaneXo/zsmeet/internal/settings"
 )
@@ -205,9 +206,10 @@ func (h *Handlers) GetFeishuStatus(ctx context.Context, _ *struct{}) (*FeishuSta
 	if err != nil {
 		return nil, toHTTP(err)
 	}
+	lang := i18n.FromContext(ctx)
 	out := &FeishuStatusOutput{}
 	b := &out.Body
-	b.State, b.Detail, b.LastEventAt, b.LastEvent = st.Link.State, st.Link.Detail, st.Link.LastEventAt, st.Link.LastEvent
+	b.State, b.Detail, b.LastEventAt, b.LastEvent = st.Link.State, i18n.TranslateMessage(lang, st.Link.Detail), st.Link.LastEventAt, i18n.TranslateMessage(lang, st.Link.LastEvent)
 	if !st.Link.UpdatedAt.IsZero() {
 		b.UpdatedAt = &st.Link.UpdatedAt
 	}
@@ -215,7 +217,8 @@ func (h *Handlers) GetFeishuStatus(ctx context.Context, _ *struct{}) (*FeishuSta
 	for i, r := range st.Imports {
 		imp := r.FeishuImport
 		b.Imports[i] = FeishuImport{
-			FeishuMeetingID: imp.FeishuMeetingID, Topic: imp.Topic, Status: imp.Status, Detail: imp.Detail, OwnerName: r.OwnerName,
+			FeishuMeetingID: imp.FeishuMeetingID, Topic: imp.Topic, Status: imp.Status,
+			Detail: i18n.TranslateMessage(lang, imp.Detail), OwnerName: r.OwnerName,
 			CreatedAt: imp.CreatedAt, UpdatedAt: imp.UpdatedAt,
 		}
 		if imp.MeetingID != nil {
@@ -270,10 +273,10 @@ type FeishuShare struct {
 	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
-func toFeishuShare(s sqlc.FeishuShare, by string) FeishuShare {
+func toFeishuShare(ctx context.Context, s sqlc.FeishuShare, by string) FeishuShare {
 	return FeishuShare{
 		ID: s.ID.String(), ChatID: s.ChatID, ChatName: s.ChatName, WithDoc: s.WithDoc, MinutesVersion: s.MinutesVersion,
-		Status: s.Status, Error: s.Error, DocURL: s.DocUrl, RequestedByName: by, CreatedAt: s.CreatedAt, FinishedAt: s.FinishedAt,
+		Status: s.Status, Error: i18n.TranslateMessage(i18n.FromContext(ctx), s.Error), DocURL: s.DocUrl, RequestedByName: by, CreatedAt: s.CreatedAt, FinishedAt: s.FinishedAt,
 	}
 }
 
@@ -311,7 +314,7 @@ func (h *Handlers) ShareToFeishu(ctx context.Context, in *ShareToFeishuInput) (*
 	if err != nil {
 		return nil, toHTTP(err)
 	}
-	return &FeishuShareOutput{Body: toFeishuShare(share, user.Name)}, nil
+	return &FeishuShareOutput{Body: toFeishuShare(ctx, share, user.Name)}, nil
 }
 
 type FeishuSharesOutput struct {
@@ -341,7 +344,7 @@ func (h *Handlers) ListFeishuShares(ctx context.Context, in *MeetingID) (*Feishu
 	out := &FeishuSharesOutput{}
 	out.Body.Items = make([]FeishuShare, len(rows))
 	for i, r := range rows {
-		out.Body.Items[i] = toFeishuShare(r.FeishuShare, r.RequestedByName)
+		out.Body.Items[i] = toFeishuShare(ctx, r.FeishuShare, r.RequestedByName)
 	}
 	return out, nil
 }

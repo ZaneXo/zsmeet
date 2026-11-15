@@ -2,6 +2,7 @@ import type { NetworkMode } from "@tanstack/react-query";
 import type { Client } from "openapi-fetch";
 import { BrowserRouter, HashRouter } from "react-router";
 import type { paths } from "../api/schema";
+import { acceptLanguageHeader } from "../i18n/lang";
 import * as desktop from "./desktop";
 import { isDesktop } from "./env";
 
@@ -49,7 +50,10 @@ export function apiUrl(path: string): string {
 
 /** 直接用 fetch 调接口时要加的请求头。 */
 export function apiHeaders(): Record<string, string> {
-  return isDesktop ? desktop.proxyHeaders() : {};
+  return {
+    ...(isDesktop ? desktop.proxyHeaders() : {}),
+    "Accept-Language": acceptLanguageHeader(),
+  };
 }
 
 /** 直接用 fetch 调接口时带不带 Cookie：网页版靠 Cookie 登录，桌面版靠本地代理加的令牌。 */

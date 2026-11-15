@@ -8,6 +8,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Runtime};
 
+use crate::i18n::{self, Lang};
 use crate::recorder::{Phase, Recorder, RecorderState, UploadStatus};
 
 pub const MAIN_WINDOW: &str = "main";
@@ -16,6 +17,7 @@ const TRAY: &str = "main";
 /// 菜单里的录音部分。这些变了才重建菜单（时长每秒都变，只改图标旁边的字）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Shape {
+    lang: Lang,
     phase: Phase,
     /// 正在录的会议的标题
     title: String,
@@ -28,6 +30,7 @@ struct Shape {
 impl Shape {
     fn idle() -> Self {
         Self {
+            lang: i18n::current(),
             phase: Phase::Idle,
             title: String::new(),
             uploading: 0,
@@ -36,9 +39,14 @@ impl Shape {
     }
 
     fn of(state: &RecorderState) -> Self {
+        Self::of_lang(state, i18n::current())
+    }
+
+    fn of_lang(state: &RecorderState, lang: Lang) -> Self {
         let count =
             |f: fn(UploadStatus) -> bool| state.uploads.iter().filter(|u| f(u.status)).count();
         Self {
+            lang,
             phase: state.status,
             title: state.title.clone().unwrap_or_default(),
             uploading: count(|s| {
@@ -135,9 +143,16 @@ fn apply<R: Runtime>(app: &AppHandle<R>, title: Option<String>, shape: Shape) {
 
 /// 图标旁边的字：录音时是录了多久，暂停时加上「已暂停」，没在录时什么也不显示。
 fn title(state: &RecorderState) -> Option<String> {
+    title_for(state, i18n::current())
+}
+
+fn title_for(state: &RecorderState, lang: Lang) -> Option<String> {
     match state.status {
         Phase::Recording | Phase::Stopping => Some(elapsed(state.seconds)),
-        Phase::Paused => Some(format!("{} 已暂停", elapsed(state.seconds))),
+        Phase::Paused => Some(match lang {
+            Lang::Zh => format!("{} 已暂停", elapsed(state.seconds)),
+            Lang::En => format!("{} Paused", elapsed(state.seconds)),
+        }),
         Phase::Idle | Phase::Starting => None,
     }
 }
@@ -164,53 +179,88 @@ fn short_title(title: &str) -> String {
 }
 
 fn menu<R: Runtime>(app: &AppHandle<R>, shape: &Shape) -> tauri::Result<Menu<R>> {
+    let en = shape.lang == Lang::En;
     let menu = Menu::new(app)?;
     let info = |id: &str, text: String| MenuItem::with_id(app, id, text, false, None::<&str>);
     let action = |id: &str, text: &str| MenuItem::with_id(app, id, text, true, None::<&str>);
     let status = match shape.phase {
-        Phase::Recording => Some("正在录音"),
-        Phase::Paused => Some("录音已暂停"),
-        Phase::Starting => Some("正在开始录音…"),
-        Phase::Stopping => Some("正在结束录音…"),
+        Phase::Recording => Some(if en { "Recording" } else { "正在录音" }),
+        Phase::Paused => Some(if en {
+            "Recording paused"
+        } else {
+            "录音已暂停"
+        }),
+        Phase::Starting => Some(if en {
+            "Starting recording…"
+        } else {
+            "正在开始录音…"
+        }),
+        Phase::Stopping => Some(if en {
+            "Stopping recording…"
+        } else {
+            "正在结束录音…"
+        }),
         Phase::Idle => None,
     };
     if let Some(status) = status {
         let text = match short_title(&shape.title) {
             t if t.is_empty() => status.to_string(),
+            t if en => format!("{status}: {t}"),
             t => format!("{status}：{t}"),
         };
         menu.append(&info("status", text)?)?;
     }
     match shape.phase {
-        Phase::Recording => menu.append(&action("pause", "暂停")?)?,
-        Phase::Paused => menu.append(&action("resume", "继续")?)?,
+        Phase::Recording => menu.append(&action("pause", if en { "Pause" } else { "暂停" })?)?,
+        Phase::Paused => menu.append(&action("resume", if en { "Resume" } else { "继续" })?)?,
         _ => {}
     }
     if matches!(shape.phase, Phase::Recording | Phase::Paused) {
-        menu.append(&action("mark", "标记重点")?)?;
-        menu.append(&action("stop", "结束录音")?)?;
+        menu.append(&action(
+            "mark",
+            if en { "Add bookmark" } else { "标记重点" },
+        )?)?;
+        menu.append(&action(
+            "stop",
+            if en { "Stop recording" } else { "结束录音" },
+        )?)?;
     }
     if status.is_some() {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
     }
     if shape.uploading > 0 {
-        menu.append(&info(
-            "uploading",
-            format!("还有 {} 段录音没传完", shape.uploading),
-        )?)?;
+        let text = if en {
+            if shape.uploading == 1 {
+                "1 recording uploading".to_string()
+            } else {
+                format!("{} recordings uploading", shape.uploading)
+            }
+        } else {
+            format!("还有 {} 段录音没传完", shape.uploading)
+        };
+        menu.append(&info("uploading", text)?)?;
     }
     if shape.attention > 0 {
-        menu.append(&action(
-            "attention",
-            &format!("有 {} 段录音需要处理…", shape.attention),
-        )?)?;
+        let text = if en {
+            if shape.attention == 1 {
+                "1 recording needs attention…".to_string()
+            } else {
+                format!("{} recordings need attention…", shape.attention)
+            }
+        } else {
+            format!("有 {} 段录音需要处理…", shape.attention)
+        };
+        menu.append(&action("attention", &text)?)?;
     }
     if shape.uploading > 0 || shape.attention > 0 {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
     }
-    menu.append(&action("open", "打开 zsmeet")?)?;
+    menu.append(&action(
+        "open",
+        if en { "Open zsmeet" } else { "打开 zsmeet" },
+    )?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&action("quit", "退出")?)?;
+    menu.append(&action("quit", if en { "Quit" } else { "退出" })?)?;
     Ok(menu)
 }
 
@@ -250,6 +300,14 @@ mod tests {
         assert_eq!(
             title(&state(Phase::Paused, 61.0)).as_deref(),
             Some("1:01 已暂停")
+        );
+        assert_eq!(
+            title_for(&state(Phase::Paused, 61.0), Lang::En).as_deref(),
+            Some("1:01 Paused")
+        );
+        assert_ne!(
+            Shape::of_lang(&state(Phase::Recording, 1.0), Lang::Zh),
+            Shape::of_lang(&state(Phase::Recording, 1.0), Lang::En)
         );
         assert_eq!(title(&state(Phase::Idle, 0.0)), None);
         assert_eq!(title(&state(Phase::Starting, 0.0)), None);

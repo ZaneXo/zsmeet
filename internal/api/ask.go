@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
 
+	"github.com/ZaneXo/zsmeet/internal/i18n"
 	"github.com/ZaneXo/zsmeet/internal/service"
 )
 
@@ -67,6 +68,9 @@ func (h *Handlers) Ask(ctx context.Context, in *AskInput) (*AskOutput, error) {
 	}
 	out := &AskOutput{}
 	out.Body.Answer = a.Text
+	if a.Meetings == 0 {
+		out.Body.Answer = i18n.TranslateMessage(i18n.FromContext(ctx), out.Body.Answer)
+	}
 	out.Body.Meetings = a.Meetings
 	out.Body.Keywords = a.Keywords
 	if out.Body.Keywords == nil {

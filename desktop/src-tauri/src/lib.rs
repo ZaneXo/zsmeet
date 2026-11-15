@@ -10,6 +10,7 @@ mod cache;
 mod commands;
 mod core;
 mod export;
+mod i18n;
 mod proxy;
 mod recorder;
 mod server;
@@ -210,6 +211,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_state,
+            commands::set_language,
             commands::set_server,
             commands::switch_server,
             commands::login_start,

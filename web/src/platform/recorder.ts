@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
+import { getLang, isEn, subscribeLang } from "../i18n/lang";
 import { onIdentityChange } from "./desktop";
 import {
   ECHO_CANCEL_OFF,
@@ -161,6 +162,13 @@ function start() {
   started = true;
   // 换了人、换了服务器：上一个人刚录完的那一场、点过的「知道了」都不留
   onIdentityChange(() => update({ ended: null, dismissed: new Set() }));
+  // 切换界面语言时，让 Rust 先更新语言再重取一次录音状态（warnings / error / uploads.error 会跟着变成目标语言）
+  subscribeLang(() => {
+    void invoke("set_language", { lang: getLang() })
+      .then(() => invoke<RecorderState>("recorder_state"))
+      .then(apply)
+      .catch(() => {});
+  });
   void (async () => {
     try {
       await listen<RecorderState>(EVENT_STATE, (e) => {
@@ -171,7 +179,11 @@ function start() {
       // 取的时候已经收到了推送：推送的比取到的新，不用取到的
       if (!sawEvent) apply(current);
     } catch (e) {
-      update({ failure: `录音功能没能启动：${sentence(errorMessage(e))}请退出 zsmeet 再打开试试。` });
+      update({
+        failure: isEn()
+          ? `Recorder failed to start: ${sentence(errorMessage(e))} Please quit and reopen zsmeet.`
+          : `录音功能没能启动：${sentence(errorMessage(e))}请退出 zsmeet 再打开试试。`,
+      });
     }
   })();
 }

@@ -5,6 +5,7 @@ import { useLocation, useSearchParams } from "react-router";
 import { errorMessage } from "../api/client";
 import { AppLink } from "../components/AppLink";
 import { Button, buttonClass, Notice, ProgressBar } from "../components/ui";
+import { tr, useLang } from "../i18n/react";
 import { hms } from "../lib/format";
 import { dismissUpload, recorderDiscard, recorderFinish, useRecorder } from "./recorder";
 import type { RecorderStatus, RecorderUpload } from "./recorder";
@@ -18,6 +19,7 @@ import type { UploadAction, UploadView, UploadWhere } from "./recorderView";
  * skip 是当前页面自己会显示的那一场（会议详情页），这里不重复；录音页自己会显示正在录的、刚结束的、要接着录的那一场。
  */
 export function DesktopRecorderBanner({ skip }: { skip?: string }) {
+  useLang();
   const { state, ended, dismissed } = useRecorder();
   const { pathname } = useLocation();
   const [params] = useSearchParams();
@@ -45,7 +47,7 @@ export function DesktopRecorderBanner({ skip }: { skip?: string }) {
             {state.title && <span className="min-w-0 truncate text-muted">{state.title}</span>}
           </span>
           <AppLink to="/record" className={buttonClass("default", "sm")}>
-            回到录音
+            {tr("回到录音", "Back to recorder")}
           </AppLink>
         </div>
       )}
@@ -62,24 +64,21 @@ function RecordingDot({ status }: { status: RecorderStatus }) {
 
 /** 导航栏「录音」旁边：在录时红点加已录时长；录完在传的时候显示「上传中」。 */
 export function DesktopRecordingBadge() {
+  useLang();
   const { state } = useRecorder();
   const uploading = state.uploads.some((u) => u.status === "uploading" || u.status === "completing");
   if (state.status === "idle" && !uploading) return null;
-  const text = isLive(state.status) ? hms(state.seconds) : state.status === "idle" ? "上传中" : BUSY_LABEL[state.status];
+  const text = isLive(state.status) ? hms(state.seconds) : state.status === "idle" ? tr("上传中", "Uploading") : BUSY_LABEL[state.status];
   return (
-    <span className="ml-auto flex items-center gap-1.5 text-xs font-normal tabular-nums text-bad" title={state.status === "idle" ? "录音正在上传" : BUSY_LABEL[state.status]}>
+    <span className="ml-auto flex items-center gap-1.5 text-xs font-normal tabular-nums text-bad" title={state.status === "idle" ? tr("录音正在上传", "Uploading recording") : BUSY_LABEL[state.status]}>
       <span className={`size-2 rounded-full ${state.status === "recording" ? "animate-pulse bg-bad" : "bg-muted"}`} aria-hidden="true" />
       {text}
     </span>
   );
 }
 
-/**
- * 会议页面上：这场会议正在这台电脑上录音，或者录音正从这台电脑上传（传不上去、中断了也在这里处理）。
- * 这台电脑上没有这场会议的录音时显示 elsewhere（录音在别的电脑上）；这台电脑上的传不上去了时，下面接着显示 stuck
- * （用服务器已经收到的部分生成纪要）。
- */
 export function ThisComputerRecording({ meetingId, elsewhere, stuck }: { meetingId: string; elsewhere: ReactNode; stuck?: ReactNode }) {
+  useLang();
   const { state } = useRecorder();
   const local = localMeeting(state, meetingId);
   if (!local) return <>{elsewhere}</>;
@@ -93,12 +92,11 @@ export function ThisComputerRecording({ meetingId, elsewhere, stuck }: { meeting
       </div>
     );
   }
-  // 不用 Notice：它是 role="status"，时长每秒都变，读屏软件会一直念
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-brand-tint px-4 py-3 text-sm leading-relaxed text-brand-ink">
       <span>{liveMeetingText(local.status, hms(local.seconds))}</span>
       <AppLink to="/record" className={buttonClass("default", "sm")}>
-        回到录音
+        {tr("回到录音", "Back to recorder")}
       </AppLink>
     </div>
   );
@@ -111,8 +109,8 @@ const TONE: Record<UploadView["tone"], string> = {
   bad: "border-bad/30 bg-bad-tint/40",
 };
 
-/** 一场录音的上传情况：进度；传完了去看看；中断了接着录，或者把录下的部分传上去；传不上去就删掉。 */
 export function UploadRow({ upload, where, canStart }: { upload: RecorderUpload; where: UploadWhere; canStart: boolean }) {
+  useLang();
   const view = uploadView(upload, { where, canStart });
   const [confirming, setConfirming] = useState(false);
   const act = useMutation({ mutationFn: (run: () => Promise<unknown>) => run() });
@@ -130,27 +128,27 @@ export function UploadRow({ upload, where, canStart }: { upload: RecorderUpload;
           <span className="flex flex-wrap gap-2">
             {has("view") && (
               <AppLink to={`/meetings/${id}`} className={buttonClass("default", "sm")} onClick={() => dismissUpload(id)}>
-                查看
+                {tr("查看", "View")}
               </AppLink>
             )}
             {has("continue") && (
               <AppLink to={`/record?continue=${encodeURIComponent(id)}`} className={buttonClass("primary", "sm")}>
-                接着录
+                {tr("接着录", "Resume")}
               </AppLink>
             )}
             {has("finish") && (
               <Button size="sm" variant={has("continue") ? "default" : "primary"} disabled={act.isPending} onClick={() => act.mutate(() => recorderFinish(id))}>
-                传上去生成纪要
+                {tr("传上去生成纪要", "Upload & generate minutes")}
               </Button>
             )}
             {has("discard") && (
               <Button size="sm" variant="ghost" disabled={act.isPending} onClick={() => setConfirming(true)}>
-                删除
+                {tr("删除", "Delete")}
               </Button>
             )}
             {has("dismiss") && (
               <Button size="sm" variant="ghost" onClick={() => dismissUpload(id)}>
-                知道了
+                {tr("知道了", "Dismiss")}
               </Button>
             )}
           </span>
@@ -167,10 +165,10 @@ export function UploadRow({ upload, where, canStart }: { upload: RecorderUpload;
               disabled={act.isPending}
               onClick={() => act.mutate(() => recorderDiscard(id), { onSettled: () => setConfirming(false) })}
             >
-              确定删除
+              {tr("确定删除", "Delete")}
             </Button>
             <Button size="sm" onClick={() => setConfirming(false)}>
-              取消
+              {tr("取消", "Cancel")}
             </Button>
           </span>
         </div>

@@ -458,3 +458,15 @@ func TestLongMeetingMergeTerminatesWithLongNotes(t *testing.T) {
 		t.Errorf("最后的进度应该是 %d/%d，实际 %v", n, n, last)
 	}
 }
+
+func TestRenameSpeakersEnglish(t *testing.T) {
+	src := "## Summary\n[00:10] Speaker 1 (Alice) proposed the plan, and Speaker 2 agreed.\n## Action Items\n- Speaker 1: ship v1 by Friday"
+	got := RenameSpeakers(src, nil, map[int][2]string{
+		0: {"", "Alice Chen"},
+		1: {"", "Bob"},
+	})
+	want := "## Summary\n[00:10] Alice Chen proposed the plan, and Bob agreed.\n## Action Items\n- Alice Chen: ship v1 by Friday"
+	if got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}

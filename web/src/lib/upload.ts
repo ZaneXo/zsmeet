@@ -1,4 +1,5 @@
 import { ApiError } from "../api/client";
+import { isEn, tr } from "../i18n/lang";
 import { apiCredentials, apiHeaders, apiUrl } from "../platform";
 import { noteResponse } from "../platform/offline";
 
@@ -31,10 +32,10 @@ export async function sendChunk(meetingId: string, seq: number, body: Blob, sign
     noteResponse(response);
     if (response.ok) return undefined;
     const problem = (await response.json().catch(() => ({}))) as { detail?: string };
-    return new ApiError(response.status, problem.detail ?? `上传失败（${response.status}）`);
+    return new ApiError(response.status, problem.detail ?? (isEn() ? `Upload failed (${response.status})` : `上传失败（${response.status}）`));
   } catch (e) {
     if (signal.aborted) throw e;
-    return new ApiError(0, "网络中断，上传没有完成");
+    return new ApiError(0, tr("网络中断，上传没有完成", "Network interrupted; upload did not complete"));
   }
 }
 

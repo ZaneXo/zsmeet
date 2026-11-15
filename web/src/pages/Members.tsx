@@ -4,9 +4,13 @@ import type { FormEvent } from "react";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Invite, Member, User } from "../api/client";
 import { Button, Card, Chip, Field, Input, Notice, Select, Spinner } from "../components/ui";
+import { isEn } from "../i18n/lang";
+import { tr, useLang } from "../i18n/react";
 import { dateTime } from "../lib/format";
 
-const ROLE_LABEL = { admin: "管理员", member: "成员" } as const;
+function roleLabel(role: Member["role"]): string {
+  return role === "admin" ? tr("管理员", "Admin") : tr("成员", "Member");
+}
 
 /**
  * 刚生成的一次性链接。只在生成的那一刻拿得到，所以要醒目地显示出来让管理员复制。
@@ -32,9 +36,12 @@ const inviteLink = (token: string, invite: Invite): FreshLink => ({
   kind: "invite",
   stamp: invite.created_at,
   shownAt: performance.now(),
-  title: `给 ${invite.email} 的邀请链接`,
+  title: isEn() ? `Invite link for ${invite.email}` : `给 ${invite.email} 的邀请链接`,
   url: `${window.location.origin}/invite#${token}`,
-  hint: "7 天内有效，只能用一次。系统不会发邮件，请你自己通过飞书、微信等发给对方。",
+  hint: tr(
+    "7 天内有效，只能用一次。系统不会发邮件，请你自己通过飞书、微信等发给对方。",
+    "Valid for 7 days and single-use. zsmeet does not send emails — copy and send this link directly to them.",
+  ),
 });
 
 const sameTime = (a: string, b: string) => new Date(a).getTime() === new Date(b).getTime();
@@ -43,6 +50,7 @@ const refresh = () => queryClient.invalidateQueries({ queryKey: ["members"] });
 
 /** 成员管理：邀请同事、改角色、停用、帮忘了密码的人重置。只有管理员能看到。 */
 export function MembersSection({ me }: { me: User }) {
+  useLang();
   const members = useQuery({
     queryKey: ["members"],
     // 顺手记下这次请求是什么时候发出的，对照链接框时要用（见下面的 useEffect）
@@ -104,13 +112,13 @@ export function MembersSection({ me }: { me: User }) {
       });
   };
 
-  if (members.isPending) return <Spinner label="正在加载成员…" />;
+  if (members.isPending) return <Spinner label={tr("正在加载成员…", "Loading members…")} />;
   // 一次都没取到：只能整块报错。取到过的话，即使后来刷新失败也继续显示，不能把还没复制的链接盖掉
   if (!data) {
     return (
       <div className="flex flex-col items-start gap-3">
         <Notice tone="bad">{errorMessage(members.error)}</Notice>
-        <Button onClick={() => members.refetch()}>重试</Button>
+        <Button onClick={() => members.refetch()}>{tr("重试", "Retry")}</Button>
       </div>
     );
   }
@@ -123,12 +131,17 @@ export function MembersSection({ me }: { me: User }) {
       <Card className="flex flex-col gap-4 p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-col gap-1">
-            <h2 className="text-lg font-bold">成员</h2>
-            <p className="text-[13px] leading-relaxed text-muted">会议默认所有成员都能看，只有创建者和管理员能改；创建者可以改成只给指定的人看，也可以指定谁还能编辑。管理员能看、能改所有会议。</p>
+            <h2 className="text-lg font-bold">{tr("成员", "Members")}</h2>
+            <p className="text-[13px] leading-relaxed text-muted">
+              {tr(
+                "会议默认所有成员都能看，只有创建者和管理员能改；创建者可以改成只给指定的人看，也可以指定谁还能编辑。管理员能看、能改所有会议。",
+                "Meetings are visible to all members by default and editable by the creator and admins; creators can restrict visibility to specific members or grant edit access. Admins can view and edit all meetings.",
+              )}
+            </p>
           </div>
           {!inviting && (
             <Button variant="primary" size="sm" onClick={() => setInviting(true)}>
-              邀请成员
+              {tr("邀请成员", "Invite member")}
             </Button>
           )}
         </div>
@@ -150,9 +163,11 @@ export function MembersSection({ me }: { me: User }) {
         {error && <Notice tone="bad">{error}</Notice>}
         {members.isError && (
           <Notice tone="warn">
-            成员列表没能刷新（{errorMessage(members.error)}），下面显示的可能不是最新的。
+            {isEn()
+              ? `Could not refresh members (${errorMessage(members.error)}); showing cached list.`
+              : `成员列表没能刷新（${errorMessage(members.error)}），下面显示的可能不是最新的。`}
             <button type="button" className="ml-2 cursor-pointer font-semibold underline" onClick={() => members.refetch()}>
-              重试
+              {tr("重试", "Retry")}
             </button>
           </Notice>
         )}
@@ -161,11 +176,11 @@ export function MembersSection({ me }: { me: User }) {
           <table className="w-full min-w-[560px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-line text-left text-xs font-semibold text-muted">
-                <th className="px-3 py-2.5">姓名</th>
-                <th className="px-3 py-2.5">邮箱</th>
-                <th className="px-3 py-2.5">角色</th>
-                <th className="px-3 py-2.5">状态</th>
-                <th className="px-3 py-2.5 text-right">操作</th>
+                <th className="px-3 py-2.5">{tr("姓名", "Name")}</th>
+                <th className="px-3 py-2.5">{tr("邮箱", "Email")}</th>
+                <th className="px-3 py-2.5">{tr("角色", "Role")}</th>
+                <th className="px-3 py-2.5">{tr("状态", "Status")}</th>
+                <th className="px-3 py-2.5 text-right">{tr("操作", "Actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -179,7 +194,7 @@ export function MembersSection({ me }: { me: User }) {
 
       {invites.length > 0 && (
         <Card className="flex flex-col gap-3 p-6">
-          <h2 className="text-lg font-bold">还没接受的邀请</h2>
+          <h2 className="text-lg font-bold">{tr("还没接受的邀请", "Pending Invites")}</h2>
           {invites.map((invite) => (
             <InviteRow key={invite.id} invite={invite} busy={busy} run={run} onLink={showLink} onRevoked={() => dropLink(invite.email)} />
           ))}
@@ -208,6 +223,7 @@ function MemberRow({
   /** 这个人的重置链接失效了（被停用，或者链接被撤销） */
   onLinkGone: () => void;
 }) {
+  useLang();
   // 停用和改角色都不是小事（踢下线、给出或收回管理权限、他发出去的链接作废），而且下拉框很容易手滑选错，
   // 所以点了以后先在这一行里再确认一次。值是要确认的操作：停用，或者要改成的角色
   // unlink 是解除他和飞书账号的关联
@@ -241,10 +257,22 @@ function MemberRow({
   // 在任的管理员卸任（降级或停用）时，他凭管理员身份发出去的链接跟着失效
   const activeAdmin = m.role === "admin" && !m.disabled;
   const consequence = {
-    disable: "停用后他会立刻被退出登录（包括已登录的 App），不能再登录。",
-    member: "降为成员后，他不能再管理成员和配置大模型。",
-    admin: "设为管理员后，他可以管理成员、配置大模型，并修改任何一场会议。",
-    unlink: "解除后他不能再用这个飞书账号登录。之后他用飞书登录时会按企业邮箱重新对应，也可以用邮箱和密码登录后在「设置 → 账号」里重新关联。",
+    disable: tr(
+      "停用后他会立刻被退出登录（包括已登录的 App），不能再登录。",
+      "Disabling signs them out immediately (including signed-in desktop apps) and blocks future sign-ins.",
+    ),
+    member: tr(
+      "降为成员后，他不能再管理成员和配置大模型。",
+      "Demoting to Member removes access to team settings and member management.",
+    ),
+    admin: tr(
+      "设为管理员后，他可以管理成员、配置大模型，并修改任何一场会议。",
+      "Admins can manage members, configure team settings, and edit any meeting.",
+    ),
+    unlink: tr(
+      "解除后他不能再用这个飞书账号登录。之后他用飞书登录时会按企业邮箱重新对应，也可以用邮箱和密码登录后在「设置 → 账号」里重新关联。",
+      "Unlinking prevents signing in with this Feishu account. Next time they sign in via Feishu, matching falls back to corporate email, or they can re-link under Settings → Account.",
+    ),
   };
   const changingRole = confirming === "admin" || confirming === "member";
 
@@ -252,60 +280,72 @@ function MemberRow({
     <tr className="border-b border-line/70 align-top last:border-b-0">
       <td className="px-3 py-3 font-medium">
         {m.name}
-        {isMe && <span className="ml-1.5 text-xs font-normal text-muted">（你）</span>}
+        {isMe && <span className="ml-1.5 text-xs font-normal text-muted">{tr("（你）", "(you)")}</span>}
       </td>
       <td className="px-3 py-3 text-muted">{m.email}</td>
       <td className="px-3 py-3">
         {isMe ? (
-          ROLE_LABEL[m.role]
+          roleLabel(m.role)
         ) : (
           <Select
-            aria-label={`${m.name} 的角色`}
+            aria-label={isEn() ? `Role for ${m.name}` : `${m.name} 的角色`}
             className="w-28 min-h-8 py-1"
             value={changingRole ? confirming : (savingRole ?? m.role)}
             disabled={busy}
             // 选回现在的角色，就是不改了
             onChange={(e) => setConfirming(e.target.value === m.role ? null : (e.target.value as Member["role"]))}
           >
-            <option value="member">成员</option>
-            <option value="admin">管理员</option>
+            <option value="member">{tr("成员", "Member")}</option>
+            <option value="admin">{tr("管理员", "Admin")}</option>
           </Select>
         )}
       </td>
       <td className="px-3 py-3">
         <div className="flex flex-wrap gap-1.5">
-          {m.disabled ? <Chip tone="mute">已停用</Chip> : <Chip tone="ok">正常</Chip>}
-          {m.feishu_linked && <Chip tone="mute">已关联飞书</Chip>}
+          {m.disabled ? <Chip tone="mute">{tr("已停用", "Disabled")}</Chip> : <Chip tone="ok">{tr("正常", "Active")}</Chip>}
+          {m.feishu_linked && <Chip tone="mute">{tr("已关联飞书", "Feishu linked")}</Chip>}
         </div>
       </td>
       <td className="px-3 py-3">
         <div className="flex flex-col items-end gap-2">
           {isMe ? (
-            <div className="text-right text-xs text-muted" title="自己的角色要请另一位管理员来改">
-              不能修改自己
+            <div className="text-right text-xs text-muted" title={tr("自己的角色要请另一位管理员来改", "Ask another admin to change your own role")}>
+              {tr("不能修改自己", "Cannot edit yourself")}
             </div>
           ) : confirming ? (
             <div className="flex flex-wrap items-center justify-end gap-2">
               <span className="max-w-xs text-right text-xs leading-relaxed text-muted">
                 {consequence[confirming]}
-                {activeAdmin && (confirming === "disable" || confirming === "member") && "他生成的、还没被用掉的邀请和重置密码链接也会失效；邀请可以在下面重新生成。"}
+                {activeAdmin &&
+                  (confirming === "disable" || confirming === "member") &&
+                  tr(
+                    "他生成的、还没被用掉的邀请和重置密码链接也会失效；邀请可以在下面重新生成。",
+                    " Any unused invite or password reset links created by them will also expire; invites can be renewed below.",
+                  )}
               </span>
               <Button size="sm" variant={confirming === "admin" ? "primary" : "danger"} disabled={busy} onClick={confirm}>
-                {{ disable: "确定停用", member: "确定降为成员", admin: "确定设为管理员", unlink: "确定解除" }[confirming]}
+                {
+                  {
+                    disable: tr("确定停用", "Disable"),
+                    member: tr("确定降为成员", "Make Member"),
+                    admin: tr("确定设为管理员", "Make Admin"),
+                    unlink: tr("确定解除", "Unlink"),
+                  }[confirming]
+                }
               </Button>
               <Button size="sm" onClick={() => setConfirming(null)}>
-                取消
+                {tr("取消", "Cancel")}
               </Button>
             </div>
           ) : m.disabled ? (
             <Button size="sm" disabled={busy} onClick={() => update({ disabled: false })}>
-              启用
+              {tr("启用", "Enable")}
             </Button>
           ) : (
             <div className="flex flex-wrap justify-end gap-2">
               <Button
                 size="sm"
-                title="他忘了密码时用"
+                title={tr("他忘了密码时用", "Generate a password reset link if they forgot their password")}
                 disabled={busy}
                 onClick={() =>
                   run(
@@ -316,25 +356,32 @@ function MemberRow({
                         kind: "reset",
                         stamp: r.expires_at,
                         shownAt: performance.now(),
-                        title: `给 ${m.name} 重置密码的链接`,
+                        title: isEn() ? `Password reset link for ${m.name}` : `给 ${m.name} 重置密码的链接`,
                         url: `${window.location.origin}/reset#${r.token}`,
-                        hint: `${dateTime(r.expires_at)} 之前有效，只能用一次。请你自己发给 ${m.name}，对方打开后设置新密码。`,
+                        hint: isEn()
+                          ? `Valid until ${dateTime(r.expires_at)}, single-use. Send it directly to ${m.name} so they can set a new password.`
+                          : `${dateTime(r.expires_at)} 之前有效，只能用一次。请你自己发给 ${m.name}，对方打开后设置新密码。`,
                       }),
                   )
                 }
               >
-                重置密码
+                {tr("重置密码", "Reset password")}
               </Button>
               <Button size="sm" disabled={busy} onClick={() => setConfirming("disable")}>
-                停用
+                {tr("停用", "Disable")}
               </Button>
             </div>
           )}
 
           {/* 他换了飞书账号、自己又进不来（比如用飞书自动创建的账号不知道密码）时，管理员替他解除。自己的在账号页上解除 */}
           {m.feishu_linked && !isMe && !confirming && (
-            <Button size="sm" title="他换了飞书账号时用。解除后他用新的飞书账号登录时，按企业邮箱重新对应" disabled={busy} onClick={() => setConfirming("unlink")}>
-              解除飞书关联
+            <Button
+              size="sm"
+              title={tr("他换了飞书账号时用。解除后他用新的飞书账号登录时，按企业邮箱重新对应", "Use when they switch Feishu accounts")}
+              disabled={busy}
+              onClick={() => setConfirming("unlink")}
+            >
+              {tr("解除飞书关联", "Unlink Feishu")}
             </Button>
           )}
 
@@ -342,11 +389,12 @@ function MemberRow({
           {m.reset_link && (
             <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-warn">
               <span>
-                有一个还没用的重置密码链接（
-                {m.reset_link.from_server ? "在服务器上用命令生成" : `${m.reset_link.created_by} 生成`}，{dateTime(m.reset_link.expires_at)} 前有效）
+                {isEn()
+                  ? `Unused reset link (${m.reset_link.from_server ? "generated via server CLI" : `by ${m.reset_link.created_by}`}, valid until ${dateTime(m.reset_link.expires_at)})`
+                  : `有一个还没用的重置密码链接（${m.reset_link.from_server ? "在服务器上用命令生成" : `${m.reset_link.created_by} 生成`}，${dateTime(m.reset_link.expires_at)} 前有效）`}
               </span>
               <Button size="sm" disabled={busy} onClick={() => run(() => unwrap(api.DELETE("/api/members/{id}/reset-link", path)), onLinkGone)}>
-                撤销链接
+                {tr("撤销链接", "Revoke link")}
               </Button>
             </div>
           )}
@@ -369,31 +417,33 @@ function InviteRow({
   onLink: (l: FreshLink) => void;
   onRevoked: () => void;
 }) {
+  useLang();
   const path = { params: { path: { id: invite.id } } };
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl border border-line px-4 py-3">
       <div className="flex min-w-0 flex-col gap-1">
         <div className="flex flex-wrap items-center gap-2">
           <b className="truncate text-sm font-semibold">{invite.email}</b>
-          <Chip tone="mute">{ROLE_LABEL[invite.role]}</Chip>
-          {invite.expired && <Chip tone="warn">已失效</Chip>}
+          <Chip tone="mute">{roleLabel(invite.role)}</Chip>
+          {invite.expired && <Chip tone="warn">{tr("已失效", "Expired")}</Chip>}
         </div>
         <span className="text-xs text-muted">
-          {invite.invited_by} 邀请
-          {invite.expired ? "，链接已经用不了了，重新生成后再发给对方" : `，${dateTime(invite.expires_at)} 前有效`}
+          {isEn()
+            ? `Invited by ${invite.invited_by}${invite.expired ? " — link expired, renew and resend" : ` · valid until ${dateTime(invite.expires_at)}`}`
+            : `${invite.invited_by} 邀请${invite.expired ? "，链接已经用不了了，重新生成后再发给对方" : `，${dateTime(invite.expires_at)} 前有效`}`}
         </span>
       </div>
       <div className="flex gap-2">
         <Button
           size="sm"
-          title="链接弄丢了或者失效了时用。之前的链接不能再用"
+          title={tr("链接弄丢了或者失效了时用。之前的链接不能再用", "Generate a fresh link and invalidate the previous one")}
           disabled={busy}
           onClick={() => run(() => unwrap(api.POST("/api/invites/{id}/renew", path)), (r) => onLink(inviteLink(r.token, r.invite)))}
         >
-          重新生成链接
+          {tr("重新生成链接", "Renew link")}
         </Button>
         <Button size="sm" disabled={busy} onClick={() => run(() => unwrap(api.DELETE("/api/invites/{id}", path)), onRevoked)}>
-          撤销
+          {tr("撤销", "Revoke")}
         </Button>
       </div>
     </div>
@@ -401,6 +451,7 @@ function InviteRow({
 }
 
 function InviteForm({ onCancel, onCreated }: { onCancel: () => void; onCreated: (link: FreshLink) => void }) {
+  useLang();
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<Member["role"]>("member");
   const create = useMutation({
@@ -416,24 +467,33 @@ function InviteForm({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
   return (
     <form onSubmit={submit} className="flex flex-col gap-3 rounded-xl border border-brand/25 bg-brand-tint/50 p-4">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_140px]">
-        <Field label="对方的邮箱" htmlFor="invite-email" hint="对方以后用它登录。不会往这个邮箱发邮件">
+        <Field
+          label={tr("对方的邮箱", "Invitee email")}
+          htmlFor="invite-email"
+          hint={tr("对方以后用它登录。不会往这个邮箱发邮件", "Used to sign in later. No email is sent automatically")}
+        >
           <Input id="invite-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required maxLength={200} autoFocus />
         </Field>
-        <Field label="角色" htmlFor="invite-role">
+        <Field label={tr("角色", "Role")} htmlFor="invite-role">
           <Select id="invite-role" value={role} onChange={(e) => setRole(e.target.value as Member["role"])}>
-            <option value="member">成员</option>
-            <option value="admin">管理员</option>
+            <option value="member">{tr("成员", "Member")}</option>
+            <option value="admin">{tr("管理员", "Admin")}</option>
           </Select>
         </Field>
       </div>
-      <p className="text-xs leading-relaxed text-muted">成员可以上传会议、查看团队里的会议。管理员还能管理成员、配置大模型，看得到、改得了所有会议。</p>
+      <p className="text-xs leading-relaxed text-muted">
+        {tr(
+          "成员可以上传会议、查看团队里的会议。管理员还能管理成员、配置大模型，看得到、改得了所有会议。",
+          "Members can record/upload and view team meetings. Admins can also manage members, configure team settings, and access/edit all meetings.",
+        )}
+      </p>
       {create.isError && <Notice tone="bad">{errorMessage(create.error)}</Notice>}
       <div className="flex gap-2">
         <Button type="submit" variant="primary" size="sm" disabled={create.isPending}>
-          生成邀请链接
+          {tr("生成邀请链接", "Create invite link")}
         </Button>
         <Button size="sm" onClick={onCancel}>
-          取消
+          {tr("取消", "Cancel")}
         </Button>
       </div>
     </form>
@@ -442,6 +502,7 @@ function InviteForm({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
 
 /** 显示刚生成的链接，带复制按钮。浏览器不让自动复制时（没用 HTTPS），选中文字让用户自己复制。 */
 function LinkBox({ link, onClose }: { link: FreshLink; onClose: () => void }) {
+  useLang();
   const input = useRef<HTMLInputElement>(null);
   const [state, setState] = useState<"idle" | "copied" | "manual">("idle");
   const copy = async () => {
@@ -459,15 +520,21 @@ function LinkBox({ link, onClose }: { link: FreshLink; onClose: () => void }) {
       <div className="flex gap-2">
         <Input ref={input} readOnly value={link.url} aria-label={link.title} onFocus={(e) => e.currentTarget.select()} className="font-mono text-xs" />
         <Button variant="primary" onClick={copy}>
-          {state === "copied" ? "已复制" : "复制"}
+          {state === "copied" ? tr("已复制", "Copied") : tr("复制", "Copy")}
         </Button>
       </div>
-      {state === "manual" && <span className="text-xs text-warn">浏览器不允许自动复制。链接已经选中，按 Ctrl+C（Mac 上是 ⌘C）复制。</span>}
+      {state === "manual" && (
+        <span className="text-xs text-warn">
+          {tr("浏览器不允许自动复制。链接已经选中，按 Ctrl+C（Mac 上是 ⌘C）复制。", "Automatic copy blocked by browser. The link is selected — press Ctrl+C (⌘C on Mac) to copy.")}
+        </span>
+      )}
       <span className="text-xs leading-relaxed text-ink-2">{link.hint}</span>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs text-muted">这个链接只显示这一次。关掉以后找不回来，但可以重新生成一个。</span>
+        <span className="text-xs text-muted">
+          {tr("这个链接只显示这一次。关掉以后找不回来，但可以重新生成一个。", "Shown only once. Once dismissed, it cannot be retrieved, though you can generate a new one.")}
+        </span>
         <Button size="sm" onClick={onClose}>
-          我已经复制好了
+          {tr("我已经复制好了", "Done copying")}
         </Button>
       </div>
     </div>

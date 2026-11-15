@@ -8,7 +8,9 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::core::{AppState, Core};
 use crate::export;
+use crate::i18n::{self, is_en, tr};
 use crate::recorder::{Devices, EchoCancel, Recorder, RecorderState};
+use crate::tray;
 use crate::update::{self, CheckResult, Updates};
 
 type CoreState<'a> = State<'a, Arc<Core>>;
@@ -18,6 +20,13 @@ type RecorderHandle<'a> = State<'a, Arc<Recorder>>;
 #[tauri::command]
 pub fn app_state(core: CoreState) -> AppState {
     core.state()
+}
+
+/// 界面切换语言后同步给 Rust 侧，立即刷新菜单栏文字。
+#[tauri::command]
+pub fn set_language(app: AppHandle, recorder: RecorderHandle<'_>, lang: String) {
+    i18n::set_from_str(&lang);
+    tray::show_recording(&app, &recorder.state());
 }
 
 /// 填服务器地址：检查 `GET {地址}/api/status`，能用就保存。
@@ -66,24 +75,36 @@ pub fn session_expired(core: CoreState) -> AppState {
 pub fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     let result = open_link(&app, &url);
     if let Err(message) = &result {
-        show_error(&app, "没能打开链接", message);
+        show_error(&app, tr("没能打开链接", "Could not open link"), message);
     }
     result
 }
 
 fn open_link(app: &AppHandle, url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|_| "链接地址不对".to_string())?;
+    let parsed =
+        url::Url::parse(url).map_err(|_| tr("链接地址不对", "Invalid link URL").to_string())?;
     if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
-        return Err("只能打开网页链接".into());
+        return Err(tr("只能打开网页链接", "Only web and email links can be opened").into());
     }
-    let opener = if parsed.scheme() == "mailto" {
+    let opener_zh = if parsed.scheme() == "mailto" {
         "邮件程序"
     } else {
         "浏览器"
     };
+    let opener_en = if parsed.scheme() == "mailto" {
+        "email app"
+    } else {
+        "web browser"
+    };
     app.opener()
         .open_url(parsed.as_str(), None::<&str>)
-        .map_err(|e| format!("没能打开这个链接（{e}），请确认这台电脑上设置了默认的{opener}"))
+        .map_err(|e| {
+            if is_en() {
+                format!("Could not open this link ({e}). Make sure a default {opener_en} is set on this Mac.")
+            } else {
+                format!("没能打开这个链接（{e}），请确认这台电脑上设置了默认的{opener_zh}")
+            }
+        })
 }
 
 /// 弹一个系统提示框说明出了什么错。界面上没有地方显示错误的操作（导出、点链接）用它。
@@ -99,12 +120,18 @@ fn show_error(app: &AppHandle, title: &str, message: &str) {
 #[tauri::command]
 pub fn open_server_page(app: AppHandle, core: CoreState, path: String) -> Result<(), String> {
     if !path.starts_with('/') || path.starts_with("//") {
-        return Err("页面地址不对".into());
+        return Err(tr("页面地址不对", "Invalid page path").into());
     }
-    let url = core.server_url(&path).ok_or("还没有设置服务器地址")?;
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|e| format!("没能打开浏览器（{e}）"))
+    let url = core
+        .server_url(&path)
+        .ok_or_else(|| tr("还没有设置服务器地址", "Server URL is not set yet").to_string())?;
+    app.opener().open_url(url, None::<&str>).map_err(|e| {
+        if is_en() {
+            format!("Could not open browser ({e})")
+        } else {
+            format!("没能打开浏览器（{e}）")
+        }
+    })
 }
 
 /// 导出：从服务器取回文件，弹出保存对话框，写到选的位置。返回保存的路径；取消了返回 None。
@@ -117,7 +144,7 @@ pub async fn save_export(
 ) -> Result<Option<String>, String> {
     let result = save_export_inner(&app, &core, &path).await;
     if let Err(message) = &result {
-        show_error(&app, "导出没有完成", message);
+        show_error(&app, tr("导出没有完成", "Export failed"), message);
     }
     result
 }
@@ -128,9 +155,11 @@ async fn save_export_inner(
     path: &str,
 ) -> Result<Option<String>, String> {
     if !export::valid_path(path) {
-        return Err("导出的地址不对".into());
+        return Err(tr("导出的地址不对", "Invalid export path").into());
     }
-    let upstream = core.upstream().ok_or("还没有设置服务器地址")?;
+    let upstream = core
+        .upstream()
+        .ok_or_else(|| tr("还没有设置服务器地址", "Server URL is not set yet").to_string())?;
     let fetched = export::fetch(
         core.client(),
         &upstream.server,
@@ -158,15 +187,28 @@ async fn save_export_inner(
     let Some(chosen) = chosen else {
         return Ok(None);
     };
-    let target = chosen
-        .into_path()
-        .map_err(|_| "选的位置不能保存文件，请换一个位置".to_string())?;
+    let target = chosen.into_path().map_err(|_| {
+        tr(
+            "选的位置不能保存文件，请换一个位置",
+            "Cannot save files to the selected location. Please choose another folder.",
+        )
+        .to_string()
+    })?;
     // 选的是已有的文件时，写好新文件才换掉它：写到一半出错，原来的文件还在
     let path = target.clone();
     tauri::async_runtime::spawn_blocking(move || export::save_replacing(&path, &body))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| format!("文件没能保存到 {}（{e}），请换一个位置", target.display()))?;
+        .map_err(|e| {
+            if is_en() {
+                format!(
+                    "Could not save file to {} ({e}). Please choose another folder.",
+                    target.display()
+                )
+            } else {
+                format!("文件没能保存到 {}（{e}），请换一个位置", target.display())
+            }
+        })?;
     Ok(Some(target.display().to_string()))
 }
 

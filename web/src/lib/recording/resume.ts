@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { errorMessage, queryClient } from "../../api/client";
+import { tr } from "../../i18n/lang";
 import type { LocalRecording } from "./store";
 import { resumeUpload, withLock } from "./upload";
 import type { Trouble } from "./upload";
@@ -50,7 +51,12 @@ export function startResume(rec: LocalRecording) {
   set(id, { rec, state: { status: "uploading", uploaded: 0, total: rec.chunks, trouble: null } });
   withLock(id, () => resumeUpload(rec, (uploaded, total, trouble) => set(id, { rec, state: { status: "uploading", uploaded, total, trouble } })))
     .then((meeting) =>
-      set(id, { rec, state: meeting ? { status: "done", meetingId: meeting.id } : { status: "error", message: "这段录音正在另一个标签页里上传。" } }),
+      set(id, {
+        rec,
+        state: meeting
+          ? { status: "done", meetingId: meeting.id }
+          : { status: "error", message: tr("这段录音正在另一个标签页里上传。", "This recording is already being uploaded in another tab.") },
+      }),
     )
     .catch((e: unknown) => set(id, { rec, state: { status: "error", message: errorMessage(e) } }))
     .finally(() => refresh(id));

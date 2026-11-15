@@ -3,7 +3,7 @@ import type { KeyboardEvent, ReactNode } from "react";
 import type { Segment } from "../api/client";
 import { Input, Spinner } from "../components/ui";
 import { tr, useLang } from "../i18n/react";
-import { clock, needsSpace, speakerColor, speakerName } from "../lib/format";
+import { clock, highlightPieces, includesFold, needsSpace, speakerColor, speakerName } from "../lib/format";
 
 /** 段落里相邻两句隔得超过这么多秒，就另起一段 */
 const PARAGRAPH_GAP = 2.5;
@@ -114,7 +114,7 @@ export function TranscriptPane({
     );
   };
 
-  const shown = keyword ? segments.map((seg, index) => ({ seg, index })).filter(({ seg }) => seg.text.includes(keyword)) : [];
+  const shown = keyword ? segments.map((seg, index) => ({ seg, index })).filter(({ seg }) => includesFold(seg.text, keyword)) : [];
 
   return (
     <div className="flex flex-col gap-2 px-4 pb-6 pt-4">
@@ -180,16 +180,18 @@ function Row({ speaker, start, names, children }: { speaker: number; start: numb
 
 function Highlight({ text, keyword }: { text: string; keyword: string }) {
   if (!keyword) return <>{text}</>;
-  const parts = text.split(keyword);
+  const parts = highlightPieces(text, keyword);
   return (
     <>
-      {parts.map((part, i) => (
-        // 片段的顺序固定，用下标当 key 没问题
-        <span key={i}>
-          {i > 0 && <mark className="rounded-sm bg-[#ffe58a] px-px text-ink">{keyword}</mark>}
-          {part}
-        </span>
-      ))}
+      {parts.map((part, i) =>
+        part.mark ? (
+          <mark key={i} className="rounded-sm bg-[#ffe58a] px-px text-ink">
+            {part.text}
+          </mark>
+        ) : (
+          <Fragment key={i}>{part.text}</Fragment>
+        ),
+      )}
     </>
   );
 }

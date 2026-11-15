@@ -8,7 +8,8 @@ import type { Citation, Meeting, Segment, User } from "../api/client";
 import { LocalRecordingCard, useLocalItems } from "../components/LocalRecordings";
 import { Button, buttonClass, Card, Chip, Field, Icon, Input, Notice, ProgressBar, Spinner } from "../components/ui";
 import { tr, useLang } from "../i18n/react";
-import { clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
+import { asrLanguageLabel, clock, dateTime, duration, SOURCE_LABEL, speakerColor, speakerName, STAGE_LABEL } from "../lib/format";
+import type { MeetingASRLanguage } from "../lib/format";
 import { citeJump, LEAD_IN, parseJump, withoutJump } from "../lib/jump";
 import { waitingForRecording, writingMinutesOnly } from "../lib/meetingStatus";
 import { session, SLICE_MS, useRecording } from "../lib/recording/session";
@@ -25,7 +26,7 @@ import { LatestWebhookSends, useMeetingWebhooks, WebhookShareDialog } from "./We
 import { meetingChip } from "./Meetings";
 import { MinutesPane } from "./MinutesPane";
 import { TranscriptPane } from "./TranscriptPane";
-import { SpeakerCountSelect } from "./UploadDialog";
+import { ASRLanguageSelect, SpeakerCountSelect } from "./UploadDialog";
 
 const isActive = (m: Meeting | undefined) => m?.status === "queued" || m?.status === "processing";
 
@@ -290,11 +291,20 @@ export function MeetingDetailPage({
                 </button>
               ))}
             </div>
-            {tab === "transcript" && (m.asr_engine || (m.can_edit && m.has_audio)) && (
+            {tab === "transcript" && (m.asr_engine || m.language || (m.can_edit && m.has_audio)) && (
               <div className="flex items-center gap-3 py-1.5">
-                {m.asr_engine && (
+                {(m.asr_engine || m.language) && (
                   <span className="text-xs text-muted">
-                    {m.asr_engine === "deepseek" ? tr("DeepSeek 在线识别", "DeepSeek Cloud ASR") : tr("本机识别", "Local ASR")}
+                    {[
+                      m.asr_engine
+                        ? m.asr_engine === "deepseek"
+                          ? tr("DeepSeek 在线识别", "DeepSeek Cloud ASR")
+                          : tr("本机识别", "Local ASR")
+                        : "",
+                      m.language ? asrLanguageLabel(m.language, true) : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                   </span>
                 )}
                 {m.can_edit && m.has_audio && <Retranscribe meeting={m} />}
@@ -807,9 +817,15 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
   useLang();
   const [confirming, setConfirming] = useState(false);
   const [speakerCount, setSpeakerCount] = useState(m.speaker_count);
+  const [language, setLanguage] = useState<MeetingASRLanguage>(m.language);
   const run = useMutation({
     mutationFn: () =>
-      unwrap(api.POST("/api/meetings/{id}/retranscribe", { params: { path: { id: m.id } }, body: { speaker_count: speakerCount } })),
+      unwrap(
+        api.POST("/api/meetings/{id}/retranscribe", {
+          params: { path: { id: m.id } },
+          body: { speaker_count: speakerCount, language },
+        }),
+      ),
     onSuccess: (updated) => {
       setConfirming(false);
       queryClient.setQueryData(["meeting", m.id], updated);
@@ -825,6 +841,7 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
         disabled={busy}
         onClick={() => {
           setSpeakerCount(m.speaker_count);
+          setLanguage(m.language);
           setConfirming(true);
         }}
       >
@@ -841,16 +858,28 @@ function Retranscribe({ meeting: m }: { meeting: Meeting }) {
           "Re-transcribes from the audio using the current recognition model and generates a new minutes version (previous versions are kept). Long meetings may take a few minutes; existing transcript and minutes remain available while processing or if it fails.",
         )}
       </span>
-      <Field
-        label={tr("说话人数", "Speaker count")}
-        htmlFor="retranscribe-speakers"
-        hint={tr(
-          "说话人分得不对（分多了或者几个人混在一起）时，选上有几个人说话再转写",
-          "If speaker separation was inaccurate (too many or merged speakers), specify the number of speakers before re-transcribing",
-        )}
-      >
-        <SpeakerCountSelect id="retranscribe-speakers" className="sm:w-48" value={speakerCount} onChange={setSpeakerCount} disabled={run.isPending} />
-      </Field>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field
+          label={tr("识别语言", "Recognition language")}
+          htmlFor="retranscribe-language"
+          hint={tr(
+            "多语种或粤/日/韩/英会议选「自动识别」或对应语言；纯普通话会议固定选「中文」",
+            "Pick \"Auto-detect\" or the target language for multilingual / Cantonese / Japanese / Korean / English meetings",
+          )}
+        >
+          <ASRLanguageSelect id="retranscribe-language" className="sm:w-64" value={language} onChange={setLanguage} disabled={run.isPending} />
+        </Field>
+        <Field
+          label={tr("说话人数", "Speaker count")}
+          htmlFor="retranscribe-speakers"
+          hint={tr(
+            "说话人分得不对（分多了或者几个人混在一起）时，选上有几个人说话再转写",
+            "If speaker separation was inaccurate (too many or merged speakers), specify the number of speakers before re-transcribing",
+          )}
+        >
+          <SpeakerCountSelect id="retranscribe-speakers" className="sm:w-48" value={speakerCount} onChange={setSpeakerCount} disabled={run.isPending} />
+        </Field>
+      </div>
       {run.isError && <Notice tone="bad">{errorMessage(run.error)}</Notice>}
       <span className="flex gap-2">
         <Button size="sm" variant="primary" disabled={run.isPending} onClick={() => run.mutate()}>

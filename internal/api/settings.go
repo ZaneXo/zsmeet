@@ -184,6 +184,7 @@ func (h *Handlers) PutRetention(ctx context.Context, in *RetentionInput) (*Reten
 
 type ASRSettings struct {
 	Provider string `json:"provider" enum:"local,deepseek" doc:"语音识别方式：本机识别（默认，录音不出服务器），或者 DeepSeek 在线识别"`
+	Language string `json:"language" enum:"auto,zh,en,yue,ja,ko" doc:"团队默认的识别语言：auto 是自动识别多语种与混合语音（默认），其余是固定单种语言（普通话、英语、粤语、日语、韩语）"`
 	BaseURL  string `json:"base_url" doc:"DeepSeek 在线识别接口地址"`
 	// 已保存的 Key 不会返回给网页，只说有没有
 	APIKeySet   bool       `json:"api_key_set" doc:"是否已经保存了 API Key；Key 本身不会返回"`
@@ -202,6 +203,7 @@ func toASRSettings(ctx context.Context, cfg service.ASRSettings) *ASRSettingsOut
 	}
 	return &ASRSettingsOutput{Body: ASRSettings{
 		Provider:    provider,
+		Language:    cfg.EffectiveLanguage(),
 		BaseURL:     cfg.EffectiveURL(),
 		APIKeySet:   cfg.APIKey != "",
 		LastError:   i18n.TranslateMessage(i18n.FromContext(ctx), cfg.LastError),
@@ -229,6 +231,7 @@ func (h *Handlers) GetASRSettings(ctx context.Context, _ *struct{}) (*ASRSetting
 type ASRSettingsInput struct {
 	Body struct {
 		Provider    string `json:"provider" enum:"local,deepseek" doc:"local 是本机识别，deepseek 是 DeepSeek 在线识别"`
+		Language    string `json:"language,omitempty" enum:"auto,zh,en,yue,ja,ko" doc:"团队默认的识别语言；不填时沿用已保存的设置"`
 		BaseURL     string `json:"base_url,omitempty" maxLength:"500" doc:"DeepSeek 在线识别接口地址，留空用默认地址"`
 		APIKey      string `json:"api_key,omitempty" maxLength:"500" doc:"留空表示沿用已保存的 Key"`
 		ClearAPIKey bool   `json:"clear_api_key,omitempty" doc:"是否清除已保存的 API Key（切回本机识别时可选）"`
@@ -238,6 +241,7 @@ type ASRSettingsInput struct {
 func (in *ASRSettingsInput) toService() service.ASRInput {
 	return service.ASRInput{
 		Provider:    in.Body.Provider,
+		Language:    in.Body.Language,
 		BaseURL:     in.Body.BaseURL,
 		APIKey:      in.Body.APIKey,
 		ClearAPIKey: in.Body.ClearAPIKey,

@@ -58,7 +58,9 @@ func setup(ctx context.Context) (*deps, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &deps{cfg: cfg, pool: pool, store: store, settings: settings.New(sqlc.New(pool), box)}, nil
+	st := settings.New(sqlc.New(pool), box)
+	st.DefaultASRLanguage = cfg.ASRLanguage
+	return &deps{cfg: cfg, pool: pool, store: store, settings: st}, nil
 }
 
 func serve(ctx context.Context) error {

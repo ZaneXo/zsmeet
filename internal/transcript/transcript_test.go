@@ -85,9 +85,15 @@ func TestMergeBreaksAtMarks(t *testing.T) {
 }
 
 func TestMergeJoinsEnglishWithSpace(t *testing.T) {
-	segs := []Segment{{Start: 0, End: 1, Text: "Hello."}, {Start: 1.1, End: 2, Text: "How are you?"}, {Start: 2.1, End: 3, Text: "好的。"}}
-	if got := Merge(segs, 1, 100, nil); len(got) != 1 || got[0].Text != "Hello. How are you?好的。" {
-		t.Errorf("英文句子之间要有空格，中文直接接上：%+v", got)
+	segs := []Segment{
+		{Start: 0, End: 1, Text: "Hello."},
+		{Start: 1.1, End: 2, Text: "How are you?"},
+		{Start: 2.1, End: 3, Text: "好的。"},
+		{Start: 3.1, End: 4, Text: "안녕하세요."},
+		{Start: 4.1, End: 5, Text: "오늘 회의를 시작하겠습니다."},
+	}
+	if got := Merge(segs, 1, 100, nil); len(got) != 1 || got[0].Text != "Hello. How are you?好的。안녕하세요. 오늘 회의를 시작하겠습니다." {
+		t.Errorf("英文、韩文句子之间要有空格，中文直接接上：%+v", got)
 	}
 }
 

@@ -1,6 +1,6 @@
 -- name: CreateMeeting :one
-INSERT INTO meetings (owner_id, title, source, template, hotwords, visibility, speaker_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO meetings (owner_id, title, source, template, hotwords, visibility, speaker_count, language)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 
 -- name: GetMeeting :one
@@ -192,6 +192,10 @@ UPDATE meetings SET asr_engine = $2, asr_warning = $3, updated_at = now() WHERE 
 -- name: SetMeetingSpeakerCount :exec
 -- 改这场会议有几个人说话（0 是自动区分），下次转写时用
 UPDATE meetings SET speaker_count = $2 WHERE id = $1;
+
+-- name: SetMeetingLanguage :exec
+-- 改这场会议指定的识别语言（'' 是跟随团队默认），下次转写时用
+UPDATE meetings SET language = $2 WHERE id = $1;
 
 -- name: TrashMeeting :one
 -- 放进回收站

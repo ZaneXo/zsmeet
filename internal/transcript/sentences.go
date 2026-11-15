@@ -33,7 +33,7 @@ func Sentences(tokens []Token, offset, end float64) []Segment {
 	var b strings.Builder
 	first := -1 // 这一句第一个字的下标
 	flush := func(next int) {
-		text := strings.TrimSpace(b.String())
+		text := collapseCJKSpaces(strings.TrimSpace(b.String()))
 		b.Reset()
 		if text != "" && first >= 0 {
 			stop := end
@@ -97,4 +97,51 @@ func isPunct(s string) bool {
 		}
 	}
 	return true
+}
+
+// collapseCJKSpaces 去掉日文分词里夹在汉字、假名和全角标点之间的空格（SenseVoice 识别日文时在词组之间会输出单独的空格），
+// 但保留英文、数字和韩文（Hangul）词间的空格，也保留中/日文与英文、数字之间的空格。
+func collapseCJKSpaces(s string) string {
+	if !strings.ContainsRune(s, ' ') {
+		return s
+	}
+	runes := []rune(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(runes); {
+		if runes[i] != ' ' {
+			b.WriteRune(runes[i])
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(runes) && runes[j] == ' ' {
+			j++
+		}
+		if i > 0 && j < len(runes) {
+			prev, next := runes[i-1], runes[j]
+			if isNoSpaceCJK(prev) && isNoSpaceCJK(next) && (isHanOrKana(prev) || isHanOrKana(next)) {
+				i = j
+				continue
+			}
+		}
+		b.WriteByte(' ')
+		i = j
+	}
+	return b.String()
+}
+
+func isHanOrKana(r rune) bool {
+	return unicode.Is(unicode.Han, r) || unicode.In(r, unicode.Hiragana, unicode.Katakana)
+}
+
+func isNoSpaceCJK(r rune) bool {
+	if isHanOrKana(r) {
+		return true
+	}
+	switch r {
+	case '、', '。', '，', '？', '！', '：', '；', '「', '」', '『', '』', '（', '）', '《', '》':
+		return true
+	}
+	return false
 }

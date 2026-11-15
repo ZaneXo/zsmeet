@@ -6,7 +6,8 @@ import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import { Button, Field, Icon, Input, Modal, Notice, ProgressBar, Select } from "../components/ui";
 import { isEn } from "../i18n/lang";
 import { tr, useLang } from "../i18n/react";
-import { fileSize } from "../lib/format";
+import { ASR_LANGUAGES, asrLanguageLabel, fileSize } from "../lib/format";
+import type { MeetingASRLanguage } from "../lib/format";
 import { MAX_UPLOAD_BYTES, uploadFile } from "../lib/upload";
 
 /** 新建会议时选谁能看。指定具体的人在建好以后的会议页面上设置。 */
@@ -77,6 +78,49 @@ export function SpeakerCountField({ id, value, onChange, disabled }: {
   );
 }
 
+/** 选单场会议的识别语言：留空跟随团队默认设置，也可以为这场会议单独指定自动多语种或固定语言。 */
+export function ASRLanguageSelect({ id, value, onChange, disabled, className }: {
+  id: string;
+  value: MeetingASRLanguage;
+  onChange: (v: MeetingASRLanguage) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  useLang();
+  return (
+    <Select id={id} className={className} value={value} onChange={(e) => onChange(e.target.value as MeetingASRLanguage)} disabled={disabled}>
+      <option value="">{asrLanguageLabel("")}</option>
+      {ASR_LANGUAGES.map((code) => (
+        <option key={code} value={code}>
+          {asrLanguageLabel(code)}
+        </option>
+      ))}
+    </Select>
+  );
+}
+
+/** 新建会议时选识别语言。默认跟随团队设置（自动多语种与混合语音）。 */
+export function ASRLanguageField({ id, value, onChange, disabled }: {
+  id: string;
+  value: MeetingASRLanguage;
+  onChange: (v: MeetingASRLanguage) => void;
+  disabled?: boolean;
+}) {
+  useLang();
+  return (
+    <Field
+      label={tr("识别语言", "Recognition language")}
+      htmlFor={id}
+      hint={tr(
+        "默认按团队设置（自动识别普通话、粤语、英语、日语、韩语及混说）；纯单语种会议也可以直接指定，转写完还能改了重新转写",
+        "Follows team default (auto-detects Mandarin, Cantonese, English, Japanese, Korean & mixed speech); pin a single language if preferred, or change later via re-transcribe",
+      )}
+    >
+      <ASRLanguageSelect id={id} className="sm:w-72" value={value} onChange={onChange} disabled={disabled} />
+    </Field>
+  );
+}
+
 export function useTemplates() {
   return useQuery({
     queryKey: ["templates"],
@@ -100,6 +144,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
   const [hotwords, setHotwords] = useState("");
   const [visibility, setVisibility] = useState<"team" | "private">("team");
   const [speakerCount, setSpeakerCount] = useState(0);
+  const [language, setLanguage] = useState<MeetingASRLanguage>("");
   const [dragging, setDragging] = useState(false);
   const [sent, setSent] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -136,7 +181,9 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
     abort.current = controller;
     try {
       const meeting = await unwrap(
-        api.POST("/api/meetings", { body: { title, source: "upload", template, hotwords, visibility, speaker_count: speakerCount } }),
+        api.POST("/api/meetings", {
+          body: { title, source: "upload", template, hotwords, visibility, speaker_count: speakerCount, language: language || undefined },
+        }),
       );
       const chunks = await uploadFile(meeting.id, file, setSent, controller.signal);
       await unwrap(api.POST("/api/meetings/{id}/complete", { params: { path: { id: meeting.id } }, body: { chunks } }));
@@ -226,6 +273,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
         <p className="-mt-2 text-xs leading-relaxed text-muted">
           {tr("热词会交给大模型，纪要里这些词被识别成近音字时会纠正过来。", "Hotwords are passed to the LLM to correct homophone errors in generated minutes.")}
         </p>
+        <ASRLanguageField id="up-language" value={language} onChange={setLanguage} disabled={busy} />
         <SpeakerCountField id="up-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={busy} />
         <VisibilityField id="up-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 

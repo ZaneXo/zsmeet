@@ -47,6 +47,7 @@ var errSuperseded = errors.New("会议已被新的任务接手")
 // recognizer 是处理流程需要识别引擎做的几件事。
 // 测试里用假的替换，不用加载几百 MB 的模型。
 type recognizer interface {
+	SetLanguage(lang string)
 	Transcribe(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error)
 	TranscribeDetailed(ctx context.Context, samples []float32, progress func(float64)) ([]transcript.Speech, error)
 	// speakers 大于 0 时按这个人数区分说话人，0 是自动区分

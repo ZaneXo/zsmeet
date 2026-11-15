@@ -188,9 +188,62 @@ export function pieces(text: string, words: string[]): Piece[] {
   return out;
 }
 
-/** 两句接在一起时中间要不要空一格：英文的两句之间要，中文直接接上（和后端 transcript.joinText 一致）。 */
+/** 语音识别支持的语言：auto 自动识别多语种与混说，其余固定单语种。单场会议留空表示跟随团队默认。 */
+export type ASRLanguage = "auto" | "zh" | "en" | "yue" | "ja" | "ko";
+export type MeetingASRLanguage = "" | ASRLanguage;
+
+export const ASR_LANGUAGES: readonly ASRLanguage[] = ["auto", "zh", "en", "yue", "ja", "ko"];
+
+export function asrLanguageLabel(lang: MeetingASRLanguage, short = false): string {
+  switch (lang) {
+    case "":
+      return tr("跟随团队默认", "Follow team default");
+    case "auto":
+      return short ? tr("自动识别多语种", "Multilingual auto") : tr("自动识别（多语种与混合语音）", "Auto-detect (multilingual & mixed)");
+    case "zh":
+      return short ? tr("中文", "Chinese") : tr("中文（普通话，含中英夹杂）", "Chinese (Mandarin, incl. English terms)");
+    case "en":
+      return tr("英语", "English");
+    case "yue":
+      return short ? tr("粤语", "Cantonese") : tr("粤语（广东话）", "Cantonese");
+    case "ja":
+      return tr("日语", "Japanese");
+    case "ko":
+      return tr("韩语", "Korean");
+  }
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 页内搜索：大小写不敏感地判断 text 里是否包含 keyword。 */
+export function includesFold(text: string, keyword: string): boolean {
+  if (!keyword) return true;
+  return new RegExp(escapeRegExp(keyword), "i").test(text);
+}
+
+/** 页内搜索高亮：大小写不敏感切分，并保留原文里的大小写。 */
+export function highlightPieces(text: string, keyword: string): Piece[] {
+  if (!keyword) return text ? [{ text, mark: false }] : [];
+  const re = new RegExp(escapeRegExp(keyword), "gi");
+  const out: Piece[] = [];
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    const at = m.index ?? 0;
+    if (at > last) out.push({ text: text.slice(last, at), mark: false });
+    out.push({ text: m[0], mark: true });
+    last = at + m[0].length;
+  }
+  if (last < text.length) out.push({ text: text.slice(last), mark: false });
+  return out;
+}
+
+const WORD_SPACE_RE = /[\x00-\x7f\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f]/;
+
+/** 两句接在一起时中间要不要空一格：英文、韩文的两句之间要，中文、日文直接接上（和后端 transcript.joinText 一致）。 */
 export function needsSpace(before: string, after: string): boolean {
   const last = before.at(-1) ?? "";
   const next = after[0] ?? "";
-  return last !== "" && next !== "" && last < "\x80" && next < "\x80" && last !== " " && next !== " ";
+  return last !== "" && next !== "" && last !== " " && next !== " " && WORD_SPACE_RE.test(last) && WORD_SPACE_RE.test(next);
 }

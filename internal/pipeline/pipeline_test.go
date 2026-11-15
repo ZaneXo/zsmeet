@@ -54,6 +54,12 @@ type fakeEngine struct {
 	segs []transcript.Segment
 	// 最后一次区分说话人时要求分成几个人（0 是自动区分）
 	speakers atomic.Int32
+	// 最后一次转写前设置的识别语言
+	language atomic.Pointer[string]
+}
+
+func (e *fakeEngine) SetLanguage(lang string) {
+	e.language.Store(&lang)
 }
 
 func (e *fakeEngine) Transcribe(_ context.Context, samples []float32, progress func(float64)) ([]transcript.Segment, error) {
@@ -973,5 +979,43 @@ func TestOnlineASRAndFallback(t *testing.T) {
 	}
 	if st, err := e.w.settings.ASRStatus(t.Context()); err != nil || st.LastError != "" {
 		t.Fatalf("重新转写成功后应该清掉设置里的最近一次错误：%+v %v", st, err)
+	}
+}
+
+// 识别语言的优先级：会议单独指定的语言 > 团队默认语言 > 默认的 auto。
+func TestASRLanguagePriority(t *testing.T) {
+	e := newEnv(t)
+
+	// 1. 什么都没设：走默认 auto
+	a1 := e.upload(wav())
+	if err := e.work(a1); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.engine.language.Load(); got == nil || *got != "auto" {
+		t.Fatalf("默认应为 auto，实际 %v", got)
+	}
+
+	// 2. 团队默认改成 yue，未指定语言的会议走 yue
+	if err := e.w.settings.SaveASR(t.Context(), settings.ASR{Provider: settings.ASRLocal, Language: "yue"}); err != nil {
+		t.Fatal(err)
+	}
+	a2 := e.upload(wav())
+	if err := e.work(a2); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.engine.language.Load(); got == nil || *got != "yue" {
+		t.Fatalf("跟随团队默认应为 yue，实际 %v", got)
+	}
+
+	// 3. 会议单独指定 ja，优先于团队默认的 yue
+	a3 := e.upload(wav())
+	if err := e.q.SetMeetingLanguage(t.Context(), sqlc.SetMeetingLanguageParams{ID: a3.MeetingID, Language: "ja"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.work(a3); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.engine.language.Load(); got == nil || *got != "ja" {
+		t.Fatalf("单场会议指定 ja 应覆盖团队默认，实际 %v", got)
 	}
 }

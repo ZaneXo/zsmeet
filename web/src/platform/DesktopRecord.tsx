@@ -9,7 +9,8 @@ import { Button, buttonClass, Card, Field, Icon, Input, Notice, Select } from ".
 import { isEn } from "../i18n/lang";
 import { tr, useLang } from "../i18n/react";
 import { hms } from "../lib/format";
-import { SpeakerCountField, useTemplates, VisibilityField } from "../pages/UploadDialog";
+import type { MeetingASRLanguage } from "../lib/format";
+import { ASRLanguageField, SpeakerCountField, useTemplates, VisibilityField } from "../pages/UploadDialog";
 import { UploadRow } from "./DesktopRecordings";
 import { useOffline } from "./offline";
 import {
@@ -156,6 +157,7 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
   const [hotwords, setHotwords] = useState("");
   const [visibility, setVisibility] = useState<"team" | "private">("team");
   const [speakerCount, setSpeakerCount] = useState(0);
+  const [language, setLanguage] = useState<MeetingASRLanguage>("");
   const [chosen, setChosen] = useState(loadSources);
   const [echoCancel, setEchoCancel] = useEchoCancel();
   const sources = { ...chosen, mic: effectiveMic(chosen.mic, devices.data) };
@@ -164,7 +166,9 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
   const start = useMutation({
     mutationFn: async () => {
       const meeting = await unwrap(
-        api.POST("/api/meetings", { body: { title, source: "desktop", template, hotwords, visibility, speaker_count: speakerCount } }),
+        api.POST("/api/meetings", {
+          body: { title, source: "desktop", template, hotwords, visibility, speaker_count: speakerCount, language: language || undefined },
+        }),
       );
       await startRecorder(meeting.id, sources, echoCancel, true);
     },
@@ -211,6 +215,7 @@ function Setup({ starting, warnings }: { starting: boolean; warnings: RecorderWa
             />
           </Field>
         </div>
+        <ASRLanguageField id="rec-language" value={language} onChange={setLanguage} disabled={busy} />
         <SpeakerCountField id="rec-speakers" value={speakerCount} onChange={setSpeakerCount} disabled={busy} />
         <VisibilityField id="rec-visibility" value={visibility} onChange={setVisibility} disabled={busy} />
 

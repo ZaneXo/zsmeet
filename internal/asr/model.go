@@ -48,8 +48,8 @@ func SenseVoiceFile(model, tokens string, threads int, language string) Model {
 	// SenseVoice 自己会加标点、把数字写成阿拉伯数字（use ITN），并给出每个字的时间，
 	// 所以不再需要单独的标点模型，句子也能按标点切得很准
 	sv.Model = model
-	// 固定成中文时，夹在中文里的英文照样认得出来；auto 会把很短的「嗯」「哦」认成日文
-	sv.Language = language
+	// auto 自动识别普通话、粤语、英语、日语、韩语及混合语音（短语气词的误判在 Transcriber 里做二遍抑制）
+	sv.Language = cmp.Or(language, "auto")
 	sv.UseInverseTextNormalization = 1
 	m.config.ModelConfig.Tokens = tokens
 	return m

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -48,6 +49,8 @@ func (l LLM) Context() int {
 type Store struct {
 	q   *sqlc.Queries
 	box *secret.Box
+	// 管理员还没在网页上保存过语音识别设置时用的默认识别语言（来自环境变量 ZSMEET_ASR_LANGUAGE）；为空时按 DefaultASRLanguage
+	DefaultASRLanguage string
 }
 
 func New(q *sqlc.Queries, box *secret.Box) *Store {
@@ -56,7 +59,7 @@ func New(q *sqlc.Queries, box *secret.Box) *Store {
 
 // WithTx 返回在事务里读写的 Store（q 是 sqlc.Queries.WithTx 得到的）：拿着锁读、写设置时用，读到的和锁保护的改动在同一个事务里。
 func (s *Store) WithTx(q *sqlc.Queries) *Store {
-	return &Store{q: q, box: s.box}
+	return &Store{q: q, box: s.box, DefaultASRLanguage: s.DefaultASRLanguage}
 }
 
 // Box 是加密凭证的那把钥匙。用飞书登录时，暂存在浏览器里的 state 也用它加密（见 secret.Box.SealFor）。
@@ -332,22 +335,44 @@ func (s *Store) Open(sealed string) (string, error) {
 	return s.box.Open(sealed)
 }
 
-// 语音识别的两种方式。
+// 语音识别的两种方式和可选语言。
 const (
 	ASRLocal    = "local"
 	ASRDeepSeek = "deepseek"
+
+	// DefaultASRLanguage 是默认的识别语言：自动识别多语种与混合语音。
+	DefaultASRLanguage = "auto"
 
 	// DefaultASRBaseURL 是 DeepSeek 在线语音识别接口的默认地址。
 	DefaultASRBaseURL = "https://api.deepseek.com/v1/tools/asr"
 )
 
+// ASRLanguages 是支持的识别语言：auto 是自动识别多语种与混合语音，其余是固定单种语言。
+var ASRLanguages = []string{"auto", "zh", "en", "yue", "ja", "ko"}
+
 // ASR 是团队级的语音识别配置。默认只用服务器本机识别（Provider 为 "local"），录音不外发；
 // 打开 "deepseek" 后，录音切成小段发给 DeepSeek 在线识别，本机 SenseVoice 仍同时运行以提供字级时间并在失败时兜底。
 type ASR struct {
 	Provider string `json:"provider"`
+	Language string `json:"language,omitempty"`
 	BaseURL  string `json:"base_url,omitempty"`
 	// 加密后保存
 	APIKey string `json:"api_key,omitempty"`
+}
+
+// EffectiveLanguage 返回团队默认的识别语言。
+func (a ASR) EffectiveLanguage() string {
+	if slices.Contains(ASRLanguages, a.Language) {
+		return a.Language
+	}
+	return DefaultASRLanguage
+}
+
+func (s *Store) defaultLanguage() string {
+	if slices.Contains(ASRLanguages, s.DefaultASRLanguage) {
+		return s.DefaultASRLanguage
+	}
+	return DefaultASRLanguage
 }
 
 // EffectiveURL 返回在线识别实际请求的接口地址。
@@ -385,7 +410,7 @@ func (s *Store) ASR(ctx context.Context) (ASR, error) {
 func (s *Store) ASRWithTime(ctx context.Context) (ASR, time.Time, error) {
 	row, err := s.q.GetSettingWithTime(ctx, keyASR)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ASR{Provider: ASRLocal, BaseURL: DefaultASRBaseURL}, time.Time{}, nil
+		return ASR{Provider: ASRLocal, Language: s.defaultLanguage(), BaseURL: DefaultASRBaseURL}, time.Time{}, nil
 	}
 	if err != nil {
 		return ASR{}, time.Time{}, err
@@ -396,6 +421,9 @@ func (s *Store) ASRWithTime(ctx context.Context) (ASR, time.Time, error) {
 	}
 	if a.Provider == "" {
 		a.Provider = ASRLocal
+	}
+	if !slices.Contains(ASRLanguages, a.Language) {
+		a.Language = s.defaultLanguage()
 	}
 	if a.BaseURL == "" {
 		a.BaseURL = DefaultASRBaseURL
@@ -408,6 +436,9 @@ func (s *Store) ASRWithTime(ctx context.Context) (ASR, time.Time, error) {
 func (s *Store) SaveASR(ctx context.Context, a ASR) error {
 	if a.Provider == "" {
 		a.Provider = ASRLocal
+	}
+	if !slices.Contains(ASRLanguages, a.Language) {
+		a.Language = s.defaultLanguage()
 	}
 	a.BaseURL = strings.TrimRight(strings.TrimSpace(a.BaseURL), "/")
 	if a.BaseURL == "" {

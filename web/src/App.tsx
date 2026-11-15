@@ -21,6 +21,8 @@ export function useStatus() {
   return useQuery({
     queryKey: ["status"],
     queryFn: () => unwrap(api.GET("/api/status")),
+    // 管理员在浏览器里改完大模型、飞书或声纹设置再切回桌面版（或另一个标签页）时，自动刷新状态
+    refetchOnWindowFocus: true,
   });
 }
 

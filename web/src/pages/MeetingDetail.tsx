@@ -18,6 +18,7 @@ import { chunksFlowing, contiguous, lastReceived, receivedSeconds } from "../lib
 import type { RecordingSource } from "../lib/unfinishedRecording";
 import { useTicker } from "../lib/useTicker";
 import { isDesktop, mediaUrl, subscribe } from "../platform";
+import { AdminSettingsLink } from "../platform/AdminSettingsLink";
 import { ThisComputerRecording } from "../platform/DesktopRecordings";
 import { DownloadLink } from "../platform/DownloadLink";
 import { AccessDialog, VISIBILITY_LABEL } from "./AccessDialog";
@@ -1049,9 +1050,9 @@ function Speakers({ meeting: m, segments, voiceprints, isAdmin }: { meeting: Mee
           {isAdmin ? (
             <>
               {tr("在", "Enable voiceprints in ")}
-              <AppLink to="/settings/voiceprints" className="text-brand hover:text-brand-hover">
+              <AdminSettingsLink to="/settings/voiceprints" className="text-brand hover:text-brand-hover">
                 {tr("「设置 → 声纹」", "Settings → Voiceprints")}
-              </AppLink>
+              </AdminSettingsLink>
               {tr("里打开以后，改过名的人在之后的会议里能按声音自动认出。", " to automatically recognize named speakers by voice in future meetings.")}
             </>
           ) : (

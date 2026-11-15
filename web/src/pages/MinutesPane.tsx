@@ -1,7 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
-import { AppLink } from "../components/AppLink";
 import remarkGfm from "remark-gfm";
 import { api, errorMessage, queryClient, unwrap } from "../api/client";
 import type { Meeting, MinutesVersion } from "../api/client";
@@ -9,6 +8,8 @@ import { Button, Icon, Notice, Select, Spinner } from "../components/ui";
 import { isEn } from "../i18n/lang";
 import { tr, useLang } from "../i18n/react";
 import { dateTime, parseClock, VERSION_SOURCE_LABEL } from "../lib/format";
+import { isDesktop } from "../platform";
+import { AdminSettingsLink } from "../platform/AdminSettingsLink";
 import { useTemplates } from "./UploadDialog";
 
 // 纪要里的时间点，如 [12:34] 或 [1:02:03]。后面紧跟括号的是已有的 Markdown 链接，不动它
@@ -111,9 +112,9 @@ export function MinutesPane({ meeting, hasTranscript, llmReady, isAdmin, canSeek
                     )}
             </span>
             {isAdmin && (
-              <AppLink to="/settings/llm" className="font-medium text-brand hover:text-brand-hover">
-                {tr("去配置大模型", "Configure LLM")}
-              </AppLink>
+              <AdminSettingsLink to="/settings/llm" className="font-medium text-brand hover:text-brand-hover">
+                {isDesktop ? tr("在网页里配置大模型 ↗", "Configure LLM in browser ↗") : tr("去配置大模型", "Configure LLM")}
+              </AdminSettingsLink>
             )}
           </>
         ) : !meeting.can_edit ? (

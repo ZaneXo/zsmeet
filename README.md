@@ -69,7 +69,13 @@ docker compose pull && docker compose up -d --no-build
 
 ### 2. 安装 macOS 桌面版（可选）
 
-要连同飞书、腾讯会议、Zoom 里对方的声音一起录，到 [Releases](https://github.com/ZaneXo/zsmeet/releases) 下载 `desktop-v*` 下的 `.dmg` 安装包（macOS 14.4 及以上，Apple 芯片和 Intel 通用），把 zsmeet 拖进「应用程序」，打开后填上服务器地址登录就能用。第一次打开的放行和录音权限见[桌面版](docs/desktop-guide.md)。
+要连同飞书、腾讯会议、Zoom 里对方的声音一起录（macOS 14.4 及以上，Apple 芯片和 Intel 通用），用 Homebrew 一行安装：
+
+```bash
+brew install --cask zanexo/tap/zsmeet
+```
+
+也可以到 [Releases](https://github.com/ZaneXo/zsmeet/releases) 下载 `desktop-v*` 下的 `.dmg` 拖进「应用程序」。打开后填上服务器地址登录就能用；手动装 DMG 的首次打开放行和录音权限见[桌面版](docs/desktop-guide.md)。
 
 ## 文档
 

@@ -21,6 +21,7 @@
 # 更新密钥（Settings → Secrets and variables → Actions → Repository secrets）：
 #   TAURI_SIGNING_PRIVATE_KEY           tauri signer generate 生成的私钥（私钥文件的内容）
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  生成私钥时设的密码
+#   HOMEBREW_TAP_DEPLOY_KEY             （可选）对 <owner>/homebrew-tap 有写权限的 Deploy Key 私钥，用来同步更新 Casks/zsmeet.rb
 # 对应的公钥是 desktop/src-tauri/tauri.conf.json 里的 plugins.updater.pubkey。私钥只交给打包时「打包并签名更新包」这一步，
 # 那个 job 没有写仓库的权限；能写 Release 的 publish 拿不到私钥。私钥丢了或者换了，装着旧版本的人收不到之后的更新，
 # 只能自己下载新版本装一次。
@@ -347,6 +348,14 @@ jobs:
             --endpoint "$download/$UPDATE_TAG/latest.json" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --out dist/latest.json
+          # 正式版顺便生成一份 Homebrew Cask（<owner>/homebrew-tap 的 Casks/zsmeet.rb）放进产物，publish 直接提交
+          if [[ "$VERSION" != *-* ]]; then
+            node desktop/scripts/homebrew-cask.mjs \
+              --version "$VERSION" \
+              --dmg "dist/$name.dmg" \
+              --repo "$GITHUB_REPOSITORY" \
+              --out dist/zsmeet.rb
+          fi
           ls -l dist
           cat dist/latest.json
 
@@ -468,3 +477,45 @@ jobs:
             echo "- Release：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
             echo "- 更新清单：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$UPDATE_TAG/latest.json"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 更新 Homebrew Tap
+        if: ${{ !contains(needs.build.outputs.version, '-') }}
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          TAP_REPO: ${{ github.repository_owner }}/homebrew-tap
+          OWNER_LOWER: ${{ github.repository_owner }}
+        run: |
+          if [[ -z "${DEPLOY_KEY//[[:space:]]/}" ]]; then
+            echo "::notice::未配置 HOMEBREW_TAP_DEPLOY_KEY，跳过更新 ${TAP_REPO}"
+            exit 0
+          fi
+          [[ -f dist/zsmeet.rb ]] || { echo "::error::打包结果里没有 dist/zsmeet.rb"; exit 1; }
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          key="$RUNNER_TEMP/ssh/id_ed25519"
+          (umask 077 && printf '%s\n' "$DEPLOY_KEY" > "$key")
+          # 固定 GitHub 官方公布的 Ed25519 主机公钥
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/ssh/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          trap 'rm -rf "$RUNNER_TEMP/ssh"' EXIT
+          rm -rf "$RUNNER_TEMP/tap"
+          git clone --depth 1 "git@github.com:${TAP_REPO}.git" "$RUNNER_TEMP/tap"
+          if [[ -f "$RUNNER_TEMP/tap/Casks/zsmeet.rb" ]]; then
+            current="$(sed -n 's/^ *version "\([^"]*\)".*/\1/p' "$RUNNER_TEMP/tap/Casks/zsmeet.rb" | head -n 1)"
+            if [[ -n "$current" && "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ]]; then
+              echo "::warning::${TAP_REPO} 上已经是更新的 ${current}，不换成 ${VERSION}"
+              exit 0
+            fi
+          fi
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          cp dist/zsmeet.rb "$RUNNER_TEMP/tap/Casks/zsmeet.rb"
+          cd "$RUNNER_TEMP/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/zsmeet.rb
+          if git diff --cached --quiet; then
+            echo "${TAP_REPO} 里的 Casks/zsmeet.rb 已经是 ${VERSION}，不用再提交"
+          else
+            git commit -m "zsmeet ${VERSION}"
+            git push origin HEAD:main
+            echo "- Homebrew：\`brew install --cask ${OWNER_LOWER,,}/tap/zsmeet\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

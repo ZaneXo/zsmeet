@@ -4,9 +4,15 @@ macOS 14.4 及以上，Apple 芯片和 Intel 都能用。它连的是团队自�
 
 ## 安装
 
-在 [Releases](https://github.com/ZaneXo/zsmeet/releases) 里找 `desktop-v` 开头的版本（`v` 开头的是服务器的版本；桌面版不会标成「Latest」，往下翻一翻就能看到），下载 `zsmeet-desktop-<版本号>-macos-universal.dmg`，打开后把 zsmeet 拖进「应用程序」。同一个版本里的 `.app.tar.gz`、`.sig` 和 `latest.json` 是给 App 自动更新用的，不用下载。
+装了 [Homebrew](https://brew.sh) 的话，直接在终端执行一行即可（安装时会自动去掉下载隔离标记，装好直接打开，不用做下面的「第一次打开」放行）：
 
-## 第一次打开
+```bash
+brew install --cask zanexo/tap/zsmeet
+```
+
+也可以手动安装：在 [Releases](https://github.com/ZaneXo/zsmeet/releases) 里找 `desktop-v` 开头的版本（`v` 开头的是服务器的版本；桌面版不会标成「Latest」，往下翻一翻就能看到），下载 `zsmeet-desktop-<版本号>-macos-universal.dmg`，打开后把 zsmeet 拖进「应用程序」。同一个版本里的 `.app.tar.gz`、`.sig` 和 `latest.json` 是给 App 自动更新用的，不用下载。
+
+## 第一次打开（手动安装 DMG 时）
 
 zsmeet 没有苹果的开发者签名，第一次打开时 macOS 会拦住，提示 Apple 无法验证 zsmeet 是否包含恶意软件（各版本 macOS 的说法不太一样）。这样打开：
 
@@ -80,7 +86,7 @@ zsmeet 自己会查有没有新版本（打开后和之后每 6 小时一次）�
 
 1. 先看一眼有没有没传完的录音（页面顶上和菜单栏图标的菜单里会列出来），有的话等它传完：卸载以后就传不上去了。
 2. 在「设置 → 账号」里退出登录，服务器上这台电脑的登录随之作废。忘了这一步也没关系，在网页上「设置 → 账号 → 已登录的 App」里退出它。
-3. 退出 zsmeet（菜单栏图标 →「退出」，或者 ⌘Q），把「应用程序」里的 zsmeet 拖到废纸篓。
+3. 退出 zsmeet（菜单栏图标 →「退出」，或者 ⌘Q），把「应用程序」里的 zsmeet 拖到废纸篓（用 Homebrew 装的也可以执行 `brew uninstall --cask zsmeet`；想连下面这几个本地目录一起清掉用 `brew uninstall --cask --zap zsmeet`）。
 4. 想把这台电脑上的数据也删干净：在访达里按 ⇧⌘G，分别打开下面几个文件夹，把它们拖到废纸篓。
 
    - `~/Library/Application Support/io.github.zanexo.zsmeet`：设置，以及没传完的录音

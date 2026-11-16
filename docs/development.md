@@ -142,7 +142,7 @@ git tag -a desktop-v0.2.0 -m "这一版改了什么"    # 标签的说明就是 
 git push origin desktop-v0.2.0
 ```
 
-Actions（`.github/workflows/desktop.yml`）先核对标签和 App 的版本号，跑完检查和测试，在 macOS 上打一个 Apple 芯片和 Intel 通用的 DMG（ad-hoc 签名，没有苹果的开发者签名，也不做公证），再把 App 打成自动更新用的更新包，用仓库 Secrets 里的更新密钥（`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）签名，用 App 里的公钥核对过以后生成更新清单 `latest.json`。DMG、更新包、签名和 `latest.json` 发到这个标签的 Release 上（不会顶掉服务器版本的「Latest」），`latest.json` 同时换到固定的 Release「desktop-latest」上：装着旧版本的 App 从那里知道有新版本。`desktop-v0.3.0-rc.1` 这样带「-」的预发布版本只发它自己的 Release，App 不会提示更新到它。
+Actions（`.github/workflows/desktop.yml`）先核对标签和 App 的版本号，跑完检查和测试，在 macOS 上打一个 Apple 芯片和 Intel 通用的 DMG（ad-hoc 签名，没有苹果的开发者签名，也不做公证），再把 App 打成自动更新用的更新包，用仓库 Secrets 里的更新密钥（`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）签名，用 App 里的公钥核对过以后生成更新清单 `latest.json`。DMG、更新包、签名和 `latest.json` 发到这个标签的 Release 上（不会顶掉服务器版本的「Latest」），`latest.json` 同时换到固定的 Release「desktop-latest」上：装着旧版本的 App 从那里知道有新版本；配了 `HOMEBREW_TAP_DEPLOY_KEY` 的话还会同步更新 `ZaneXo/homebrew-tap` 里的 `Casks/zsmeet.rb`。`desktop-v0.3.0-rc.1` 这样带「-」的预发布版本只发它自己的 Release，App 不会提示更新到它，也不改 Homebrew Tap。
 
 第一次发布之前，先在 Actions 页面选 Desktop → Run workflow 试运行一次（`dry_run` 默认勾着）：照样打包、签名、核对，只把打出来的文件放在这次运行的 Artifacts 里，什么都不发布，用来确认两个 Secrets 配对了。细节（更新清单的格式、密钥丢了怎么办）见[桌面版的设计](desktop.md#发布和自动更新)。平时改了 `desktop/` 或 `web/` 的 PR 也会跑一遍桌面版的检查和测试。
 

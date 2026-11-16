@@ -18,9 +18,12 @@ test("生成带版本号、SHA-256、去隔离标记与卸载清理路径的 Cas
     rb,
     /url "https:\/\/github\.com\/ZaneXo\/zsmeet\/releases\/download\/desktop-v#\{version\}\/zsmeet-desktop-#\{version\}-macos-universal\.dmg"/,
   );
-  assert.match(rb, /depends_on macos: :sonoma/);
+  assert.match(rb, /MacOSRequirement\.respond_to\?\(:parse\) \? :sonoma : ">= :sonoma"/);
+  assert.match(rb, /if respond_to\?\(:postflight_steps\)/);
   assert.match(rb, /postflight_steps do/);
+  assert.match(rb, /postflight do/);
   assert.match(rb, /com\.apple\.quarantine/);
+  assert.match(rb, /#\{appdir\}\/zsmeet\.app/);
   assert.match(rb, /\{\{appdir\}\}\/zsmeet\.app/);
 });
 

@@ -46,12 +46,18 @@ export function renderHomebrewCask({ version, sha256, repo = "ZaneXo/zsmeet" }) 
   end
 
   auto_updates true
-  depends_on macos: :sonoma
+  depends_on macos: (MacOSRequirement.respond_to?(:parse) ? :sonoma : ">= :sonoma")
 
   app "zsmeet.app"
 
-  postflight_steps do
-    run "xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/zsmeet.app"]
+  if respond_to?(:postflight_steps)
+    postflight_steps do
+      run "xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/zsmeet.app"]
+    end
+  else
+    postflight do
+      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/zsmeet.app"]
+    end
   end
 
   uninstall quit: "io.github.zanexo.zsmeet"
